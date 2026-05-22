@@ -39,6 +39,7 @@ services:
     build:
       context: ./openresty
       dockerfile: Dockerfile
+    user: root
     restart: unless-stopped
     ports:
       - "11434:11434"
@@ -50,7 +51,6 @@ services:
     networks:
       - core_network
       - enhasa_network
-
 
 volumes:
   ollama_data:
