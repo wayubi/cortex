@@ -19,6 +19,7 @@ These tables are at `openresty/coordinator.lua:14-15`. If adding a new backend, 
 
 ## Docker compose commands
 
+- `docker compose --profile managed create` — create containers first time, or after `down -v`
 - `docker compose --profile managed up -d` — start the stack
 - `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
 - `docker compose --profile managed down` — stop backends (OpenResty stays if no profile)
