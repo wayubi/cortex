@@ -1,7 +1,7 @@
 services:
 
   llama-cpp:
-    container_name: llama-cpp
+    profiles: ["managed"]
     runtime: nvidia
     restart: unless-stopped
     image: opencode-llama.cpp:latest
@@ -21,7 +21,7 @@ services:
       - "0.0.0.0"
 
   ollama:
-    container_name: ollama
+    profiles: ["managed"]
     image: ollama/ollama
     restart: unless-stopped
     runtime: nvidia
@@ -31,9 +31,11 @@ services:
       - core_network
     volumes:
       - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=0
+      - OLLAMA_MAX_LOADED_MODELS=1
 
   openresty:
-    container_name: openresty
     build:
       context: ./openresty
       dockerfile: Dockerfile
@@ -48,9 +50,7 @@ services:
     networks:
       - core_network
       - enhasa_network
-    depends_on:
-      - ollama
-      - llama-cpp
+
 
 volumes:
   ollama_data:

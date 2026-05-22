@@ -11,6 +11,8 @@ local counts_dict  = ngx.shared.request_counts
 local ts_dict      = ngx.shared.request_timestamps
 local lock_dict    = ngx.shared.coord_lock
 
+local SERVICE = { ollama = "ollama", llama_cpp = "llama-cpp" }
+local HOST    = { ollama = "ollama", llama_cpp = "llama-cpp" }
 
 local function get_target()
     local port = ngx.var.server_port
@@ -57,14 +59,51 @@ local function docker_req(method, path, timeout_ms)
 end
 
 
-local function stop_container(name)
+local function resolve_container(service)
+    local c = http.new()
+    local ok, err = c:connect{ path = DOCKER_SOCKET }
+    if not ok then return nil, err end
+    c:set_timeout(5000)
+
+    local filters = '{"label":["com.docker.compose.service=' .. service .. '"]}'
+    local path = "/containers/json?all=true&filters=" .. ngx.escape_uri(filters)
+
+    local res, err = c:request{
+        method = "GET",
+        path   = path,
+        headers = { ["Host"] = "localhost" },
+    }
+    c:close()
+    if not res then return nil, err end
+
+    local body, err = res:read_body()
+    if not body then return nil, "empty response" end
+
+    local ok, data = pcall(cjson.decode, body)
+    if not ok or type(data) ~= "table" or #data == 0 then
+        return nil, "no container found for service: " .. service
+    end
+
+    local names = data[1].Names
+    if type(names) ~= "table" or #names == 0 then
+        return nil, "container has no name"
+    end
+    return names[1]:gsub("^/", ""), nil
+end
+
+
+local function stop_container(service)
+    local name, err = resolve_container(service)
+    if not name then return false, err end
     local res, err = docker_req("POST", "/containers/" .. name .. "/stop")
     if err then return false, err end
     return true
 end
 
 
-local function start_container(name)
+local function start_container(service)
+    local name, err = resolve_container(service)
+    if not name then return false, err end
     local res, err = docker_req("POST", "/containers/" .. name .. "/start")
     if err then return false, err end
     return true
@@ -113,8 +152,6 @@ local function coordinate()
     -- 1. Acquire lock
     if not acquire_lock(LOCK_TIMEOUT) then
         ngx.log(ngx.ERR, "coordinator lock timeout")
-        ngx.status = 503
-        ngx.say('{"error":"coordinator busy"}')
         ngx.exit(503)
         return
     end
@@ -132,8 +169,6 @@ local function coordinate()
         return
     end
 
-    -- Need to switch. Release lock first if another backend is active so
-    -- other requests can still increment while we drain.
     if current ~= nil then
         release_lock()
         local waited = 0
@@ -142,38 +177,44 @@ local function coordinate()
             ngx.sleep(0.5)
             waited = waited + 0.5
         end
+
+        if not acquire_lock(LOCK_TIMEOUT) then
+            ngx.log(ngx.ERR, "coordinator re-lock timeout during switch")
+            ngx.exit(503)
+            return
+        end
+
+        cleanup_stale()
+
+        local rechecked = state_dict:get("backend")
+        if rechecked == target then
+            counts_dict:incr(target, 1, 0)
+            ts_dict:set(target, ngx.time())
+            ngx.ctx.counted = true
+            release_lock()
+            return
+        end
+        if rechecked ~= nil then
+            current = rechecked
+        end
     end
 
-    -- Re-acquire lock for state transition
-    if not acquire_lock(LOCK_TIMEOUT) then
-        ngx.log(ngx.ERR, "coordinator re-lock timeout during switch")
-        ngx.status = 503
-        ngx.say('{"error":"coordinator busy"}')
-        ngx.exit(503)
-        return
-    end
-
-    cleanup_stale()
-
-    local other_name = (target == "ollama") and "llama-cpp" or "ollama"
+    local other_backend = (target == "ollama") and SERVICE.llama_cpp or SERVICE.ollama
 
     if current ~= nil then
-        ngx.log(ngx.INFO, "switching: stopping ", other_name)
-        stop_container(other_name)
+        ngx.log(ngx.INFO, "switching: stopping ", other_backend)
+        stop_container(other_backend)
     end
 
-    ngx.log(ngx.INFO, "starting ", target)
-    start_container(target)
+    ngx.log(ngx.INFO, "starting ", SERVICE[target])
+    start_container(SERVICE[target])
 
-    local health_host = target
     local health_port = (target == "ollama") and 11434 or 8080
-    local ok, err = wait_for_port(health_host, health_port, HEALTHCHECK_TIMEOUT)
+    local ok, err = wait_for_port(HOST[target], health_port, HEALTHCHECK_TIMEOUT)
     if not ok then
         ngx.log(ngx.ERR, target, " healthcheck failed: ", err)
         state_dict:set("backend", "idle")
         release_lock()
-        ngx.status = 503
-        ngx.say('{"error":"backend ' .. target .. ' failed to start"}')
         ngx.exit(503)
         return
     end
