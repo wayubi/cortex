@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     image: opencode-llama.cpp:latest
     networks:
-      - llama_network
+      - core_network
     volumes:
       - llama-cpp_data:/root/.cache/huggingface
       - ./models.ini:/models.ini
@@ -28,12 +28,9 @@ services:
     healthcheck:
       test: ollama --version || exit 1
     networks:
-      - llama_network
+      - core_network
     volumes:
       - ollama_data:/root/.ollama
-    environment:
-      - OLLAMA_KEEP_ALIVE=0
-      - OLLAMA_MAX_LOADED_MODELS=1
 
   openresty:
     container_name: openresty
@@ -49,7 +46,7 @@ services:
       - ./openresty/coordinator.lua:/etc/nginx/lua/coordinator.lua
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - llama_network
+      - core_network
       - enhasa_network
     depends_on:
       - ollama
@@ -60,6 +57,6 @@ volumes:
   llama-cpp_data:
 
 networks:
-  llama_network:
+  core_network:
   enhasa_network:
     external: true
