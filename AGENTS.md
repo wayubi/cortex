@@ -1,0 +1,44 @@
+# AGENTS.md
+
+## Commit workflow
+
+After making a change, ask the user if they want it committed. If they say yes, commit.
+
+## Architecture
+
+- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp. Both backends have `profiles: ["managed"]` so they don't auto-start. OpenResty controls their lifecycle via Docker socket.
+- `coordinator.lua` runs in the access phase. It acquires a lock, checks `backend_state`, and starts/stops the target container via Docker API. Errors use `ngx.exit(503)` with `ngx.log` — `ngx.say` in access phase produces no response body.
+
+## Critical naming
+
+The compose service is `llama-cpp` (hyphen), but the Lua internal key is `llama_cpp` (underscore). Always use the `SERVICE`/`HOST` lookup tables in `coordinator.lua` to map between them:
+- `SERVICE[target]` for Docker API calls (needs `"llama-cpp"`)
+- `HOST[target]` for DNS hostnames (needs `"llama-cpp"`)
+
+These tables are at `openresty/coordinator.lua:14-15`. If adding a new backend, add entries to both tables.
+
+## Docker compose commands
+
+- `docker compose --profile managed up -d` — start the stack
+- `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
+- `docker compose --profile managed down` — stop backends (OpenResty stays if no profile)
+- The internal network is `core_network` (compose-managed bridge). External `enhasa_network` must exist before `up`.
+
+## File layout
+
+```
+core/
+├── compose.yml
+├── llama-cpp/
+│   └── models.ini          # llama.cpp models preset file
+└── openresty/
+    ├── Dockerfile           # FROM openresty/openresty:bookworm-fat
+    ├── nginx.conf           # lua_shared_dict directives, 2 server blocks
+    └── coordinator.lua      # VRAM coordinator state machine
+```
+
+## Gotchas
+
+- Containers have no explicit `container_name` — Docker API calls resolve via compose label `com.docker.compose.service=<name>`.
+- `log_by_lua_block` decrements request counts guarded by `> 0` check to prevent negatives.
+- `lua_shared_dict` directives live in `nginx.conf` which is included inside the `http {}` block — valid by default in the `bookworm-fat` image config.
