@@ -9,7 +9,7 @@ services:
       - core_network
     volumes:
       - llama-cpp_data:/root/.cache/huggingface
-      - ./models.ini:/models.ini
+      - ./llama-cpp/models.ini:/models.ini
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
     command:
