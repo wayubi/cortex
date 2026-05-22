@@ -1,4 +1,3 @@
-local http = require "resty.http"
 local cjson = require "cjson"
 
 local LOCK_TIMEOUT       = 600
@@ -39,46 +38,68 @@ local function release_lock()
 end
 
 
-local function docker_req(method, path, timeout_ms)
-    local c = http.new()
-    local ok, err = c:connect{ path = DOCKER_SOCKET }
+local function unix_request(method, path, timeout_ms)
+    local sock = ngx.socket.tcp()
+    local ok, err = sock:connect("unix:" .. DOCKER_SOCKET)
     if not ok then
         return nil, "connect: " .. (err or "?")
     end
-    c:set_timeout(timeout_ms or 10000)
-    local res, err = c:request{
-        method = method,
-        path   = path,
-        headers = { ["Content-Length"] = 0, ["Host"] = "localhost" },
-    }
-    c:close()
-    if not res then
-        return nil, "request: " .. (err or "?")
+    sock:settimeout(timeout_ms or 10000)
+
+    local req = method .. " " .. path .. " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+    local bytes, err = sock:send(req)
+    if not bytes then
+        sock:close()
+        return nil, "send: " .. (err or "?")
     end
-    return res, nil
+
+    local status_line, err = sock:receive("*l")
+    if not status_line then
+        sock:close()
+        return nil, "receive status: " .. (err or "?")
+    end
+
+    local status = tonumber(status_line:match("HTTP/%d%.%d (%d+)"))
+    if not status then
+        sock:close()
+        return nil, "bad status line: " .. status_line
+    end
+
+    local content_length = 0
+    while true do
+        local line, err = sock:receive("*l")
+        if not line or line == "" then break end
+        local len = line:match("^[Cc]ontent%-[Ll]ength:%s*(%d+)")
+        if len then content_length = tonumber(len) end
+    end
+
+    local body = ""
+    if content_length > 0 then
+        body, err = sock:receive(content_length)
+        if not body then
+            sock:close()
+            return nil, "receive body: " .. (err or "?")
+        end
+    end
+
+    sock:close()
+    return { status = status, body = body, read_body = function(self) return self.body end }, nil
+end
+
+local function docker_req(method, path, timeout_ms)
+    return unix_request(method, path, timeout_ms)
 end
 
 
 local function resolve_container(service)
-    local c = http.new()
-    local ok, err = c:connect{ path = DOCKER_SOCKET }
-    if not ok then return nil, err end
-    c:set_timeout(5000)
-
     local filters = '{"label":["com.docker.compose.service=' .. service .. '"]}'
     local path = "/containers/json?all=true&filters=" .. ngx.escape_uri(filters)
 
-    local res, err = c:request{
-        method = "GET",
-        path   = path,
-        headers = { ["Host"] = "localhost" },
-    }
-    c:close()
+    local res, err = unix_request("GET", path, 5000)
     if not res then return nil, err end
+    if res.status ~= 200 then return nil, "Docker API returned " .. res.status end
 
-    local body, err = res:read_body()
-    if not body then return nil, "empty response" end
-
+    local body = res:read_body()
     local ok, data = pcall(cjson.decode, body)
     if not ok or type(data) ~= "table" or #data == 0 then
         return nil, "no container found for service: " .. service
