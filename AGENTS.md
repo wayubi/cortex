@@ -22,12 +22,12 @@ These tables are at `openresty/coordinator.lua:14-15`. If adding a new backend, 
 - `docker compose --profile managed up -d` — start the stack
 - `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
 - `docker compose --profile managed down` — stop backends (OpenResty stays if no profile)
-- The internal network is `core_network` (compose-managed bridge). External `enhasa_network` must exist before `up`.
+- The internal network is `cortex_network` (compose-managed bridge). External `enhasa_network` must exist before `up`.
 
 ## File layout
 
 ```
-core/
+cortex/
 ├── compose.yml
 ├── llama-cpp/
 │   └── models.ini          # llama.cpp models preset file

@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     image: ghcr.io/ggml-org/llama.cpp:server
     networks:
-      - core_network
+      - cortex_network
     volumes:
       - llama-cpp_data:/root/.cache/huggingface
       - ./llama-cpp/models.ini:/models.ini
@@ -28,7 +28,7 @@ services:
     healthcheck:
       test: ollama --version || exit 1
     networks:
-      - core_network
+      - cortex_network
     volumes:
       - ollama_data:/root/.ollama
     environment:
@@ -49,7 +49,7 @@ services:
       - ./openresty/coordinator.lua:/etc/nginx/lua/coordinator.lua
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
-      - core_network
+      - cortex_network
       - enhasa_network
 
 volumes:
@@ -57,6 +57,6 @@ volumes:
   llama-cpp_data:
 
 networks:
-  core_network:
+  cortex_network:
   enhasa_network:
     external: true
