@@ -6,6 +6,26 @@ local counts_dict  = ngx.shared.request_counts
 local HOST = { ollama = "ollama", llama_cpp = "llama-cpp" }
 
 
+local function get_model()
+    local ok, err = pcall(ngx.req.read_body)
+    if not ok then
+        return nil
+    end
+
+    local body = ngx.req.get_body_data()
+    if not body or body == "" then
+        return nil
+    end
+
+    local ok, data = pcall(cjson.decode, body)
+    if not ok or type(data) ~= "table" then
+        return nil
+    end
+
+    return data.model
+end
+
+
 local function get_target()
     local port = ngx.var.server_port
     if port == "11434" then return "ollama"
@@ -139,50 +159,57 @@ local function coordinate()
         return
     end
 
-    local current = state_dict:get("backend")
     local method = ngx.var.request_method
 
-    ngx.log(ngx.INFO, "request: ", method, " ", target, " current=", (current or "none"))
-
-    if current == target then
-        if method == "POST" then
-            ngx.ctx.counted = true
-            counts_dict:incr(target, 1, 0)
-        end
-        return
-    end
-
     if method ~= "POST" then
-        ngx.log(ngx.INFO, "skip: ", method, " ", target, " — only POST triggers switch")
         return
     end
 
     ngx.ctx.counted = true
     counts_dict:incr(target, 1, 0)
 
-    if current ~= nil then
-        ngx.log(ngx.INFO, "drain ", current, " (", (counts_dict:get(current) or 0), " active)")
+    local current_backend = state_dict:get("backend")
+    local current_model   = state_dict:get("model")
+    local target_model    = get_model()
+    local same_backend    = (current_backend == target)
+
+    ngx.log(ngx.INFO, "POST ", target,
+            " backend=", (current_backend or "none"),
+            " model: ", (current_model or "none"),
+            " -> ", (target_model or "none"))
+
+    if same_backend and current_model ~= nil and current_model == target_model then
+        return
+    end
+
+    if current_backend ~= nil and not same_backend then
+        ngx.log(ngx.INFO, "drain ", current_backend,
+                " (", (counts_dict:get(current_backend) or 0), " active)")
         local waited = 0
         while waited < 30 do
-            if (counts_dict:get(current) or 0) == 0 then break end
+            if (counts_dict:get(current_backend) or 0) == 0 then break end
             ngx.sleep(0.5)
             waited = waited + 0.5
         end
         if waited > 0 then
-            ngx.log(ngx.INFO, "drain: ", current, " waited ", waited, "s")
+            ngx.log(ngx.INFO, "drain: ", current_backend, " waited ", waited, "s")
         end
     end
 
-    ngx.log(ngx.INFO, "switch: ", (current or "none"), " -> ", target)
+    ngx.log(ngx.INFO, "switch: ", (current_backend or "none"), " -> ", target,
+            " (", (current_model or "none"), " -> ", (target_model or "none"), ")")
 
-    if current == "ollama" and target == "llama_cpp" then
+    if current_backend == "ollama" then
         unload_ollama()
-    elseif current == "llama_cpp" and target == "ollama" then
+    elseif current_backend == "llama_cpp" then
         unload_llamacpp()
     end
 
     state_dict:set("backend", target)
-    ngx.log(ngx.INFO, "state: backend=", target)
+    if target_model then
+        state_dict:set("model", target_model)
+    end
+    ngx.log(ngx.INFO, "state: backend=", target, " model=", (target_model or "none"))
 end
 
 
