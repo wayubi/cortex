@@ -50,7 +50,6 @@ services:
     build:
       context: ./openresty
       dockerfile: Dockerfile
-    user: root
     restart: unless-stopped
     ports:
       - "11434:11434"
@@ -58,7 +57,6 @@ services:
     volumes:
       - ./openresty/nginx.conf:/etc/nginx/conf.d/default.conf
       - ./openresty/coordinator.lua:/etc/nginx/lua/coordinator.lua
-      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - cortex_network
       - enhasa_network

@@ -6,24 +6,23 @@ After making a change, ask the user if they want it committed. If they say yes, 
 
 ## Architecture
 
-- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp. Both backends have `profiles: ["managed"]` so they don't auto-start. OpenResty controls their lifecycle via Docker socket.
-- `coordinator.lua` runs in the access phase. It acquires a lock, checks `backend_state`, and starts/stops the target container via Docker API. Errors use `ngx.exit(503)` with `ngx.log` — `ngx.say` in access phase produces no response body.
+- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp. Both backends run alongside openresty (no profiles).
+- `coordinator.lua` runs in the access phase. Its only job: when a request targets a different backend than the current one, it tells the current backend to unload its model from VRAM via its own API. No Docker lifecycle — containers are never started or stopped by the coordinator.
+- Unload flow: `GET /v1/models` or `POST /api/generate` with `keep_alive: 0` (ollama), or `POST /models/unload` (llama-cpp).
+- The shared `backend_state` dict tracks which backend is "active" to know when unloading is needed.
 
 ## Critical naming
 
-The compose service is `llama-cpp` (hyphen), but the Lua internal key is `llama_cpp` (underscore). Always use the `SERVICE`/`HOST` lookup tables in `coordinator.lua` to map between them:
-- `SERVICE[target]` for Docker API calls (needs `"llama-cpp"`)
-- `HOST[target]` for DNS hostnames (needs `"llama-cpp"`)
+The compose service is `llama-cpp` (hyphen), but the Lua internal key is `llama_cpp` (underscore). Use the `HOST` lookup table in `coordinator.lua` to map:
+- `HOST["llama_cpp"]` → `"llama-cpp"` (DNS hostname)
 
-These tables are at `openresty/coordinator.lua:14-15`. If adding a new backend, add entries to both tables.
+If adding a new backend, add an entry to the `HOST` table.
 
 ## Docker compose commands
 
-- `docker compose --profile managed create` — create containers first time, or after `down -v`
-- `docker compose --profile managed up -d` — start the stack
+- `docker compose up -d` — start the entire stack
 - `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
 - `docker compose --profile build build llama-build` — rebuild llama.cpp image from source
-- `docker compose --profile managed down` — stop backends (OpenResty stays if no profile)
 - The internal network is `cortex_network` (compose-managed bridge). External `enhasa_network` must exist before `up`.
 
 ## File layout
@@ -37,13 +36,13 @@ cortex/
 └── openresty/
     ├── Dockerfile           # FROM openresty/openresty:bookworm-fat
     ├── nginx.conf           # lua_shared_dict directives, 2 server blocks
-    └── coordinator.lua      # VRAM coordinator state machine
+    └── coordinator.lua      # VRAM coordinator — API-based model unload
 ```
 
 ## Gotchas
 
-- The shared `backend_state` can be `"idle"` (set when a healthcheck fails). `coordinator.lua:225` guards `stop_container` with `current ~= nil and current ~= "idle"` — without the `"idle"` guard, a failed llama-cpp start would kill ollama too.
-- Containers have no explicit `container_name` — Docker API calls resolve via compose label `com.docker.compose.service=<name>`.
-- Variable-based `proxy_pass` (`set $upstream "http://host:port"`) is required because backends resolve at request time (not config load). Without this, nginx fails on startup when `profiles: ["managed"]` backends don't exist yet. The `resolver 127.0.0.11` directive enables runtime DNS re-resolution.
-- `log_by_lua_block` decrements request counts guarded by `> 0` check to prevent negatives.
+- `coordinator.lua` uses `ngx.socket.tcp` for HTTP calls to the backends. If those calls fail (e.g., backend not ready), the request still proceeds — the user may get an OOM if VRAM wasn't freed. The unload is best-effort.
+- Variable-based `proxy_pass` (`set $upstream "http://host:port"`) is required because backends resolve at request time (not config load). The `resolver 127.0.0.11` directive enables runtime DNS re-resolution.
 - `lua_shared_dict` directives live in `nginx.conf` which is included inside the `http {}` block — valid by default in the `bookworm-fat` image config.
+- ollama unload uses `keep_alive: 0` on a generate request. This evicts the model and KV cache immediately. Without this flag, ollama keeps the model resident per its configured `OLLAMA_KEEP_ALIVE`.
+- llama-cpp unload uses `POST /models/unload` with the model ID. Only models with `status.value == "loaded"` are targeted (queried from `/v1/models`).
