@@ -44,7 +44,6 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     environment:
-      - OLLAMA_KEEP_ALIVE=0
       - OLLAMA_MAX_LOADED_MODELS=1
 
   openresty:
