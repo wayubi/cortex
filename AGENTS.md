@@ -36,6 +36,8 @@ If adding a new backend, update:
 ```
 cortex/
 ├── compose.yml
+├── README.md
+├── LICENSE
 ├── llama-cpp/
 │   ├── models.ini          # llama.cpp models preset file
 │   └── Dockerfile          # CUDA build from source
