@@ -8,7 +8,8 @@ After making a change, ask the user if they want it committed. If they say yes, 
 
 - **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp. Both backends run alongside openresty (no profiles).
 - `coordinator.lua` runs in the access phase. Its only job: when a request targets a different backend than the current one, it tells the current backend to unload its model from VRAM via its own API. No Docker lifecycle — containers are never started or stopped by the coordinator.
-- Unload flow: `GET /v1/models` or `POST /api/generate` with `keep_alive: 0` (ollama), or `POST /models/unload` (llama-cpp).
+- **Only POST requests (inference) can trigger a backend switch.** GET/HEAD/OPTIONS probes pass through without unloading anything — this prevents Open WebUI polling from bouncing the state.
+- Unload flow: `POST /api/generate` with `keep_alive: 0` (ollama), or `POST /models/unload` (llama-cpp). Both backends are queried first (ollama: `/api/ps`, llama-cpp: `/v1/models`) to find exactly which model(s) are loaded.
 - The shared `backend_state` dict tracks which backend is "active" to know when unloading is needed.
 
 ## Critical naming
@@ -34,7 +35,7 @@ cortex/
 │   ├── models.ini          # llama.cpp models preset file
 │   └── Dockerfile          # CUDA build from source
 └── openresty/
-    ├── Dockerfile           # FROM openresty/openresty:bookworm-fat
+    ├── Dockerfile           # FROM openresty/openresty:bookworm-fat, sed patches error_log
     ├── nginx.conf           # lua_shared_dict directives, 2 server blocks
     └── coordinator.lua      # VRAM coordinator — API-based model unload
 ```
@@ -46,3 +47,4 @@ cortex/
 - `lua_shared_dict` directives live in `nginx.conf` which is included inside the `http {}` block — valid by default in the `bookworm-fat` image config.
 - ollama unload uses `keep_alive: 0` on a generate request. This evicts the model and KV cache immediately. Without this flag, ollama keeps the model resident per its configured `OLLAMA_KEEP_ALIVE`.
 - llama-cpp unload uses `POST /models/unload` with the model ID. Only models with `status.value == "loaded"` are targeted (queried from `/v1/models`).
+- `coordinator.lua` logs every request, switch decision, and unload result via `ngx.log`. View with `docker logs -f cortex-openresty-1`. The `error_log /proc/self/fd/2 info;` directive is patched into the main nginx.conf via `sed` in the Dockerfile — INFO-level messages appear in `docker logs`.
