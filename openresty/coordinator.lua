@@ -222,7 +222,7 @@ local function coordinate()
 
     local other_backend = (target == "ollama") and SERVICE.llama_cpp or SERVICE.ollama
 
-    if current ~= nil then
+    if current ~= nil and current ~= "idle" then
         ngx.log(ngx.INFO, "switching: stopping ", other_backend)
         stop_container(other_backend)
     end

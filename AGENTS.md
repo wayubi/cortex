@@ -22,6 +22,7 @@ These tables are at `openresty/coordinator.lua:14-15`. If adding a new backend, 
 - `docker compose --profile managed create` — create containers first time, or after `down -v`
 - `docker compose --profile managed up -d` — start the stack
 - `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
+- `docker compose --profile build build llama-build` — rebuild llama.cpp image from source
 - `docker compose --profile managed down` — stop backends (OpenResty stays if no profile)
 - The internal network is `cortex_network` (compose-managed bridge). External `enhasa_network` must exist before `up`.
 
@@ -31,7 +32,8 @@ These tables are at `openresty/coordinator.lua:14-15`. If adding a new backend, 
 cortex/
 ├── compose.yml
 ├── llama-cpp/
-│   └── models.ini          # llama.cpp models preset file
+│   ├── models.ini          # llama.cpp models preset file
+│   └── Dockerfile          # CUDA build from source
 └── openresty/
     ├── Dockerfile           # FROM openresty/openresty:bookworm-fat
     ├── nginx.conf           # lua_shared_dict directives, 2 server blocks
@@ -40,6 +42,7 @@ cortex/
 
 ## Gotchas
 
+- The shared `backend_state` can be `"idle"` (set when a healthcheck fails). `coordinator.lua:225` guards `stop_container` with `current ~= nil and current ~= "idle"` — without the `"idle"` guard, a failed llama-cpp start would kill ollama too.
 - Containers have no explicit `container_name` — Docker API calls resolve via compose label `com.docker.compose.service=<name>`.
 - Variable-based `proxy_pass` (`set $upstream "http://host:port"`) is required because backends resolve at request time (not config load). Without this, nginx fails on startup when `profiles: ["managed"]` backends don't exist yet. The `resolver 127.0.0.11` directive enables runtime DNS re-resolution.
 - `log_by_lua_block` decrements request counts guarded by `> 0` check to prevent negatives.
