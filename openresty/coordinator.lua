@@ -7,20 +7,25 @@ local HOST = { ollama = "ollama", llama_cpp = "llama-cpp" }
 
 
 local function get_model()
-    local ok, err = pcall(ngx.req.read_body)
-    if not ok then
-        return nil
-    end
+    local ok = pcall(ngx.req.read_body)
+    if not ok then return nil end
 
     local body = ngx.req.get_body_data()
     if not body or body == "" then
-        return nil
+        local fname = ngx.req.get_body_file()
+        if fname then
+            local f = io.open(fname, "r")
+            if f then
+                body = f:read("*a")
+                f:close()
+            end
+        end
     end
 
+    if not body or body == "" then return nil end
+
     local ok, data = pcall(cjson.decode, body)
-    if not ok or type(data) ~= "table" then
-        return nil
-    end
+    if not ok or type(data) ~= "table" then return nil end
 
     return data.model
 end
