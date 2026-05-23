@@ -11,7 +11,6 @@ services:
     image: llama-cpp:latest
 
   llama-cpp:
-    profiles: ["managed"]
     runtime: nvidia
     restart: unless-stopped
     image: llama-cpp:latest
@@ -22,6 +21,10 @@ services:
       - ./llama-cpp/models.ini:/models.ini
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
     command:
       - "--models-preset"
       - "/models.ini"
@@ -31,7 +34,6 @@ services:
       - "0.0.0.0"
 
   ollama:
-    profiles: ["managed"]
     image: ollama/ollama
     restart: unless-stopped
     runtime: nvidia
