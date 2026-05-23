@@ -1,6 +1,7 @@
 local cjson = require "cjson"
 
-local state_dict = ngx.shared.backend_state
+local state_dict   = ngx.shared.backend_state
+local counts_dict  = ngx.shared.request_counts
 
 local HOST = { ollama = "ollama", llama_cpp = "llama-cpp" }
 
@@ -144,12 +145,32 @@ local function coordinate()
     ngx.log(ngx.INFO, "request: ", method, " ", target, " current=", (current or "none"))
 
     if current == target then
+        if method == "POST" then
+            ngx.ctx.counted = true
+            counts_dict:incr(target, 1, 0)
+        end
         return
     end
 
     if method ~= "POST" then
         ngx.log(ngx.INFO, "skip: ", method, " ", target, " — only POST triggers switch")
         return
+    end
+
+    ngx.ctx.counted = true
+    counts_dict:incr(target, 1, 0)
+
+    if current ~= nil then
+        ngx.log(ngx.INFO, "drain ", current, " (", (counts_dict:get(current) or 0), " active)")
+        local waited = 0
+        while waited < 30 do
+            if (counts_dict:get(current) or 0) == 0 then break end
+            ngx.sleep(0.5)
+            waited = waited + 0.5
+        end
+        if waited > 0 then
+            ngx.log(ngx.INFO, "drain: ", current, " waited ", waited, "s")
+        end
     end
 
     ngx.log(ngx.INFO, "switch: ", (current or "none"), " -> ", target)
