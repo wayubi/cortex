@@ -73,12 +73,13 @@ end
 local function unload_ollama()
     local res, err = http_request("GET", HOST.ollama, 11434, "/api/ps")
     if not res then
-        ngx.log(ngx.WARN, "ollama PS failed: ", err)
+        ngx.log(ngx.WARN, "ollama ps failed: ", err)
         return
     end
 
     local ok, data = pcall(cjson.decode, res.body)
     if not ok or type(data) ~= "table" or not data.models or #data.models == 0 then
+        ngx.log(ngx.INFO, "ollama: no loaded model to unload")
         return
     end
 
@@ -87,7 +88,12 @@ local function unload_ollama()
         if name then
             ngx.log(ngx.INFO, "ollama: unloading ", name)
             local body = cjson.encode({ model = name, keep_alive = 0 })
-            local _, _ = http_request("POST", HOST.ollama, 11434, "/api/generate", body)
+            local r, e = http_request("POST", HOST.ollama, 11434, "/api/generate", body)
+            if r then
+                ngx.log(ngx.INFO, "ollama: unloaded ", name)
+            else
+                ngx.log(ngx.WARN, "ollama: unload failed for ", name, ": ", e)
+            end
         end
     end
 end
@@ -96,7 +102,7 @@ end
 local function unload_llamacpp()
     local res, err = http_request("GET", HOST.llama_cpp, 8080, "/v1/models")
     if not res then
-        ngx.log(ngx.WARN, "llama-cpp /v1/models failed: ", err)
+        ngx.log(ngx.WARN, "llama-cpp models failed: ", err)
         return
     end
 
@@ -105,12 +111,22 @@ local function unload_llamacpp()
         return
     end
 
+    local count = 0
     for _, m in ipairs(data.data) do
         if m.status and m.status.value == "loaded" and m.id then
             ngx.log(ngx.INFO, "llama-cpp: unloading ", m.id)
             local body = cjson.encode({ model = m.id })
-            local _, _ = http_request("POST", HOST.llama_cpp, 8080, "/models/unload", body)
+            local r, e = http_request("POST", HOST.llama_cpp, 8080, "/models/unload", body)
+            if r then
+                ngx.log(ngx.INFO, "llama-cpp: unloaded ", m.id)
+                count = count + 1
+            else
+                ngx.log(ngx.WARN, "llama-cpp: unload failed for ", m.id, ": ", e)
+            end
         end
+    end
+    if count == 0 then
+        ngx.log(ngx.INFO, "llama-cpp: no loaded model to unload")
     end
 end
 
@@ -123,10 +139,20 @@ local function coordinate()
     end
 
     local current = state_dict:get("backend")
+    local method = ngx.var.request_method
+
+    ngx.log(ngx.INFO, "request: ", method, " ", target, " current=", (current or "none"))
 
     if current == target then
         return
     end
+
+    if method ~= "POST" then
+        ngx.log(ngx.INFO, "skip: ", method, " ", target, " — only POST triggers switch")
+        return
+    end
+
+    ngx.log(ngx.INFO, "switch: ", (current or "none"), " -> ", target)
 
     if current == "ollama" and target == "llama_cpp" then
         unload_ollama()
@@ -135,6 +161,7 @@ local function coordinate()
     end
 
     state_dict:set("backend", target)
+    ngx.log(ngx.INFO, "state: backend=", target)
 end
 
 
