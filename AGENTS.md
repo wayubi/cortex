@@ -1,9 +1,5 @@
 # AGENTS.md
 
-## Commit workflow
-
-After making a change, ask the user if they want it committed. If they say yes, commit.
-
 ## Architecture
 
 - **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp. Both backends run alongside openresty (no profiles).
