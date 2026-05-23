@@ -1,10 +1,20 @@
 services:
 
+  llama-build:
+    # docker compose --profile build build llama-build
+    profiles: ["build"]
+    build:
+      context: ./llama-cpp
+      dockerfile: Dockerfile
+      args:
+        BUILD_JOBS: "20"
+    image: llama-cpp:latest
+
   llama-cpp:
     profiles: ["managed"]
     runtime: nvidia
     restart: unless-stopped
-    image: ghcr.io/ggml-org/llama.cpp:server
+    image: llama-cpp:latest
     networks:
       - cortex_network
     volumes:
