@@ -5,6 +5,8 @@ local counts_dict  = ngx.shared.request_counts
 
 local HOST = { ollama = "ollama", llama_cpp = "llama-cpp" }
 
+local DRAIN_TIMEOUT = 600
+
 
 local function get_model()
     local ok = pcall(ngx.req.read_body)
@@ -157,6 +159,24 @@ local function unload_llamacpp()
 end
 
 
+local function drain_backend(backend, target_count, timeout)
+    local waited = 0
+    while waited < timeout do
+        local count = counts_dict:get(backend) or 0
+        if count <= target_count then
+            ngx.sleep(0.25)
+            if (counts_dict:get(backend) or 0) <= target_count then
+                return true
+            end
+            waited = waited + 0.25
+        end
+        ngx.sleep(0.5)
+        waited = waited + 0.5
+    end
+    return false
+end
+
+
 local function coordinate()
     local target = get_target()
     if not target then
@@ -187,17 +207,23 @@ local function coordinate()
         return
     end
 
-    if current_backend ~= nil and not same_backend then
-        ngx.log(ngx.INFO, "drain ", current_backend,
-                " (", (counts_dict:get(current_backend) or 0), " active)")
-        local waited = 0
-        while waited < 30 do
-            if (counts_dict:get(current_backend) or 0) == 0 then break end
-            ngx.sleep(0.5)
-            waited = waited + 0.5
+    if current_backend ~= nil then
+        local target_count = 0
+        if same_backend then
+            target_count = 1
         end
-        if waited > 0 then
-            ngx.log(ngx.INFO, "drain: ", current_backend, " waited ", waited, "s")
+
+        ngx.log(ngx.INFO, "drain ", current_backend,
+                " (", (counts_dict:get(current_backend) or 0), " active, target ", target_count, ")")
+
+        local drained = drain_backend(current_backend, target_count, DRAIN_TIMEOUT)
+
+        if not drained then
+            ngx.log(ngx.WARN, current_backend, " still active after ", DRAIN_TIMEOUT, "s, returning 503")
+            counts_dict:incr(target, -1, 0)
+            ngx.ctx.counted = false
+            ngx.exit(503)
+            return
         end
     end
 
