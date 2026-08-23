@@ -88,6 +88,26 @@ Proven gotchas:
 - If even tiny batches OOM, the only real fix is freeing VRAM: `override-tensor = exps=CPU` (experts to system RAM).
 - The `[*]` preset default `batch-size`/`ubatch-size = 4096` is a deliberate over-sized **tuning starting point** — it OOMs almost immediately on this GPU and is meant to be overridden per `[model]` entry. Never run an untuned entry at 4096.
 
+## Tuning MTP speculative decoding (spec-draft-n-max / spec-draft-p-min)
+
+Only applies to MTP models (`spec-type = draft-mtp`). Tuning these can improve decode throughput, but quality is the tradeoff — pick the best t/s config that still produces clean output.
+
+Params:
+- `spec-draft-n-max` — draft tokens predicted ahead per decode step (repo default 2). Higher = more speed IF accepted, but later draft tokens drop in acceptance → wasted target re-verification.
+- `spec-draft-p-min` — **quality guard**: draft tokens below this probability are rejected (target recomputes). Lower = more acceptance but riskier quality; higher = safer but slower.
+- (`spec-draft-n-min` shows as `n_min=0` at load and is not preset-controlled.)
+
+Benchmark method (per candidate — same edit/restart/watch style as batch tuning, but the metric is speed + quality, not OOM):
+1. Edit the target `[model]` entry's `spec-draft-n-max` / `spec-draft-p-min` in `models.ini`.
+2. `docker compose restart llama-cpp`; wait for `/v1/models` 200.
+3. Fire a **decode-heavy** request — a real generation task (an essay prompt, NOT filler, so quality is assessable), `max_tokens` ~4000, `ignore_eos: true` to force a stable long decode:
+   `curl -s -X POST http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"<model>","messages":[{"role":"user","content":"Write a detailed 1000-word essay explaining transformers and MoE"}],"max_tokens":4000,"ignore_eos":true}'`
+4. Read the log (`docker logs --since 3m cortex-llama-cpp-1`): grep for `tokens per second` (the speed metric), `draft acceptance = X (a / g)`, and `n_max=…, p_min=…` (confirms params applied).
+5. Assess output quality from the saved response — degradation shows as repetition loops, incoherence, or drift (check consecutive-sentence repeats; clean if <~2). `ignore_eos` makes the model ramble past natural endings (`**Revised Final Version…**` / `(End of Thought Process)` restarts) — that is an artifact of forced generation, NOT speculation degradation.
+6. Sweep order: n-max first (`{1,2,3,4,5}` at `p_min=0.7`), then p-min (`{0.5,0.6,0.7,0.8,0.9}` at the winning n-max).
+
+Proven observation (Qwen3.5-9B-MTP @ 16K): t/s was **flat at ~58 (57.6–58.8)** across the whole n_max×p_min space — neither param moved the needle, and quality was clean everywhere. On dense 9B MTP models the defaults (`n_max=2, p_min=0.7`) are as good as anything; expect this to differ on larger/compute-bound models (e.g. the 35B MoE), where deeper speculation has a bigger upside.
+
 ## Gotchas
 
 - `coordinator.lua` uses `ngx.socket.tcp` for HTTP calls to the backends. If those calls fail (e.g., backend not ready), the request still proceeds — the user may get an OOM if VRAM wasn't freed. The unload is best-effort.
