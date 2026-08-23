@@ -57,7 +57,10 @@ Procedure (per candidate value):
 4. Fire one tiny inference request so the model loads and decodes:
    `curl -s -X POST http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"<model>","messages":[{"role":"user","content":"Say hello"}],"max_tokens":8}'`
 5. Watch the log: `docker logs -f cortex-llama-cpp-1`. OOM markers appear **seconds** after the request — `cudaMalloc failed` / `failed to allocate compute pp buffers` / `terminate called after throwing` / child `exited with status 1`. Fast OOM grep: `docker logs --since 10s cortex-llama-cpp-1 | grep -E "cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing"` (<1s).
-6. **OOM** → step down by 64 and repeat (`1024 → 960 → 896 → …`). **No floor** — keep going until PASS.
+6. **OOM** → step down and repeat using a **coarse-to-fine sweep** (start from the preset default 4096):
+   - **Bracket (down-sweep):** step down by 1024 or halve (`4096 → 2048 → 1024`) until the first **PASS**. This brackets the ceiling: `lo` = highest PASS, `hi` = lowest OOM. (At 4096 the tiny probe crashes on the first decode almost instantly — expected; the coarse sweep's job is to bracket, not to pass.)
+   - **Refine (bisect up):** with `lo` = highest confirmed PASS and `hi` = lowest OOM, test midpoints rounded to 64 (`(lo + hi) / 2`): PASS → `lo = mid`, OOM → `hi = mid`. Increments shrink naturally (`512 → 256 → 128 → 64`). Repeat until `hi − lo ≤ 64`; the final `lo` is the max. Example: `1024 PASS, 2048 OOM → 1536 OOM → 1280 OOM → 1152 PASS → 1216 OOM → answer 1152`.
+   - **No floor** — if the down-sweep never passes, keep going until it does.
 7. **PASS** on the tiny probe → confirm with 2 more requests (expect `http=200`). This is only a **quick filter** — it does NOT prove the value is good (see Phase 2).
 8. **Phase 2 — TRUE test: full-context saturation + compaction.** The tiny probe only proves the compute graph fits at near-empty context. `-fit` leaves ~zero headroom, so memory peaks near full context (KV compaction temp buffers, hybrid/SSM state re-derivation) — a value can still OOM once the context fills and compacts.
    - The saturation prompt is sized to the target entry's `ctx-size` (**NOT** a fixed 16K): for `ctx-size = 16384` saturate to ~14.5K tokens; for `ctx-size = 131072` saturate to ~115K tokens. Target ~90% of that ctx.
@@ -82,6 +85,7 @@ Proven gotchas:
 - A failed child triggers the router's 10s force-kill, then `model ... failed to load` (HTTP 500). That 500 is also an OOM signal.
 - Lowering `ctx-size` does NOT reliably create batch headroom — `-fit` simply repacks more weights into the freed VRAM (e.g. a 1024 batch that OOMs at 64K ctx also OOMs at 16K).
 - If even tiny batches OOM, the only real fix is freeing VRAM: `override-tensor = exps=CPU` (experts to system RAM).
+- The `[*]` preset default `batch-size`/`ubatch-size = 4096` is a deliberate over-sized **tuning starting point** — it OOMs almost immediately on this GPU and is meant to be overridden per `[model]` entry. Never run an untuned entry at 4096.
 
 ## Gotchas
 
