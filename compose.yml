@@ -14,6 +14,7 @@ services:
     runtime: nvidia
     restart: unless-stopped
     image: llama-cpp:latest
+    pull_policy: never
     networks:
       - cortex_network
     volumes:
