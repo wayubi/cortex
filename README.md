@@ -95,5 +95,10 @@ skip: GET ollama — only POST triggers switch
 - Both containers run simultaneously but no model is loaded at boot
 - Models only consume VRAM during active inference
 - Ollama's `OLLAMA_KEEP_ALIVE` controls how long a model stays resident after the last request (default 5m)
-- llama.cpp keeps one model loaded at a time (configured via `models-max`)
+- llama.cpp keeps one model loaded at a time — the coordinator is the sole source of truth for unloads, so `models-max` must NOT be set (see `AGENTS.md`)
 - If a backend switch happens mid-inference, the request counter drain waits up to 30s for completion before unloading
+
+## Tuning batch-size / ubatch-size
+
+Each `[model]` entry in `llama-cpp/models.ini` can override `batch-size` / `ubatch-size`. The proven stress-test procedure — including the two-phase validation (tiny decode probe, then full-context saturation) needed because `-fit on` leaves ~zero VRAM headroom — is documented in `AGENTS.md`.
+

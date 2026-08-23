@@ -44,6 +44,45 @@ cortex/
     └── coordinator.lua      # VRAM coordinator — API-based model unload
 ```
 
+## Stress-testing batch/ubatch (proven procedure)
+
+Finding the max `batch-size`/`ubatch-size` a model fits in VRAM. Goal: the highest value that survives a real decode.
+
+Why: llama.cpp `-fit on` (default, `ngl = -1`) packs weights into VRAM leaving ~zero headroom. The compute graph (PP/prefill buffers) is allocated lazily on the **first decode**, not at load — a model can load fine and then crash on the first request with `failed to allocate compute pp buffers`. The PP buffer scales ~linearly with ubatch (~2 MiB per unit on the 35B Qwen), so bigger batch = faster prefill up to the OOM ceiling.
+
+Procedure (per candidate value):
+1. Edit `llama-cpp/models.ini` for the target `[model]` entry: set `batch-size` and `ubatch-size` to the **same** value (`batch-size` must equal `ubatch-size`). Keep the target `ctx-size`.
+2. `docker compose restart llama-cpp` — the router reads models.ini only at startup, so every value change needs a restart.
+3. Wait for readiness: `curl -sf http://localhost:8080/v1/models` (through openresty) until it returns 200.
+4. Fire one tiny inference request so the model loads and decodes:
+   `curl -s -X POST http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"<model>","messages":[{"role":"user","content":"Say hello"}],"max_tokens":8}'`
+5. Watch the log: `docker logs -f cortex-llama-cpp-1`. OOM markers appear **seconds** after the request — `cudaMalloc failed` / `failed to allocate compute pp buffers` / `terminate called after throwing` / child `exited with status 1`. Fast OOM grep: `docker logs --since 10s cortex-llama-cpp-1 | grep -E "cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing"` (<1s).
+6. **OOM** → step down by 64 and repeat (`1024 → 960 → 896 → …`). **No floor** — keep going until PASS.
+7. **PASS** on the tiny probe → confirm with 2 more requests (expect `http=200`). This is only a **quick filter** — it does NOT prove the value is good (see Phase 2).
+8. **Phase 2 — TRUE test: full-context saturation + compaction.** The tiny probe only proves the compute graph fits at near-empty context. `-fit` leaves ~zero headroom, so memory peaks near full context (KV compaction temp buffers, hybrid/SSM state re-derivation) — a value can still OOM once the context fills and compacts.
+   - The saturation prompt is sized to the target entry's `ctx-size` (**NOT** a fixed 16K): for `ctx-size = 16384` saturate to ~14.5K tokens; for `ctx-size = 131072` saturate to ~115K tokens. Target ~90% of that ctx.
+   - Send one request with a prompt filling ~90% of that ctx and `max_tokens` large enough to overflow it and force KV compaction (~20% of ctx):
+     ```
+     SAT=$(python3 -c "print(('Qwen3.6-35B-A3B is a hybrid MoE with attention and SSM layers. '*N)[:SIZE])")
+     # SIZE ≈ ctx-size * 2.5 chars — measured ~0.35 tokens/char (≈2.8 chars/token) on repeated English.
+     # Aim for ≤85% of ctx and verify with usage.prompt_tokens; if the request 400s with
+     # "exceeds the available context size", shrink SIZE. Cap below nginx body limit (default 1MB).
+     curl -s -X POST http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+       -d "{\"model\":\"<model>\",\"messages\":[{\"role\":\"user\",\"content\":\"$SAT\"}],\"max_tokens\":<~20% of ctx>}"
+     ```
+   - **TRUE PASS** = no OOM markers **AND** `n_past` reaches the ctx limit **AND** the request completes HTTP 200 with the full generation. On pure-attention models a compaction/sequence-removal event appears in the log; on **hybrid/SSM models** (e.g. Qwen3.6) the server instead truncates at the ceiling (`truncated = 1`, `finish_reason = length`) because SSM state can't be KV-shifted — full-context saturation is still reached and that is the point of the test. (You cannot force `ctx-shift` here: the router rejects unknown preset keys with `option 'ctx-shift' not recognized in preset`.)
+   - **FAIL** = any OOM marker during prefill/decode/compaction, or a crash before compaction completes → step down by 64 and re-run the whole candidate loop (Phases 1 + 2).
+   - Saturation runs are ~2 min at 16K, growing roughly linearly with ctx — only run them on values that pass the quick filter. For 128K+ ctx, the body nears nginx's default 1MB `client_max_body_size`; raise it or use a tighter prompt if the request returns 413.
+9. Leave the config at the winning value with a comment: `ubatch-size = N ; optimized (max, N+64 OOM)`.
+
+Proven gotchas:
+- The OOM happens on first **decode**, not at load. A load-only probe (GET `/v1/models`, or waiting for `model loaded`) will NOT reveal it — you must send a real inference request.
+- The tiny 20-token probe is necessary but **not sufficient**. `-fit` leaves ~zero headroom, so the true peak is near full context: a value that survives a 20-token decode can still OOM at full ctx once compaction triggers. Only a successful full-context saturation run (compaction where the model supports it, ceiling truncation on hybrid/SSM) validates the value.
+- Use the OOM log grep as the source of truth, **NOT** the curl http code. The first request after a restart can take >20s (fit + MTP context + warmup) and time out (`http=000`) while the model actually loads and serves fine — verify with a follow-up request.
+- A failed child triggers the router's 10s force-kill, then `model ... failed to load` (HTTP 500). That 500 is also an OOM signal.
+- Lowering `ctx-size` does NOT reliably create batch headroom — `-fit` simply repacks more weights into the freed VRAM (e.g. a 1024 batch that OOMs at 64K ctx also OOMs at 16K).
+- If even tiny batches OOM, the only real fix is freeing VRAM: `override-tensor = exps=CPU` (experts to system RAM).
+
 ## Gotchas
 
 - `coordinator.lua` uses `ngx.socket.tcp` for HTTP calls to the backends. If those calls fail (e.g., backend not ready), the request still proceeds — the user may get an OOM if VRAM wasn't freed. The unload is best-effort.
