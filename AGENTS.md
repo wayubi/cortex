@@ -35,6 +35,7 @@ cortex/
 ├── compose.yml
 ├── README.md
 ├── LICENSE
+├── BENCHMARKS.md          # all batch/MTP/quality bench results (configs, t/s, acceptance)
 ├── llama-cpp/
 │   ├── models.ini          # llama.cpp models preset file
 │   └── Dockerfile          # CUDA build from source
