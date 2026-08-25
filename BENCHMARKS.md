@@ -25,6 +25,8 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `gemma-4-12b-qat-think-16k` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 |
 | `gemma-4-12b-qat-q8-16k` | 16k | 8640 | 5 / 0.7 | Q8_0 (MTP/) | — | 74.2 | — | ~0.785 |
 | `gemma-4-12b-qat-q8-think-16k` | 16k | 8576 | 5 / 0.5 | Q8_0 (MTP/) | — | 63.8 | — | ~0.58 |
+| `gemma-4-12b-q6-16k` (non-QAT) | 16k | 3584 | 7 / 0.7 | Q4_0 (root) | 37.9 | ~33 | 932 | ~0.75 |
+| `gemma-4-12b-q6-think-16k` (non-QAT) | 16k | 3584 | 7 / 0.7 | Q4_0 (root) | 35.0 | ~25–30 | — | ~0.69 |
 
 ## Old-build references (stale)
 
@@ -48,6 +50,14 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 ### gemma-4-12b-qat (new build)
 - Non-think **8640** (8704 OOM), think **8576** (8640 marginal) — dense 12B small per-unit graph.
 - Long-decode + full-16K saturation validated.
+
+### gemma-4-12b (non-QAT, UD-Q6_K_XL — new build)
+- **100% GPU @ 16K, batch 3584** (10 GB model + overhead ≈ 11.2 GB of 12 GB). 3840 OOMs at load (MTP context buffer).
+- Q8 main (UD-Q8_K_XL 13 GB / Q8_0 12 GB) does NOT fit 100% GPU at any ctx (4K/8K/16K all offload ~0.6–1 GB to CPU) — dead end without CPU offload.
+- Prefill @ 3584: **932 t/s**.
+- n_max sweep (essay, p_min 0.7): 5=22, 6=27, **7=33** (peak), 8=25. p_min @ 7: 0.5=30, **0.7=33**, 0.9=33.6.
+- Think: n_max **7** (6=28.5, 7=29.6, 8=27.8); p_min **0.7** (0.5=19/acc 0.39 — bad; 0.9=23.3); math gate 6/6.
+- Q6 decode (~38/35 t/s) is much slower than the QAT Q4 (~86/77) — ~1.5× the weight bytes.
 
 ## MTP spec sweeps (new build, essay bench 4000 tokens)
 
