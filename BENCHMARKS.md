@@ -28,8 +28,7 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `gemma-4-12b-q6-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | ~60 | ~46 | ~1065 | ~0.75 |
 | `gemma-4-12b-q6-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 |
 | `lfm2.5-8b-a1b-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — |
-| `ornith-1.5-9b-16k` (non-think) | 16k | 12160 | — | none | 31.0 | — | 209 | — |
-| `ornith-1.5-9b-think-16k` | 16k | 12160 | — | none | 31.0 | — | 209 | — |
+| `ornith-1.5-9b-16k` | 16k | 16384 | — | none | 44.1 | — | 224 | — |
 
 ## Old-build references (stale)
 
@@ -68,12 +67,11 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 - **Batch 8192** chosen (best decode + prefill 352 t/s). Saturation + long-decode validated.
 - Decode 110.2 t/s (long-decode), prefill 376 t/s — fastest model in the stack.
 
-### ornith-1.5-9b (Q8_0, qwen35 arch — new build)
-- Dense 9B model (no MTP). Batch bisect: **4096 PASS (25%), 8192 PASS (98%), 10240 PASS (98%), 11264 PASS (98%), 11776 PASS (93%), 12032 PASS (98%), 12160 PASS (98%), 12224 FAIL (419%), 12288 FAIL (415%), 16384 FAIL (594%)**.
-- **Max full-GPU batch = 12160** (12224 spills to CPU). VRAM: 10861 MiB at 12160 (KV Q4_0 quantized).
-- Decode 31 t/s, prefill 209 t/s — stable across all full-GPU batches. Think variant produces `reasoning_content` (CoT) via `reasoning = on`.
-- Gen params per model card: temp 1.0, top_p 0.95, top_k 20, presence_penalty 1.5.
-- Math gate: **6/6 correct** (think variant). Essay: 0 repeats, coherent, no template issues.
+### ornith-1.5-9b (Q4_K_M, qwen35 arch — new build)
+- Dense 9B model (no MTP, always reasoning — `reasoning = on` puts CoT in `reasoning_content`).
+- Q4_K_M (5.78 GB) fits easily at 16K; VRAM 8487 MiB. Batch ceiling effectively unlimited (no CPU spill at 65536). Best prefill at 16384 (232 t/s).
+- Decode 44 t/s — 1.4x faster than Q8_0 (31 t/s). Gen params per model card: temp 1.0, top_p 0.95, top_k 20, presence_penalty 1.5.
+- Math gate: **6/6 correct**. Essay: 0 repeats, coherent.
 
 ## MTP spec sweeps (new build, essay bench 4000 tokens)
 
@@ -126,7 +124,7 @@ Winner: **n_max 5, p_min 0.5** (math gate 6/6 correct, faster A/B; acceptance un
 | qwen3.5-9b-mtp-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | gemma-4-12b-qat-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | lfm2.5-8b-a1b-16k | temp 0.2 | **6/6 correct** | — | — |
-| ornith-1.5-9b-think-16k | temp 1.0 | **6/6 correct** | — | — |
+| ornith-1.5-9b-16k | temp 1.0 | **6/6 correct** | — | — |
 
 Both p_min=0.5 decisions validated: no quality degradation on hard reasoning. LFM2.5 CoT: all 6 answers correct (11:24 AM, invalid syllogism, x=5, 31 apples, 5%, 42). Essay: 0 consecutive-sentence repeats, coherent, no degeneration.
 
