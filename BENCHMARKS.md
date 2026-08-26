@@ -27,6 +27,7 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `gemma-4-12b-qat-q8-think-16k` | 16k | 8576 | 5 / 0.5 | Q8_0 (MTP/) | — | 63.8 | — | ~0.58 |
 | `gemma-4-12b-q6-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | ~60 | ~46 | ~1065 | ~0.75 |
 | `gemma-4-12b-q6-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 |
+| `lfm2.5-8b-a1b-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — |
 
 ## Old-build references (stale)
 
@@ -57,6 +58,13 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 - n_max sweep (essay, p_min 0.7): 5=22, 6=27, **7=33** (peak), 8=25. p_min @ 7: 0.5=30, **0.7=33**, 0.9=33.6.
 - Think: n_max **7** (6=28.5, 7=29.6, 8=27.8); p_min **0.7** (0.5=19/acc 0.39 — bad; 0.9=23.3); math gate 6/6.
 - Q6 decode (~50 t/s) is still slower than the QAT Q4 (~86/77) — ~1.5× the weight bytes.
+
+### lfm2.5-8b-a1b-16k (UD-Q8_K_XL — new build)
+- **No MTP** (Liquid doesn't ship a drafter), no reasoning toggle (always CoT). 8.3B total / 1.5B active params.
+- 1.5B active → tiny compute → always fits on GPU regardless of batch. CPU stays ~96% (host orchestration only, no spill). VRAM: 10863 MiB (9.34 GB model + ~1.5 GB KV + graph).
+- Batch sweep (decode t/s): 4096=111.8, **8192=111.1** (best), 12288=110.6, 16384=86.9, 20480=77.1, 32768=88.5, 65536=88.8.
+- **Batch 8192** chosen (best decode + prefill 352 t/s). Saturation + long-decode validated.
+- Decode 110.2 t/s (long-decode), prefill 376 t/s — fastest model in the stack.
 
 ## MTP spec sweeps (new build, essay bench 4000 tokens)
 
@@ -108,8 +116,9 @@ Winner: **n_max 5, p_min 0.5** (math gate 6/6 correct, faster A/B; acceptance un
 |---|---|---|---|---|
 | qwen3.5-9b-mtp-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | gemma-4-12b-qat-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
+| lfm2.5-8b-a1b-16k | temp 0.2 | **6/6 correct** | — | — |
 
-Both p_min=0.5 decisions validated: no quality degradation on hard reasoning.
+Both p_min=0.5 decisions validated: no quality degradation on hard reasoning. LFM2.5 CoT: all 6 answers correct (11:24 AM, invalid syllogism, x=5, 31 apples, 5%, 42). Essay: 0 consecutive-sentence repeats, coherent, no degeneration.
 
 ## Q4-QAT vs Q6 (non-QAT) head-to-head @ 16K
 
