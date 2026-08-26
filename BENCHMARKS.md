@@ -17,8 +17,8 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 
 | Model | ctx | batch | n_max / p_min | drafter | long-decode t/s | essay t/s | prefill t/s | acceptance |
 |---|---|---|---|---|---|---|---|---|
-| `qwen3.5-9b-mtp-16k` | 16k | 2048 | 2 / 0.7 | in-model | 70.4 | ~66 | **1545** | ~0.95 |
-| `qwen3.5-9b-mtp-think-16k` | 16k | 2048 | 2 / 0.5 | in-model | 67.4 | 63.6 | ~1545 | ~0.84 |
+| `qwen3.5-9b-q4-mtp-16k` | 16k | 2048 | 2 / 0.7 | in-model | 70.4 | ~66 | **1545** | ~0.95 |
+| `qwen3.5-9b-q4-mtp-think-16k` | 16k | 2048 | 2 / 0.5 | in-model | 67.4 | 63.6 | ~1545 | ~0.84 |
 | `qwen3.6-35b-mtp-16k` | 16k | 3584 | 2 / 0.7 | in-model | 45.9 | — | **1192** | ~0.96 |
 | `qwen3.6-35b-mtp-think-16k` | 16k | 3584 | 2 / 0.7 | in-model | 44.4 | — | ~1192 | ~0.94 |
 | `gemma-4-12b-qat-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 |
@@ -34,14 +34,14 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 
 | Model | decode t/s | prefill t/s |
 |---|---|---|
-| qwen3.5-9b-mtp-16k | ~58 (MTP flat) | ~370 |
-| qwen3.5-9b-mtp-think-16k | 52.7–58.9 (p_min sweep) | ~370 |
+| qwen3.5-9b-q4-mtp-16k | ~58 (MTP flat) | ~370 |
+| qwen3.5-9b-q4-mtp-think-16k | 52.7–58.9 (p_min sweep) | ~370 |
 | qwen3.6-35b-mtp-16k | ~38 | ~410 |
 | qwen3.6-35b-mtp-think-16k | ~36.5 | ~410 |
 
 ## Batch tuning results
 
-### qwen3.5-9b-mtp-16k (new build)
+### qwen3.5-9b-q4-mtp-16k (new build)
 - Practical sweet spot **2048**: prefill already maxed (1545 t/s at both 2048 and 4096), decode flat (~66) across 1024–4096.
 - VRAM ceiling ~16384 but **CPU-pegged** there (1693%, decode drops to <18 t/s) — never use.
 
@@ -121,7 +121,7 @@ Winner: **n_max 5, p_min 0.5** (math gate 6/6 correct, faster A/B; acceptance un
 
 | Model | config A | result | config B | result |
 |---|---|---|---|---|
-| qwen3.5-9b-mtp-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
+| qwen3.5-9b-q4-mtp-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | gemma-4-12b-qat-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | lfm2.5-8b-a1b-16k | temp 0.2 | **6/6 correct** | — | — |
 | ornith-1.5-9b-q4-think-16k | temp 1.0 | **6/6 correct** | — | — |
