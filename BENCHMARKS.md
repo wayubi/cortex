@@ -28,7 +28,9 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `gemma-4-12b-q6-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | ~60 | ~46 | ~1065 | ~0.75 |
 | `gemma-4-12b-q6-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 |
 | `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — |
-| `ornith-1.5-9b-q4-think-16k` | 16k | 16384 | — | none | 44.1 | — | 224 | — |
+| `ornith-1.5-9b-q4-think-64k` | 64k | 8192 | 5 / 0.7 | in-model | ~44 | 46 | **1523** | ~0.86 |
+| `ornith-1.5-9b-q4-think-128k` | 128k | 4736 | 5 / 0.7 | in-model | ~42 | — | **1530** | ~0.83 |
+| `ornith-1.5-9b-q4-think-256k` | 256k | 960 | 5 / 0.7 | in-model | ~45.6 | — | **1523** | ~0.87 |
 
 ## Old-build references (stale)
 
@@ -67,11 +69,15 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 - **Batch 8192** chosen (best decode + prefill 352 t/s). Saturation + long-decode validated.
 - Decode 110.2 t/s (long-decode), prefill 376 t/s — fastest model in the stack.
 
-### ornith-1.5-9b-q4-think-16k (Q4_K_M, qwen35 arch — new build)
-- Dense 9B model (no MTP, always reasoning — `reasoning = on` puts CoT in `reasoning_content`).
-- Q4_K_M (5.78 GB) fits easily at 16K; VRAM 8487 MiB. Batch ceiling effectively unlimited (no CPU spill at 65536). Best prefill at 16384 (232 t/s).
-- Decode 44 t/s — 1.4x faster than Q8_0 (31 t/s). Gen params per model card: temp 1.0, top_p 0.95, top_k 20, presence_penalty 1.5.
+### ornith-1.5-9b-q4-think-{64k,128k,256k} (Q4_K_M, qwen35 hybrid — new build)
+- **Hybrid SSM+dense** arch (33 layers, attention every 4th, 4 KV heads, kv 256) with **MTP baked in** (`nextn_predict_layers=1`) — same GGUF architecture as qwen3.5-9b-mtp. Native ctx 262144.
+- **Always reasoning** — `reasoning = on` puts CoT in `reasoning_content`.
+- Q4_K_M (5.78 GB). Hybrid arch → tiny KV (only ~8 attention layers carry KV): 64k VRAM 7097 MiB, 128k 8375 MiB, 256k 10155 MiB. All three fit 100% GPU.
+- Batch bisects (max full-GPU): **64k = 8192** (12288 spills), **128k = 4736** (4800 spills), **256k = 960** (992 spills). Prefill ~1523–1530 t/s at all three (batch-driven).
+- **MTP n_max=5 / p_min=0.7** tuned: no-MTP 44.4 t/s → n_max 2/3 ~44, **5 = peak ~46 avg (51.9 best)**, 6 = 37.8. p_min 0.5/0.9 → ~43 (slower). Decode ~44–46 t/s.
+- Saturation: 64k hit ceiling (65536, 0 OOM), 128k hit ceiling (131070, 0 OOM), 256k reached ~258K/262144 (98%, 0 OOM, ~22.8 t/s at full ctx).
 - Math gate: **6/6 correct**. Essay: 0 repeats, coherent.
+- Gen params per model card: temp 1.0, top_p 0.95, top_k 20, presence_penalty 1.5.
 
 ## MTP spec sweeps (new build, essay bench 4000 tokens)
 
@@ -124,7 +130,7 @@ Winner: **n_max 5, p_min 0.5** (math gate 6/6 correct, faster A/B; acceptance un
 | qwen3.5-9b-q4-mtp-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | gemma-4-12b-q4-qat-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | lfm2.5-8b-a1b-q8-think-16k | temp 0.2 | **6/6 correct** | — | — |
-| ornith-1.5-9b-q4-think-16k | temp 1.0 | **6/6 correct** | — | — |
+| ornith-1.5-9b-q4-think-64k | temp 1.0, n_max 5 | **6/6 correct** | — | — |
 
 Both p_min=0.5 decisions validated: no quality degradation on hard reasoning. LFM2.5 CoT: all 6 answers correct (11:24 AM, invalid syllogism, x=5, 31 apples, 5%, 42). Essay: 0 consecutive-sentence repeats, coherent, no degeneration.
 
