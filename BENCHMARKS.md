@@ -28,9 +28,9 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `gemma-4-12b-q6-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | ~60 | ~46 | ~1065 | ~0.75 |
 | `gemma-4-12b-q6-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 |
 | `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — |
-| `ornith-1.5-9b-q4-think-64k` | 64k | 8192 | 5 / 0.7 | in-model | ~44 | 46 | **1523** | ~0.86 |
-| `ornith-1.5-9b-q4-think-128k` | 128k | 4736 | 5 / 0.7 | in-model | ~42 | — | **1530** | ~0.83 |
-| `ornith-1.5-9b-q4-think-256k` | 256k | 960 | 5 / 0.7 | in-model | ~45.6 | — | **1523** | ~0.87 |
+| `ornith-1.5-9b-q4-think-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~44 | 46 | **1523** | ~0.86 |
+| `ornith-1.5-9b-q4-think-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~42 | — | **1530** | ~0.83 |
+| `ornith-1.5-9b-q4-think-256k` | 256k | 960 | 2 / 0.7 | in-model | ~45.6 | — | **1523** | ~0.87 |
 
 ## Old-build references (stale)
 
@@ -74,7 +74,8 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 - **Always reasoning** — `reasoning = on` puts CoT in `reasoning_content`.
 - Q4_K_M (5.78 GB). Hybrid arch → tiny KV (only ~8 attention layers carry KV): 64k VRAM 7097 MiB, 128k 8375 MiB, 256k 10155 MiB. All three fit 100% GPU.
 - Batch bisects (max full-GPU): **64k = 8192** (12288 spills), **128k = 4736** (4800 spills), **256k = 960** (992 spills). Prefill ~1523–1530 t/s at all three (batch-driven).
-- **MTP n_max=5 / p_min=0.7** tuned: no-MTP 44.4 t/s → n_max 2/3 ~44, **5 = peak ~46 avg (51.9 best)**, 6 = 37.8. p_min 0.5/0.9 → ~43 (slower). Decode ~44–46 t/s.
+- **MTP n_max differs per entry (reasoning workload, the real use case):** no-MTP 44.1 t/s → n_max 1=48.6, **2=50.8**, **3=53.1 (peak)**, 4=51.9, 5=50.1 on a math/CoT bench. **n_max=3 fits only the 64k** (batch 8192); at **128k/256k n_max=3+ spills the draft to CPU** (273–314% CPU, decode drops to 35–41 t/s — the draft-context buffer scales with `n_max × batch` and the batch was bisected at n_max=2). Final: **64k n_max=3, 128k/256k n_max=2**, p_min 0.7 everywhere.
+- **Gotcha (caused a real regression):** tuning n_max on one entry and copy-pasting to others WITHOUT re-running the CPU placement check. At 128k n_max=5, the draft spilled to CPU → 12 t/s + 680% CPU on a 77K-ctx reasoning request. Re-verify placement per entry after ANY n_max change. Also: tune MTP on the real workload (reasoning/CoT), NOT a prose essay — prose acceptance overstates the benefit.
 - Saturation: 64k hit ceiling (65536, 0 OOM), 128k hit ceiling (131070, 0 OOM), 256k reached ~258K/262144 (98%, 0 OOM, ~22.8 t/s at full ctx).
 - Math gate: **6/6 correct**. Essay: 0 repeats, coherent.
 - Gen params per model card: temp 1.0, top_p 0.95, top_k 20, presence_penalty 1.5.
@@ -130,7 +131,7 @@ Winner: **n_max 5, p_min 0.5** (math gate 6/6 correct, faster A/B; acceptance un
 | qwen3.5-9b-q4-mtp-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | gemma-4-12b-q4-qat-think-16k | p_min 0.5 | **6/6 correct** | p_min 0.7 | 6/6 correct |
 | lfm2.5-8b-a1b-q8-think-16k | temp 0.2 | **6/6 correct** | — | — |
-| ornith-1.5-9b-q4-think-64k | temp 1.0, n_max 5 | **6/6 correct** | — | — |
+| ornith-1.5-9b-q4-think-64k | temp 1.0, n_max 3 | **6/6 correct** | — | — |
 
 Both p_min=0.5 decisions validated: no quality degradation on hard reasoning. LFM2.5 CoT: all 6 answers correct (11:24 AM, invalid syllogism, x=5, 31 apples, 5%, 42). Essay: 0 consecutive-sentence repeats, coherent, no degeneration.
 
