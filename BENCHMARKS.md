@@ -29,8 +29,11 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `gemma-4-12b-q6-mtp-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 |
 | `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — |
 | `ornith-1.5-9b-q4-mtp-think-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | 46 | **1523** | ~0.89 |
+| `ornith-1.5-9b-q4-mtp-coder-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | — | ~1523 | ~0.94 |
 | `ornith-1.5-9b-q4-mtp-think-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | **1530** | ~0.91 |
+| `ornith-1.5-9b-q4-mtp-coder-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | ~1530 | ~0.95 |
 | `ornith-1.5-9b-q4-mtp-think-256k` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | **1523** | ~0.93 |
+| `ornith-1.5-9b-q4-mtp-coder-256k` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | ~1523 | ~0.92 |
 
 ## Old-build references (stale)
 
@@ -80,6 +83,7 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 - Saturation: 64k hit ceiling (65536, 0 OOM), 128k hit ceiling (131070, 0 OOM), 256k reached ~258K/262144 (98%, 0 OOM, ~22.8 t/s at full ctx).
 - Math gate: **6/6 correct**. Essay: 0 repeats, coherent.
 - Gen params per model card: temp 1.0, top_p 0.95, top_k 20, presence_penalty 1.5.
+- **Coder variants** (`ornith-1.5-9b-q4-mtp-coder-{64k,128k,256k}`): identical tuning (same weights/VRAM → same n_max/batch), but the model card's **coding recipe**: temp 0.6, presence_penalty 0.0 (code needs token reuse — variable names, API identifiers repeat; the general recipe's 1.5 presence penalty degrades code). Use these for coding tasks, the think variants for general/creative work. Note: ornith's coding CoT is long (~4.5 chars/token) — budget `max_tokens` generously (≥1500) or the reasoning is cut off before the final answer.
 
 ## MTP spec sweeps (new build, essay bench 4000 tokens)
 
