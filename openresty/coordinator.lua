@@ -3,7 +3,7 @@ local cjson = require "cjson"
 local state_dict   = ngx.shared.backend_state
 local counts_dict  = ngx.shared.request_counts
 
-local HOST = { ollama = "ollama", llama_cpp = "llama-cpp" }
+local HOST = { ollama = "ollama", llama_cpp = "llama-cpp", nllb = "nllb" }
 
 local DRAIN_TIMEOUT = 600
 
@@ -36,7 +36,8 @@ end
 local function get_target()
     local port = ngx.var.server_port
     if port == "11434" then return "ollama"
-    elseif port == "8080" then return "llama_cpp" end
+    elseif port == "8080" then return "llama_cpp"
+    elseif port == "5002" then return "nllb" end
     return nil
 end
 
@@ -159,6 +160,38 @@ local function unload_llamacpp()
 end
 
 
+local function unload_nllb()
+    local res, err = http_request("GET", HOST.nllb, 5002, "/v1/models")
+    if not res then
+        ngx.log(ngx.WARN, "nllb models failed: ", err)
+        return
+    end
+
+    local ok, data = pcall(cjson.decode, res.body)
+    if not ok or type(data) ~= "table" or not data.data then
+        return
+    end
+
+    local count = 0
+    for _, m in ipairs(data.data) do
+        if m.status and m.status.value == "loaded" and m.id then
+            ngx.log(ngx.INFO, "nllb: unloading ", m.id)
+            local body = cjson.encode({ model = m.id })
+            local r, e = http_request("POST", HOST.nllb, 5002, "/v1/models/unload", body)
+            if r then
+                ngx.log(ngx.INFO, "nllb: unloaded ", m.id)
+                count = count + 1
+            else
+                ngx.log(ngx.WARN, "nllb: unload failed for ", m.id, ": ", e)
+            end
+        end
+    end
+    if count == 0 then
+        ngx.log(ngx.INFO, "nllb: no loaded model to unload")
+    end
+end
+
+
 local function drain_backend(backend, target_count, timeout)
     local waited = 0
     while waited < timeout do
@@ -234,6 +267,8 @@ local function coordinate()
         unload_ollama()
     elseif current_backend == "llama_cpp" then
         unload_llamacpp()
+    elseif current_backend == "nllb" then
+        unload_nllb()
     end
 
     state_dict:set("backend", target)

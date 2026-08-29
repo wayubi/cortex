@@ -47,6 +47,23 @@ services:
     environment:
       - OLLAMA_MAX_LOADED_MODELS=1
 
+  nllb:
+    build:
+      context: ./nllb
+      dockerfile: Dockerfile
+    runtime: nvidia
+    restart: unless-stopped
+    networks:
+      - cortex_network
+    volumes:
+      - nllb_data:/root/.cache/huggingface
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
   openresty:
     build:
       context: ./openresty
@@ -55,6 +72,7 @@ services:
     ports:
       - "11434:11434"
       - "8080:8080"
+      - "5002:5002"
     volumes:
       - ./openresty/nginx.conf:/etc/nginx/conf.d/default.conf
       - ./openresty/coordinator.lua:/etc/nginx/lua/coordinator.lua
@@ -65,6 +83,7 @@ services:
 volumes:
   ollama_data:
   llama-cpp_data:
+  nllb_data:
 
 networks:
   cortex_network:
