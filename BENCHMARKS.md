@@ -37,7 +37,7 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `ornith-1.5-9b-q4-mtp-coder-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | ~1530 | ~0.95 |
 | `ornith-1.5-9b-q4-mtp-think-256k` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | **1523** | ~0.93 |
 | `ornith-1.5-9b-q4-mtp-coder-256k` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | ~1523 | ~0.92 |
-| `zamai-llama3-pashto-q8-think-8k` | 8k | 8192 | — | none (no MTP) | 34.0 | — | 2012 | — |
+| `zamai-llama3-pashto-q8-8k` | 8k | 8192 | — | none (no MTP) | 34.0 | — | 2012 | — |
 
 ## Old-build references (stale)
 
@@ -96,10 +96,10 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 - Gen params per model card: temp 1.0, top_p 0.95, top_k 20, presence_penalty 1.5.
 - **Coder variants** (`ornith-1.5-9b-q4-mtp-coder-{64k,128k,256k}`): identical tuning (same weights/VRAM → same n_max/batch), but the model card's **coding recipe**: temp 0.6, presence_penalty 0.0 (code needs token reuse — variable names, API identifiers repeat; the general recipe's 1.5 presence penalty degrades code). Use these for coding tasks, the think variants for general/creative work. Note: ornith's coding CoT is long (~4.5 chars/token) — budget `max_tokens` generously (≥1500) or the reasoning is cut off before the final answer.
 
-### zamai-llama3-pashto-q8-think-8k (Q8_0, Qwen2.5-7B base — new build)
+### zamai-llama3-pashto-q8-8k (Q8_0, Qwen2.5-7B base — new build)
 - **Base**: Meta-Llama-3-8B fine-tuned on Pashto (Peshawari/KPK dialect) by Junaid Khan, GGUF by hasnainayaz.
 - **n_ctx_train = 8192** — the 16384 request was silently capped to 8192 by llama.cpp. Renamed entry to `8k`.
-- **No MTP** (Qwen2.5 base, no drafter), no reasoning toggle works (always on by name but model doesn't have CoT capability).
+- **No MTP** (Qwen2.5 base, no drafter), no reasoning/CoT capability.
 - Q8_0 = 8.54 GB. VRAM flat at **9897 MiB** (9.9 GB) regardless of batch — the 8B compute graph is small enough that batch doesn't affect VRAM.
 - **Batch ceiling**: tested 4096 → 8192 → 16384 → 32768 → 65536 → 131072 → 262144 — **all PASS** with no OOM. VRAM identical at every value. Batch 8192 chosen (matches ctx, practical).
 - Decode: **34 t/s** (flat across all batch values). Prefill: ~2012–2700 t/s.
