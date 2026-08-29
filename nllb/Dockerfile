@@ -8,7 +8,9 @@ RUN pip3 install --no-cache-dir \
     "transformers>=4.45" torch sentencepiece fastapi uvicorn accelerate
 
 COPY server.py /app/server.py
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-EXPOSE 5001
+EXPOSE 5002
 
-CMD ["python3", "/app/server.py"]
+CMD ["/app/entrypoint.sh"]

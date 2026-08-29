@@ -1,6 +1,7 @@
 """NLLB translation service — any Hugging Face translation model, GPU only."""
 
 import gc
+import os
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -99,6 +100,11 @@ def health():
         "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "loaded_models": list(cache.keys()),
     }
+
+
+@app.post("/shutdown")
+def shutdown():
+    os._exit(0)
 
 
 if __name__ == "__main__":
