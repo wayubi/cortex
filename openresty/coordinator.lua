@@ -269,7 +269,9 @@ local function coordinate()
         unload_llamacpp()
     elseif current_backend == "nllb" then
         unload_nllb()
-        http_request("POST", HOST.nllb, 5002, "/shutdown")
+        if not same_backend then
+            http_request("POST", HOST.nllb, 5002, "/shutdown")
+        end
     end
 
     state_dict:set("backend", target)
