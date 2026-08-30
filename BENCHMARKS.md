@@ -21,6 +21,10 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `qwen3.5-9b-q4-mtp-think-16k` | 16k | 2048 | 2 / 0.5 | in-model | 67.4 | 63.6 | ~1545 | ~0.84 |
 | `qwen3.6-35b-q4-mtp-16k` | 16k | 3584 | 2 / 0.7 | in-model | 45.9 | — | **1192** | ~0.96 |
 | `qwen3.6-35b-q4-mtp-think-16k` | 16k | 3584 | 2 / 0.7 | in-model | 44.4 | — | ~1192 | ~0.94 |
+| `qwen3.6-35b-q4-mtp-8k` | 8k | 8192 | 2 / 0.7 | in-model | 37.5 | — | **1272** | ~0.96 |
+| `qwen3.6-35b-q4-mtp-think-8k` | 8k | 8192 | 2 / 0.7 | in-model | 36.8 | — | **1334** | ~0.94 |
+| `qwen3.6-35b-q4-mtp-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.6 | — | **1067** | ~0.96 |
+| `qwen3.6-35b-q4-mtp-think-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | — | ~1067 | ~0.94 |
 | `gemma-4-12b-q4-qat-mtp-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 |
 | `gemma-4-12b-q4-qat-mtp-think-16k` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 |
 | `gemma-4-12b-qat-q8-16k` | 16k | 8640 | 5 / 0.7 | Q8_0 (MTP/) | — | 74.2 | — | ~0.785 |
@@ -57,6 +61,14 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 ### qwen3.6-35b-q4-mtp-16k (new build)
 - Practical sweet spot **3584** (prefill peak): 950@2048 → 1054@3072 → **1192@3584** → 1142@4096.
 - Old ceiling 576 (640 OOM on old build) → new fit allows 3584+.
+
+### qwen3.6-35b-q4-mtp-4k / 8k (new build)
+- **4k non-think** batch=4096: prefill ~1067 t/s, decode ~33.6 t/s, VRAM 8895 MiB. 100% GPU.
+- **4k think** batch=4096: decode ~33.7 t/s, VRAM 10697 MiB. 100% GPU.
+- **8k non-think** batch=8192: prefill ~1272 t/s, decode ~37.5 t/s, VRAM ~8900 MiB. 100% GPU.
+- **8k think** batch=8192: prefill ~1334 t/s, decode ~35.6 t/s, VRAM ~10583 MiB. 100% GPU.
+- Batch > ctx is wasteful (prompt can't exceed ctx). VRAM flat regardless of batch — model weights + KV dominate. Set batch = ctx for max useful value.
+- **MTP sweep (n_max 1-3, p_min 0.7)**: all 4 variants within ±10-15% noise across n_max values — same as 16k result. Defaults retained (n_max=2, p_min=0.7).
 
 ### gemma-4-12b-qat (new build)
 - Non-think **8640** (8704 OOM), think **8576** (8640 marginal) — dense 12B small per-unit graph.
