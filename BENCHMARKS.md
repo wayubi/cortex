@@ -13,35 +13,59 @@ Old-build numbers are kept for comparison; only new-build numbers are current.
 
 ## Current configs + decode t/s (new build)
 
-Decode measured via 6000-token long-decode (real prompt) and 4000-token essay bench; acceptance = draft acceptance (MTP).
+Decode measured via 6000-token long-decode (real prompt) and 4000-token essay bench; acceptance = draft acceptance (MTP). GPU column: ✅ = 100% GPU (<100% CPU), ⚠️ CPU = MTP draft on CPU (~1400-1600% CPU).
 
-| Model | ctx | batch | n_max / p_min | drafter | long-decode t/s | essay t/s | prefill t/s | acceptance |
-|---|---|---|---|---|---|---|---|---|
-| `qwen3.5-9b-q4-mtp-16k` | 16k | 2048 | 2 / 0.7 | in-model | 70.4 | ~66 | **1545** | ~0.95 |
-| `qwen3.5-9b-q4-mtp-think-16k` | 16k | 2048 | 2 / 0.5 | in-model | 67.4 | 63.6 | ~1545 | ~0.84 |
-| `qwen3.6-35b-q4-mtp-16k` | 16k | 3584 | 2 / 0.7 | in-model | 45.9 | — | **1192** | ~0.96 |
-| `qwen3.6-35b-q4-mtp-think-16k` | 16k | 3584 | 2 / 0.7 | in-model | 44.4 | — | ~1192 | ~0.94 |
-| `qwen3.6-35b-q4-mtp-8k` | 8k | 8192 | 2 / 0.7 | in-model | 37.5 | — | **1272** | ~0.96 |
-| `qwen3.6-35b-q4-mtp-think-8k` | 8k | 8192 | 2 / 0.7 | in-model | 36.8 | — | **1334** | ~0.94 |
-| `qwen3.6-35b-q4-mtp-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.6 | — | **1067** | ~0.96 |
-| `qwen3.6-35b-q4-mtp-think-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | — | ~1067 | ~0.94 |
-| `gemma-4-12b-q4-qat-mtp-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 |
-| `gemma-4-12b-q4-qat-mtp-think-16k` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 |
-| `gemma-4-12b-qat-q8-16k` | 16k | 8640 | 5 / 0.7 | Q8_0 (MTP/) | — | 74.2 | — | ~0.785 |
-| `gemma-4-12b-qat-q8-think-16k` | 16k | 8576 | 5 / 0.5 | Q8_0 (MTP/) | — | 63.8 | — | ~0.58 |
-| `gemma-4-12b-q6-mtp-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | ~60 | ~46 | ~1065 | ~0.75 |
-| `gemma-4-12b-q6-mtp-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 |
-| `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — |
-| `lfm2.5-8b-a1b-q4-think-16k` | 16k | 16384 | — | none (no MTP) | ~131 | — | **5972** | — |
-| `lfm2.5-8b-a1b-q4-think-32k` | 32k | 16384 | — | none (no MTP) | ~134 | — | 5611 | — |
-| `lfm2.5-8b-a1b-q4-think-64k` | 64k | 8192 | — | none (no MTP) | ~128 | — | 5599 | — |
-| `ornith-1.5-9b-q4-mtp-think-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | 46 | **1523** | ~0.89 |
-| `ornith-1.5-9b-q4-mtp-coder-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | — | ~1523 | ~0.94 |
-| `ornith-1.5-9b-q4-mtp-think-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | **1530** | ~0.91 |
-| `ornith-1.5-9b-q4-mtp-coder-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | ~1530 | ~0.95 |
-| `ornith-1.5-9b-q4-mtp-think-256k` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | **1523** | ~0.93 |
-| `ornith-1.5-9b-q4-mtp-coder-256k` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | ~1523 | ~0.92 |
-| `zamai-llama3-pashto-q8-8k` | 8k | 8192 | — | none (no MTP) | 34.0 | — | 2012 | — |
+| Model | ctx | batch | n_max / p_min | drafter | long-decode t/s | essay t/s | prefill t/s | acceptance | GPU |
+|---|---|---|---|---|---|---|---|---|---|
+| `qwen3.5-9b-q4-mtp-16k` | 16k | 2048 | 2 / 0.7 | in-model | 70.4 | ~66 | **1545** | ~0.95 | ✅ |
+| `qwen3.5-9b-q4-mtp-think-16k` | 16k | 2048 | 2 / 0.5 | in-model | 67.4 | 63.6 | ~1545 | ~0.84 | ✅ |
+| `qwen3.6-35b-q4-mtp-16k` | 16k | 3584 | 2 / 0.7 | in-model | 45.9 | — | **1192** | ~0.96 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-think-16k` | 16k | 3584 | 2 / 0.7 | in-model | 44.4 | — | ~1192 | ~0.94 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-8k` | 8k | 8192 | 2 / 0.7 | in-model | 37.5 | — | **1272** | ~0.96 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-think-8k` | 8k | 8192 | 2 / 0.7 | in-model | 36.8 | — | **1334** | ~0.94 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.6 | — | **1067** | ~0.96 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-think-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | — | ~1067 | ~0.94 | ⚠️ CPU |
+| `gemma-4-12b-q4-qat-mtp-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 | ✅ |
+| `gemma-4-12b-q4-qat-mtp-think-16k` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 | ✅ |
+| `gemma-4-12b-qat-q8-16k` | 16k | 8640 | 5 / 0.7 | Q8_0 (MTP/) | — | 74.2 | — | ~0.785 | ✅ |
+| `gemma-4-12b-qat-q8-think-16k` | 16k | 8576 | 5 / 0.5 | Q8_0 (MTP/) | — | 63.8 | — | ~0.58 | ✅ |
+| `gemma-4-12b-q6-mtp-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | ~60 | ~46 | ~1065 | ~0.75 | ✅ |
+| `gemma-4-12b-q6-mtp-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 | ✅ |
+| `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — | ✅ |
+| `lfm2.5-8b-a1b-q4-think-16k` | 16k | 16384 | — | none (no MTP) | ~131 | — | **5972** | — | ✅ |
+| `lfm2.5-8b-a1b-q4-think-32k` | 32k | 16384 | — | none (no MTP) | ~134 | — | 5611 | — | ✅ |
+| `lfm2.5-8b-a1b-q4-think-64k` | 64k | 8192 | — | none (no MTP) | ~128 | — | 5599 | — | ✅ |
+| `ornith-1.5-9b-q4-mtp-think-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | 46 | **1523** | ~0.89 | ✅ |
+| `ornith-1.5-9b-q4-mtp-coder-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | — | ~1523 | ~0.94 | ✅ |
+| `ornith-1.5-9b-q4-mtp-think-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | **1530** | ~0.91 | ✅ |
+| `ornith-1.5-9b-q4-mtp-coder-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | ~1530 | ~0.95 | ✅ |
+| `ornith-1.5-9b-q4-mtp-think-256k` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | **1523** | ~0.93 | ✅ |
+| `ornith-1.5-9b-q4-mtp-coder-256k` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | ~1523 | ~0.92 | ✅ |
+| `zamai-llama3-pashto-q8-8k` | 8k | 8192 | — | none (no MTP) | 34.0 | — | 2012 | — | ✅ |
+
+## Performance ranking (4k/8k/16k qwen3.6-35b variants)
+
+All 6 variants run MTP draft on CPU (~1400-1600% CPU). The 35B MoE weights (~10 GB) + KV + compute fill ~10.8 GB VRAM, leaving no room for the draft. `override-tensor = exps=CPU` and `spec-draft-type-k/v = q4_0` tested — no improvement.
+
+**Decode speed ranking** (essay bench, 4000 tokens, `ignore_eos`):
+1. **4k think** — 39.4 t/s, prefill 51 t/s
+2. **16k non-think** — 39.0 t/s, prefill 55 t/s
+3. **4k non-think** — 37.8 t/s, prefill 50 t/s
+4. **8k think** — 36.2 t/s, prefill 47 t/s
+5. **8k non-think** — 35.9 t/s, prefill 42 t/s
+6. **16k think** — 35.4 t/s, prefill 33 t/s
+
+**Long-decode ranking** (6000 tokens):
+1. **16k non-think** — 45.9 t/s
+2. **16k think** — 44.4 t/s
+3. **8k non-think** — 37.5 t/s
+4. **8k think** — 36.8 t/s
+5. **4k think** — 33.7 t/s
+6. **4k non-think** — 33.6 t/s
+
+**Key finding:** All variants perform within ±10-15% of each other. Context window (4k vs 8k vs 16k) and think mode (on vs off) have minimal impact on decode speed. The bottleneck is the 35B MoE model size on 12 GB VRAM — the MTP draft always spills to CPU.
+
+**For the pipeline:** 16k non-think is the best choice — fastest long-decode (45.9 t/s), highest prefill (55 t/s), and 16K context is needed for complex prompts.
 
 ## Old-build references (stale)
 
@@ -61,17 +85,18 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 ### qwen3.6-35b-q4-mtp-16k (new build)
 - Practical sweet spot **3584** (prefill peak): 950@2048 → 1054@3072 → **1192@3584** → 1142@4096.
 - Old ceiling 576 (640 OOM on old build) → new fit allows 3584+.
-- VRAM 10769 MiB. 100% GPU confirmed (0% CPU during sustained decode).
+- VRAM 10769 MiB. MTP draft on CPU (~1400-1500% CPU, same as 4k/8k variants).
+- **16k non-think** batch=3584: decode 39.0 t/s, prefill 55 t/s, VRAM 10769 MiB, ~1450% CPU.
+- **16k think** batch=3584: decode 35.4 t/s, prefill 33 t/s, VRAM 10769 MiB, ~1500% CPU.
 
 ### qwen3.6-35b-q4-mtp-4k / 8k (new build)
-- **4k non-think** batch=4096: prefill ~1067 t/s, decode ~33.6 t/s, VRAM 10697 MiB. 100% GPU (0% CPU confirmed).
-- **4k think** batch=4096: decode ~33.7 t/s, VRAM 10697 MiB. 100% GPU (0% CPU confirmed).
-- **8k non-think** batch=8192: prefill ~1272 t/s, decode ~37.5 t/s, VRAM ~10583 MiB. 100% GPU (0% CPU confirmed).
-- **8k think** batch=8192: prefill ~1334 t/s, decode ~35.6 t/s, VRAM ~10583 MiB. 100% GPU (0% CPU confirmed).
-- **16k non-think** batch=3584: decode ~45.9 t/s, VRAM 10769 MiB. 100% GPU (0% CPU confirmed).
-- **16k think** batch=3584: decode ~44.4 t/s, VRAM 10769 MiB. 100% GPU (0% CPU confirmed).
-- Batch > ctx is wasteful (prompt can't exceed ctx). VRAM flat regardless of batch — model weights + KV dominate. Set batch = ctx for max useful value.
-- **MTP sweep (n_max 1-3, p_min 0.7)**: all variants within ±10-15% noise across n_max values — same as 16k result. Defaults retained (n_max=2, p_min=0.7).
+- **ALL variants run MTP draft on CPU** (~1400-1600% CPU during decode). The 35B MoE weights (~10 GB) + KV + compute fill ~10.8 GB, leaving insufficient VRAM for the MTP draft. `override-tensor = exps=CPU` frees VRAM but experts still need CPU — no improvement.
+- **4k non-think** batch=4096: decode 37.8 t/s, prefill 50 t/s, VRAM 10697 MiB, ~1400% CPU.
+- **4k think** batch=4096: decode 39.4 t/s, prefill 51 t/s, VRAM 10697 MiB, ~1450% CPU.
+- **8k non-think** batch=8192: decode 35.9 t/s, prefill 42 t/s, VRAM 10583 MiB, ~1400% CPU.
+- **8k think** batch=8192: decode 36.2 t/s, prefill 47 t/s, VRAM 10583 MiB, ~1500% CPU.
+- Batch > ctx is wasteful. VRAM flat regardless of batch. Draft KV (`spec-draft-type-k/v = q4_0`) shrinks but doesn't fix placement.
+- **MTP sweep (n_max 1-3, p_min 0.7)**: all variants within ±10-15% noise across n_max values — defaults retained (n_max=2, p_min=0.7).
 
 ### gemma-4-12b-qat (new build)
 - Non-think **8640** (8704 OOM), think **8576** (8640 marginal) — dense 12B small per-unit graph.
