@@ -19,12 +19,12 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 |---|---|---|---|---|---|---|---|---|---|
 | `qwen3.5-9b-q4-mtp-16k` | 16k | 2048 | 2 / 0.7 | in-model | 70.4 | ~66 | **1545** | ~0.95 | ✅ |
 | `qwen3.5-9b-q4-mtp-think-16k` | 16k | 2048 | 2 / 0.5 | in-model | 67.4 | 63.6 | ~1545 | ~0.84 | ✅ |
-| `qwen3.6-35b-q4-mtp-16k` | 16k | 3584 | 2 / 0.7 | in-model | 45.9 | — | **1192** | ~0.96 | ⚠️ CPU |
-| `qwen3.6-35b-q4-mtp-think-16k` | 16k | 3584 | 2 / 0.7 | in-model | 44.4 | — | ~1192 | ~0.94 | ⚠️ CPU |
-| `qwen3.6-35b-q4-mtp-8k` | 8k | 8192 | 2 / 0.7 | in-model | 37.5 | — | **1272** | ~0.96 | ⚠️ CPU |
-| `qwen3.6-35b-q4-mtp-think-8k` | 8k | 8192 | 2 / 0.7 | in-model | 36.8 | — | **1334** | ~0.94 | ⚠️ CPU |
-| `qwen3.6-35b-q4-mtp-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.6 | — | **1067** | ~0.96 | ⚠️ CPU |
-| `qwen3.6-35b-q4-mtp-think-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | — | ~1067 | ~0.94 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-16k` | 16k | 3584 | 2 / 0.7 | in-model | 45.9 | 48.7 | **1263** | ~0.96 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-think-16k` | 16k | 3584 | 2 / 0.7 | in-model | 44.4 | 28.5 | **1258** | ~0.94 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-8k` | 8k | 8192 | 2 / 0.7 | in-model | 37.5 | 44.6 | **1312** | ~0.96 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-think-8k` | 8k | 8192 | 2 / 0.7 | in-model | 36.8 | 42.3 | **1311** | ~0.94 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.6 | 49.4 | **1066** | ~0.96 | ⚠️ CPU |
+| `qwen3.6-35b-q4-mtp-think-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | 44.0 | **1073** | ~0.94 | ⚠️ CPU |
 | `gemma-4-12b-q4-qat-mtp-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 | ✅ |
 | `gemma-4-12b-q4-qat-mtp-think-16k` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 | ✅ |
 | `gemma-4-12b-qat-q8-16k` | 16k | 8640 | 5 / 0.7 | Q8_0 (MTP/) | — | 74.2 | — | ~0.785 | ✅ |
@@ -47,25 +47,23 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 
 All 6 variants run MTP draft on CPU (~1400-1600% CPU). The 35B MoE weights (~10 GB) + KV + compute fill ~10.8 GB VRAM, leaving no room for the draft. `override-tensor = exps=CPU` and `spec-draft-type-k/v = q4_0` tested — no improvement.
 
-**Decode speed ranking** (essay bench, 4000 tokens, `ignore_eos`):
-1. **4k think** — 39.4 t/s, prefill 51 t/s
-2. **16k non-think** — 39.0 t/s, prefill 55 t/s
-3. **4k non-think** — 37.8 t/s, prefill 50 t/s
-4. **8k think** — 36.2 t/s, prefill 47 t/s
-5. **8k non-think** — 35.9 t/s, prefill 42 t/s
-6. **16k think** — 35.4 t/s, prefill 33 t/s
+**Proper benchmark** (prompt sized to ~75% of ctx, `ignore_eos`):
 
-**Long-decode ranking** (6000 tokens):
-1. **16k non-think** — 45.9 t/s
-2. **16k think** — 44.4 t/s
-3. **8k non-think** — 37.5 t/s
-4. **8k think** — 36.8 t/s
-5. **4k think** — 33.7 t/s
-6. **4k non-think** — 33.6 t/s
+| Variant | ctx | prompt tokens | prefill t/s | decode t/s |
+|---|---|---|---|---|
+| 4k non-think | 4k | 2360 | 1066 | 49.4 |
+| 4k think | 4k | 2358 | 1073 | 44.0 |
+| 8k non-think | 8k | 4708 | 1312 | 44.6 |
+| 8k think | 8k | 4706 | 1311 | 42.3 |
+| 16k non-think | 16k | 9404 | 1263 | 48.7 |
+| 16k think | 16k | 9402 | 1258 | 28.5 |
 
-**Key finding:** All variants perform within ±10-15% of each other. Context window (4k vs 8k vs 16k) and think mode (on vs off) have minimal impact on decode speed. The bottleneck is the 35B MoE model size on 12 GB VRAM — the MTP draft always spills to CPU.
+**Key findings:**
+- **Prefill is identical between think and non-think** at each ctx level (1066 vs 1073, 1312 vs 1311, 1263 vs 1258). Prefill numbers across ctx levels are not comparable (different prompt sizes).
+- **Decode is similar** across all variants except 16k think (28.5 t/s vs 42-49 for others). Could be reasoning overhead or noise.
+- **All variants have MTP draft on CPU** (~1400-1600%). The 35B MoE on 12 GB has no room for the draft.
 
-**For the pipeline:** 16k non-think is the best choice — fastest long-decode (45.9 t/s), highest prefill (55 t/s), and 16K context is needed for complex prompts.
+**For the pipeline:** 16k non-think is the best choice — fastest decode (48.7 t/s), 16K context for complex prompts.
 
 ## Old-build references (stale)
 
