@@ -61,14 +61,17 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 ### qwen3.6-35b-q4-mtp-16k (new build)
 - Practical sweet spot **3584** (prefill peak): 950@2048 → 1054@3072 → **1192@3584** → 1142@4096.
 - Old ceiling 576 (640 OOM on old build) → new fit allows 3584+.
+- VRAM 10769 MiB. 100% GPU confirmed (0% CPU during sustained decode).
 
 ### qwen3.6-35b-q4-mtp-4k / 8k (new build)
-- **4k non-think** batch=4096: prefill ~1067 t/s, decode ~33.6 t/s, VRAM 8895 MiB. 100% GPU.
-- **4k think** batch=4096: decode ~33.7 t/s, VRAM 10697 MiB. 100% GPU.
-- **8k non-think** batch=8192: prefill ~1272 t/s, decode ~37.5 t/s, VRAM ~8900 MiB. 100% GPU.
-- **8k think** batch=8192: prefill ~1334 t/s, decode ~35.6 t/s, VRAM ~10583 MiB. 100% GPU.
+- **4k non-think** batch=4096: prefill ~1067 t/s, decode ~33.6 t/s, VRAM 10697 MiB. 100% GPU (0% CPU confirmed).
+- **4k think** batch=4096: decode ~33.7 t/s, VRAM 10697 MiB. 100% GPU (0% CPU confirmed).
+- **8k non-think** batch=8192: prefill ~1272 t/s, decode ~37.5 t/s, VRAM ~10583 MiB. 100% GPU (0% CPU confirmed).
+- **8k think** batch=8192: prefill ~1334 t/s, decode ~35.6 t/s, VRAM ~10583 MiB. 100% GPU (0% CPU confirmed).
+- **16k non-think** batch=3584: decode ~45.9 t/s, VRAM 10769 MiB. 100% GPU (0% CPU confirmed).
+- **16k think** batch=3584: decode ~44.4 t/s, VRAM 10769 MiB. 100% GPU (0% CPU confirmed).
 - Batch > ctx is wasteful (prompt can't exceed ctx). VRAM flat regardless of batch — model weights + KV dominate. Set batch = ctx for max useful value.
-- **MTP sweep (n_max 1-3, p_min 0.7)**: all 4 variants within ±10-15% noise across n_max values — same as 16k result. Defaults retained (n_max=2, p_min=0.7).
+- **MTP sweep (n_max 1-3, p_min 0.7)**: all variants within ±10-15% noise across n_max values — same as 16k result. Defaults retained (n_max=2, p_min=0.7).
 
 ### gemma-4-12b-qat (new build)
 - Non-think **8640** (8704 OOM), think **8576** (8640 marginal) — dense 12B small per-unit graph.
