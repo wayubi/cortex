@@ -27,8 +27,6 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `qwen3.6-35b-q4-mtp-think-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | 44.0 | **1073** | ~0.94 | ⚠️ CPU |
 | `gemma-4-12b-q4-qat-mtp-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 | ✅ |
 | `gemma-4-12b-q4-qat-mtp-think-16k` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 | ✅ |
-| `gemma-4-12b-qat-q8-16k` | 16k | 8640 | 5 / 0.7 | Q8_0 (MTP/) | — | 74.2 | — | ~0.785 | ✅ |
-| `gemma-4-12b-qat-q8-think-16k` | 16k | 8576 | 5 / 0.5 | Q8_0 (MTP/) | — | 63.8 | — | ~0.58 | ✅ |
 | `gemma-4-12b-q6-mtp-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | ~60 | ~46 | ~1065 | ~0.75 | ✅ |
 | `gemma-4-12b-q6-mtp-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 | ✅ |
 | `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — | ✅ |
