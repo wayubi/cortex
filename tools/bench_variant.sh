@@ -1,16 +1,17 @@
 #!/bin/bash
 # Benchmark a llama-cpp model variant: decode speed, prefill speed, CPU placement
 # Usage: ./tools/bench_variant.sh <model-name> <label> <prompt-tokens> <max-tokens>
-# Example: ./tools/bench_variant.sh qwen3.6-35b-q4-mtp-16k "16k non-think" 12000 1000
+# Example: ./tools/bench_variant.sh gemma-4-26b-a4b-q4-qat-mtp-16k "16k non-think" 12000 1000
 
 MODEL=$1
 LABEL=$2
 PROMPT_TOKENS=$3
 MAX_TOKENS=$4
 OUTPUT=/tmp/bench_output.json
+VRAM_WAIT=${5:-600} # optional 5th arg: VRAM wait seconds (default 600 for first-run download)
 
 if [ -z "$MODEL" ] || [ -z "$LABEL" ] || [ -z "$PROMPT_TOKENS" ] || [ -z "$MAX_TOKENS" ]; then
-  echo "Usage: $0 <model-name> <label> <prompt-tokens> <max-tokens>"
+  echo "Usage: $0 <model-name> <label> <prompt-tokens> <max-tokens> [vram-wait-seconds]"
   exit 1
 fi
 
@@ -43,12 +44,16 @@ print(json.dumps({
 PID=$!
 
 # Wait for VRAM > 2GB (model loaded into GPU)
-echo "Waiting for model to load..."
-for i in $(seq 1 60); do
+# First run may need to download the model — use VRAM_WAIT (default 600s)
+echo "Waiting for model to load (timeout ${VRAM_WAIT}s)..."
+for i in $(seq 1 $VRAM_WAIT); do
   VRAM=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader | tr -d ' MiB')
   if [ "$VRAM" -gt 2000 ] 2>/dev/null; then
     echo "Model loaded: ${VRAM} MiB"
     break
+  fi
+  if [ $((i % 30)) -eq 0 ]; then
+    echo "  still waiting... (${i}s, VRAM: ${VRAM:-0} MiB)"
   fi
   sleep 1
 done
@@ -63,6 +68,13 @@ for i in $(seq 1 25); do
   sleep 2
 done
 wait $PID 2>/dev/null
+
+# Check for OOM in logs
+OOM=$(docker logs --since 2m cortex-llama-cpp-1 2>&1 | grep -ci "cudaMalloc failed\|failed to allocate\|out of memory\|exiting due to")
+if [ "$OOM" -gt 0 ]; then
+  echo "=== OOM DETECTED ==="
+  docker logs --since 2m cortex-llama-cpp-1 2>&1 | grep -i "cudaMalloc failed\|failed to allocate\|out of memory\|exiting due to" | tail -5
+fi
 
 # Extract REAL prefill + decode from response
 echo "=== RESULTS: $LABEL ==="

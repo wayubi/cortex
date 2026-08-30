@@ -27,8 +27,12 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `qwen3.6-35b-q4-mtp-think-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | 44.0 | **1073** | ~0.94 | ⚠️ CPU |
 | `gemma-4-12b-q4-qat-mtp-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 | ✅ |
 | `gemma-4-12b-q4-qat-mtp-think-16k` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 | ✅ |
-| `gemma-4-12b-q6-mtp-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | ~60 | ~46 | ~1065 | ~0.75 | ✅ |
-| `gemma-4-12b-q6-mtp-think-16k` (non-QAT) | 16k | 1088 | 7 / 0.7 | Q4_0 (root, q4_0 KV) | 59.8 | ~46 | ~1065 | ~0.69 | ✅ |
+| `gemma-4-26b-a4b-q4-qat-mtp-16k` | 16k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 52.6 | **1766** | ~0.96 | ⚠️ CPU |
+| `gemma-4-26b-a4b-q4-qat-mtp-think-16k` | 16k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 43.9 | **1752** | ~0.94 | ⚠️ CPU |
+| `gemma-4-26b-a4b-q4-qat-mtp-8k` | 8k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 47.0 | **1612** | ~0.96 | ⚠️ CPU |
+| `gemma-4-26b-a4b-q4-qat-mtp-think-8k` | 8k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 40.9 | **1568** | ~0.94 | ⚠️ CPU |
+| `gemma-4-26b-a4b-q4-qat-mtp-4k` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 45.4 | **1392** | ~0.96 | ⚠️ CPU |
+| `gemma-4-26b-a4b-q4-qat-mtp-think-4k` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 63.4 | **1456** | ~0.94 | ⚠️ CPU |
 | `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — | ✅ |
 | `lfm2.5-8b-a1b-q4-think-16k` | 16k | 16384 | — | none (no MTP) | ~131 | — | **5972** | — | ✅ |
 | `lfm2.5-8b-a1b-q4-think-32k` | 32k | 16384 | — | none (no MTP) | ~134 | — | 5611 | — | ✅ |
@@ -62,6 +66,29 @@ All 6 variants run MTP draft on CPU (~1400-1600% CPU). The 35B MoE weights (~10 
 - **All variants have MTP draft on CPU** (~1400-1600%). The 35B MoE on 12 GB has no room for the draft.
 
 **For the pipeline:** 16k non-think is the best choice — fastest decode (48.7 t/s), 16K context for complex prompts.
+
+## Performance ranking (gemma-4-26b-a4b-q4-qat variants)
+
+All 6 variants run MTP draft on CPU (~1000-1200% CPU). 25.2B total / 3.8B active MoE, Q4_K_XL fits in 11.5 GB VRAM.
+
+**Proper benchmark** (prompt sized to ~75% of ctx, `ignore_eos`):
+
+| Variant | ctx | prompt tokens | prefill t/s | decode t/s |
+|---|---|---|---|---|
+| 4k non-think | 4k | 2361 | 1392 | 45.4 |
+| 4k think | 4k | 2364 | 1456 | **63.4** |
+| 8k non-think | 8k | 4709 | 1612 | 47.0 |
+| 8k think | 8k | 4712 | 1568 | 40.9 |
+| 16k non-think | 16k | 9405 | 1766 | 52.6 |
+| 16k think | 16k | 9408 | 1752 | 43.9 |
+
+**Key findings:**
+- **4k think is fastest** at 63.4 t/s — faster than all qwen3.6-35b variants.
+- **Think is faster than non-think at 4k** (63.4 vs 45.4) but **slower at 8k/16k** (40.9/43.9 vs 47.0/52.6).
+- **Prefill scales with prompt size** (as expected) — 1392-1766 t/s range.
+- **All variants have MTP draft on CPU** (~1000-1200%). 14.2 GB weights fill most of 12 GB VRAM.
+
+**For the pipeline:** 4k think is the speed champion (63.4 t/s), but 16k non-think has the best balance (52.6 t/s + 16K context for complex prompts).
 
 ## Old-build references (stale)
 
