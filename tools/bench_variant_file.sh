@@ -3,8 +3,8 @@
 # Usage: ./tools/bench_variant_file.sh <model-name> <label> <prompt-tokens> [max-tokens] [vram-wait-seconds]
 # Example: ./tools/bench_variant_file.sh glm-4.7-30b-a3b-flash-q4-64k "64k non-think" 40000
 #
-# Defaults: max-tokens=4000 (long decode reveals true placement)
-# Placement: polls CPU for 160s after VRAM stabilizes, classifies GPU vs CPU
+# Captures: CPU%, GPU util%, GPU temp, GPU power, VRAM, system RAM, process RSS
+# Placement: polls for 160s, classifies GPU vs CPU based on sustained CPU
 
 MODEL=$1
 LABEL=$2
@@ -64,15 +64,32 @@ for i in $(seq 1 $VRAM_WAIT); do
   sleep 1
 done
 
-# Sample CPU for 160s
-echo "=== SAMPLING CPU FOR ${CPU_POLL_SAMPLES} SAMPLES (${CPU_POLL_SAMPLES}x2s = $((CPU_POLL_SAMPLES * 2))s) ==="
+# Sample CPU, GPU, RAM for 160s
+echo "=== SAMPLING FOR ${CPU_POLL_SAMPLES} SAMPLES (${CPU_POLL_SAMPLES}x2s = $((CPU_POLL_SAMPLES * 2))s) ==="
+echo "$(date +%H:%M:%S) | CPU% | GPU% | GPU_Temp | GPU_W | VRAM | RAM_Used | RSS_MB"
 CPU_SAMPLES=()
+GPU_UTIL_SAMPLES=()
 for i in $(seq 1 $CPU_POLL_SAMPLES); do
+  # CPU from top
   TOP_LINE=$(top -bn1 | grep llama-s | head -n1)
   CPU=$(echo "$TOP_LINE" | awk '{print $9}')
-  VRAM=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader)
-  echo "$(date +%H:%M:%S) CPU: ${CPU}% | VRAM: ${VRAM}"
+
+  # GPU metrics
+  GPU_INFO=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,memory.used --format=csv,noheader,nounits)
+  GPU_UTIL=$(echo "$GPU_INFO" | cut -d',' -f1 | tr -d ' ')
+  GPU_TEMP=$(echo "$GPU_INFO" | cut -d',' -f2 | tr -d ' ')
+  GPU_POWER=$(echo "$GPU_INFO" | cut -d',' -f3 | tr -d ' ')
+  VRAM=$(echo "$GPU_INFO" | cut -d',' -f4 | tr -d ' ')
+
+  # System RAM (used in MB)
+  RAM_USED=$(free -m | awk '/Mem:/ {print $3}')
+
+  # Process RSS (llama-server, in MB)
+  RSS_MB=$(ps aux | grep "llama-server" | grep -v grep | grep -v "models-preset" | awk '{print int($6/1024)}' | head -1)
+
+  echo "$(date +%H:%M:%S) | ${CPU}% | ${GPU_UTIL}% | ${GPU_TEMP}C | ${GPU_POWER}W | ${VRAM}MiB | ${RAM_USED}MiB | ${RSS_MB}MiB"
   CPU_SAMPLES+=("$CPU")
+  GPU_UTIL_SAMPLES+=("$GPU_UTIL")
   sleep 2
 done
 
@@ -82,17 +99,29 @@ wait $PID 2>/dev/null
 AVG_START=10
 CPU_SUM=0
 CPU_COUNT=0
+GPU_UTIL_SUM=0
+GPU_UTIL_COUNT=0
 for i in $(seq $AVG_START $((${#CPU_SAMPLES[@]} - 1))); do
-  VAL="${CPU_SAMPLES[$i]}"
-  if [ -n "$VAL" ] && [ "$VAL" != "0.0" ]; then
-    CPU_SUM=$(echo "$CPU_SUM + $VAL" | bc)
+  C_VAL="${CPU_SAMPLES[$i]}"
+  G_VAL="${GPU_UTIL_SAMPLES[$i]}"
+  if [ -n "$C_VAL" ] && [ "$C_VAL" != "0.0" ]; then
+    CPU_SUM=$(echo "$CPU_SUM + $C_VAL" | bc)
     CPU_COUNT=$((CPU_COUNT + 1))
+  fi
+  if [ -n "$G_VAL" ]; then
+    GPU_UTIL_SUM=$(echo "$GPU_UTIL_SUM + $G_VAL" | bc)
+    GPU_UTIL_COUNT=$((GPU_UTIL_COUNT + 1))
   fi
 done
 if [ "$CPU_COUNT" -gt 0 ]; then
   AVG_CPU=$(echo "scale=1; $CPU_SUM / $CPU_COUNT" | bc)
 else
   AVG_CPU="0"
+fi
+if [ "$GPU_UTIL_COUNT" -gt 0 ]; then
+  AVG_GPU_UTIL=$(echo "scale=1; $GPU_UTIL_SUM / $GPU_UTIL_COUNT" | bc)
+else
+  AVG_GPU_UTIL="0"
 fi
 
 # Classify placement
@@ -127,5 +156,5 @@ if 'choices' in d:
 else:
     print('ERROR: ' + json.dumps(d)[:200])
 "
-echo "=== PLACEMENT: ${PLACEMENT} (avg CPU ${AVG_CPU}% from sample ${AVG_START}+, ${CPU_COUNT} samples) ==="
+echo "=== PLACEMENT: ${PLACEMENT} (avg CPU ${AVG_CPU}%, avg GPU util ${AVG_GPU_UTIL}%) ==="
 echo "=== DONE: $LABEL ==="
