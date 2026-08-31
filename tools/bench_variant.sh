@@ -48,32 +48,19 @@ print(json.dumps({
 " <<< "$PROMPT")" > "$OUTPUT" 2>&1 &
 PID=$!
 
-# Wait for VRAM > 2GB (model loaded into GPU)
-# First run may need to download the model — use VRAM_WAIT (default 600s)
+# Wait for VRAM > 2GB
 echo "Waiting for model to load (timeout ${VRAM_WAIT}s)..."
-VRAM_STABILIZED=0
-VRAM_PREV=0
 for i in $(seq 1 $VRAM_WAIT); do
   VRAM=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader | tr -d ' MiB')
-  if [ "$VRAM" -gt 2000 ] 2>/dev/null && [ "$VRAM_STABILIZED" -eq 0 ]; then
-    # VRAM jumped — model started loading, wait for it to stabilize
-    if [ "$VRAM" = "$VRAM_PREV" ]; then
-      VRAM_STABILIZED=1
-      echo "Model loaded: ${VRAM} MiB (VRAM stable)"
-    fi
-    VRAM_PREV=$VRAM
+  if [ "$VRAM" -gt 2000 ] 2>/dev/null; then
+    echo "Model loaded: ${VRAM} MiB"
+    break
   fi
   if [ $((i % 30)) -eq 0 ]; then
     echo "  still waiting... (${i}s, VRAM: ${VRAM:-0} MiB)"
   fi
   sleep 1
 done
-
-# If VRAM never stabilized (timeout), report current VRAM
-if [ "$VRAM_STABILIZED" -eq 0 ]; then
-  VRAM=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader | tr -d ' MiB')
-  echo "VRAM timeout: ${VRAM:-0} MiB"
-fi
 
 # Sample CPU with top every 2s during decode
 # Phase 1: Collect raw samples for 160s

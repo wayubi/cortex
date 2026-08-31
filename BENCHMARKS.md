@@ -57,12 +57,12 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `glm-4.7-30b-a3b-flash-q4-64k-think-coder` | 64k | 4096 | — | none | 23.9 | 23.9 | 511 | — |
 | `glm-4.7-30b-a3b-flash-q4-128k-think-coder` | 128k | 4096 | — | none | 18.2 | 18.2 | 503 | — |
 | `glm-4.7-30b-a3b-flash-q4-198k-think-coder` | 198k | 4096 | — | none | 19.7 | 19.7 | 499 | — |
-| `gpt-oss-20b-a4b-q4-low-64k` | 64k | 4096 | — | none | 30.4 | 30.4 | 2013 | — |
-| `gpt-oss-20b-a4b-q4-mid-64k` | 64k | 4096 | — | none | 28.5 | 28.5 | 2019 | — |
-| `gpt-oss-20b-a4b-q4-high-64k` | 64k | 4096 | — | none | 30.1 | 30.1 | 2002 | — |
-| `gpt-oss-20b-a4b-q4-low-128k` | 128k | 4096 | — | none | 28.5 | 28.5 | 1961 | — |
-| `gpt-oss-20b-a4b-q4-mid-128k` | 128k | 4096 | — | none | 26.5 | 26.5 | 1961 | — |
-| `gpt-oss-20b-a4b-q4-high-128k` | 128k | 4096 | — | none | 27.3 | 27.3 | 1945 | — |
+| `gpt-oss-20b-a4b-q4-low-64k` | 64k | 4096 | — | none | 30.9 | 30.9 | 2018 | — |
+| `gpt-oss-20b-a4b-q4-mid-64k` | 64k | 4096 | — | none | 29.9 | 29.9 | 2001 | — |
+| `gpt-oss-20b-a4b-q4-high-64k` | 64k | 4096 | — | none | 30.4 | 30.4 | 2034 | — |
+| `gpt-oss-20b-a4b-q4-low-128k` | 128k | 4096 | — | none | 28.5 | 28.5 | 1948 | — |
+| `gpt-oss-20b-a4b-q4-mid-128k` | 128k | 4096 | — | none | 29.0 | 29.0 | 1971 | — |
+| `gpt-oss-20b-a4b-q4-high-128k` | 128k | 4096 | — | none | 29.3 | 29.3 | 1976 | — |
 
 ## Performance ranking (4k/8k/16k qwen-3.6-35b-a3b variants)
 
@@ -244,10 +244,10 @@ Winner: **n_max 5, p_min 0.5** (math gate 6/6 correct, faster A/B; acceptance un
 - Non-think slightly faster than think (24.2 vs 23.9 at 64k).
 
 ### gpt-oss-20b-a4b (UD-Q4_K_XL)
-- 21B total, 3.6B active (MoE). Fits in ~11 GB VRAM. No MTP.
-- Decode ~26-30 t/s, prefill ~1945-2019 t/s. Fully on GPU.
-- Low/high reasoning effort variants: CPU ~900% (heavy reasoning). Mid: CPU ~15%.
-- Prefill much faster than GLM (2000 vs 500 t/s) — smaller model.
+- 21B total, 3.6B active (MoE). GGUF ~11 GB, fits in VRAM (~10.9 GB used).
+- **All variants run on CPU** (~900-1060% avg CPU during decode).
+- Decode ~29-31 t/s, prefill ~1948-2034 t/s.
+- Low/high reasoning effort: same decode speed — reasoning effort doesn't affect throughput.
 
 ## Hard-task quality gates (6 math/logic questions, max_tokens 2048)
 
