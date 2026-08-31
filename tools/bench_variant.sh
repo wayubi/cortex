@@ -19,6 +19,14 @@ if [ -z "$MODEL" ] || [ -z "$LABEL" ] || [ -z "$PROMPT_TOKENS" ]; then
   exit 1
 fi
 
+# Pre-flight check: verify batch-size is explicitly set in models.ini
+BATCH_CHECK=$(grep -A 20 "\[$MODEL\]" /mnt/md2/docker-containers/cortex/llama-cpp/models.ini | grep -c "batch-size")
+if [ "$BATCH_CHECK" -eq 0 ]; then
+  echo "WARNING: $MODEL has no explicit batch-size in models.ini — inherits default 4096 from [*]"
+  echo "This is WRONG. Run batch bisect first: AGENTS.md 'Stress-testing batch/ubatch'"
+  echo "Continuing anyway (results may be unreliable)..."
+fi
+
 echo "=== RESTARTING: $LABEL ==="
 cd /mnt/md2/docker-containers/cortex && docker compose restart llama-cpp
 sleep 5

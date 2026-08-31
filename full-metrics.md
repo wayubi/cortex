@@ -35,6 +35,8 @@ All models.ini entries with complete benchmark data. RTX 3060 12GB.
 - `unverified` = bench-marked with old methodology (1000 tokens, 50s polling) — placement data unreliable
 - GLM 4.7, REAP, gpt-oss: full metrics (4000 tokens, 160s polling)
 - qwen, gemma, lfm, ornith, zamai: partial metrics only
+- **Rows without explicit batch-size are UNTRUSTED** — benchmarked with default 4096 (wrong). Re-bench after batch bisect.
+- Coder variants do NOT need benchmarking — copy non-coder values.
 
 ## Benchmark Data
 

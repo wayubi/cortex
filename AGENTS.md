@@ -56,6 +56,16 @@ cortex/
 
 **Rule: All scripts, tools, and utility files go in the `tools/` folder.**
 
+## Pre-flight checklist (BEFORE benchmarking ANY model)
+
+1. **Verify batch-size/ubatch-size is EXPLICITLY set** in `models.ini` for the target `[model]` entry
+2. **If not set, it inherits 4096 from `[*]` — this is WRONG** and must be bisected first
+3. **Run batch bisect** (procedure below) before any benchmark
+4. **Run placement check** (step 8) after batch bisect to verify compute on GPU
+5. **THEN benchmark** with optimal batch using `./tools/bench_variant.sh` or `./tools/bench_variant_file.sh`
+
+**Coder variants do NOT need benchmarking.** They share the same model, same batch, same performance as their non-coder counterpart. Only sampling params (temp, top-p) differ. Copy the non-coder's benchmark numbers directly.
+
 ## Stress-testing batch/ubatch (proven procedure)
 
 Finding the max `batch-size`/`ubatch-size` a model fits in VRAM. Goal: the highest value that survives a real decode **with the compute actually on GPU** — the ceiling is two-sided: too high OOMs, and just below the OOM ceiling the **MTP draft can silently spill to CPU** (slow decode + heavy CPU). See the placement check in step 8.

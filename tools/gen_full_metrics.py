@@ -159,6 +159,8 @@ lines.append("- Coder variants share benchmarks with non-coder equivalents (same
 lines.append("- `unverified` = bench-marked with old methodology (1000 tokens, 50s polling) — placement data unreliable")
 lines.append("- GLM 4.7, REAP, gpt-oss: full metrics (4000 tokens, 160s polling)")
 lines.append("- qwen, gemma, lfm, ornith, zamai: partial metrics only")
+lines.append("- **Rows without explicit batch-size are UNTRUSTED** — benchmarked with default 4096 (wrong). Re-bench after batch bisect.")
+lines.append("- Coder variants do NOT need benchmarking — copy non-coder values.")
 lines.append("")
 lines.append("## Benchmark Data")
 lines.append("")
