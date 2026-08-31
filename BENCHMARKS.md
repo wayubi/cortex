@@ -34,9 +34,10 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `gemma-4-26b-a4b-q4-qat-mtp-4k` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 45.4 | **1392** | ~0.96 | ⚠️ CPU |
 | `gemma-4-26b-a4b-q4-qat-mtp-think-4k` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 63.4 | **1456** | ~0.94 | ⚠️ CPU |
 | `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | 106.6 | **5363** | — | ✅ |
-| `lfm2.5-8b-a1b-q4-think-16k` | 16k | 16384 | — | none (no MTP) | ~131 | **133.6** | **5407** | — | ✅ |
-| `lfm2.5-8b-a1b-q4-think-32k` | 32k | 16384 | — | none (no MTP) | ~134 | — | 5611 | — | ✅ |
-| `lfm2.5-8b-a1b-q4-think-64k` | 64k | 8192 | — | none (no MTP) | ~128 | — | 5599 | — | ✅ |
+| `lfm2.5-8b-a1b-q4-think-4k` | 4k | 16384 | — | none (no MTP) | — | **140.7** | **5382** | — | ✅ |
+| `lfm2.5-8b-a1b-q4-think-8k` | 8k | 16384 | — | none (no MTP) | — | 130.0 | **5835** | — | ✅ |
+| `lfm2.5-8b-a1b-q4-think-16k` | 16k | 16384 | — | none (no MTP) | ~131 | **135.4** | **5622** | — | ✅ |
+| `lfm2.5-8b-a1b-q4-think-32k` | 32k | 16384 | — | none (no MTP) | ~134 | 120.4 | 4374 | — | ✅ |
 | `ornith-1.5-9b-q4-mtp-think-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | 46 | **1523** | ~0.89 | ✅ |
 | `ornith-1.5-9b-q4-mtp-coder-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | — | ~1523 | ~0.94 | ✅ |
 | `ornith-1.5-9b-q4-mtp-think-128k` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | **1530** | ~0.91 | ✅ |
@@ -141,12 +142,14 @@ All 6 variants run MTP draft on CPU (~1000-1200% CPU). 25.2B total / 3.8B active
 - Decode 106.6 t/s (proper bench), prefill 5363 t/s — fully on GPU.
 - **Quality: 22/25** on 25-question benchmark (math/science/history/geography/literature). Q4 is 23/25 — slightly more accurate.
 
-### lfm2.5-8b-a1b-q4-think-{16k,32k,64k} (UD-Q4_K_XL — new build)
-- Same lfm2moe arch (24 blocks, only 6 layers carry KV, 32 exp / 4 active, 1.5B active). Native ctx 128000 → 64K is within native.
-- Q4 frees ~4.5 GB: VRAM 7511 MiB @ 16k vs Q8's 10541 MiB.
-- **Q4 decode is faster than Q8**: 133.6 t/s vs 106.6 (Q4 weights halve memory bandwidth). Prefill identical (5407 vs 5363).
-- Per-entry batch bisects: **16k=16384** (prefill peak 5407 t/s; decode 133.6 flat), **32k=16384** (decode 134, prefill 5611), **64k=8192** (decode 128, prefill 5599; 24576+ spills to CPU — 369% CPU, decode 84 t/s). Decode flat across batch at all ctx (compute-bound), so prefill is the tiebreaker.
-- **Quality: 23/25** on 25-question benchmark — slightly more accurate than Q8 (22/25). Q4 is the clear winner: faster, less VRAM, more accurate.
+### lfm2.5-8b-a1b-q4-think-{4k,8k,16k,32k} (UD-Q4_K_XL)
+- Same lfm2moe arch (24 blocks, only 6 layers carry KV, 32 exp / 4 active, 1.5B active). Native ctx 128000.
+- Q4 frees ~4.5 GB vs Q8: VRAM 5.7-8.1 GB depending on ctx.
+- **Q4 decode is faster than Q8**: 120-141 t/s vs 106.6 (Q4 weights halve memory bandwidth). Prefill 4374-5835 t/s.
+- All variants batch=16384, all fully on GPU (CPU ~100% during decode).
+- Decode flat across ctx (compute-bound): 4k=140.7, 8k=130.0, 16k=135.4, 32k=120.4 t/s.
+- Prefill scales with prompt: 4k=5382, 8k=5835, 16k=5622, 32k=4374 t/s.
+- **Quality: 23/25** on 25-question benchmark — slightly more accurate than Q8 (22/25).
 - 64k saturation: hit ceiling (65536, 0 OOM). Math gate: **6/6 correct** on 16k.
 
 ### ornith-1.5-9b-q4-mtp-think-{64k,128k,256k} (Q4_K_M, qwen35 hybrid — new build)
