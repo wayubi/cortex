@@ -1,11 +1,11 @@
 #!/bin/bash
-# master.sh — Batch model + pipeline runner for the benchmark/tuning stack
+# run_bench.sh — Batch benchmarking: select models, select pipeline steps, run them
 #
 # Usage:
-#   ./tools/master.sh                              # interactive: pick models, pick steps, confirm, run
-#   ./tools/master.sh <steps> <models...>          # non-interactive, e.g.:
-#                                                  #   ./tools/master.sh all glm-4.7-30b-a3b-flash-q4-64k
-#                                                  #   ./tools/master.sh bench,mtp qwen-3.5-9b-q4-mtp-16k qwen-3.5-9b-q4-mtp-16k-think
+#   ./tools/run_bench.sh                            # interactive: pick models, pick steps, confirm, run
+#   ./tools/run_bench.sh <steps> <models...>        # non-interactive, e.g.:
+#                                                   #   ./tools/run_bench.sh all glm-4.7-30b-a3b-flash-q4-64k
+#                                                   #   ./tools/run_bench.sh bench,mtp qwen-3.5-9b-q4-mtp-16k qwen-3.5-9b-q4-mtp-16k-think
 #
 # <steps>  = comma list from {bisect,mtp,bench} or 'all'
 # <models> = exact models.ini section names (comma/space separated)
@@ -19,7 +19,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INI="$ROOT/llama-cpp/models.ini"
 LOG_DIR="$ROOT/logs"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/master_$(date +%Y%m%d-%H%M).log"
+LOG_FILE="$LOG_DIR/run_bench_$(date +%Y%m%d-%H%M).log"
 
 # ── Model inventory from models.ini ─────────────────────────
 declare -a MODEL_NAMES=()
@@ -156,7 +156,7 @@ run_step() {
   else
     STATUS="FAIL"
   fi
-  echo "$STATUS" > /tmp/master_status.$$
+  echo "$STATUS" > /tmp/run_bench_status.$$
 }
 
 # ── Main ────────────────────────────────────────────────────
@@ -273,8 +273,8 @@ for i in $MODEL_IDXS; do
         fi ;;
     esac
     run_step "$s" "$i" "$NAME"
-    VERDICTS["$NAME|$s"]=$(cat /tmp/master_status.$$)
-    rm -f /tmp/master_status.$$
+    VERDICTS["$NAME|$s"]=$(cat /tmp/run_bench_status.$$)
+    rm -f /tmp/run_bench_status.$$
   done
 done
 
