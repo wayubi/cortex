@@ -87,6 +87,7 @@ All 6 variants run MTP draft on CPU (~1000-1200% CPU). 25.2B total / 3.8B active
 - **Think is faster than non-think at 4k** (63.4 vs 45.4) but **slower at 8k/16k** (40.9/43.9 vs 47.0/52.6).
 - **Prefill scales with prompt size** (as expected) — 1392-1766 t/s range.
 - **All variants have MTP draft on CPU** (~1000-1200%). 14.2 GB weights fill most of 12 GB VRAM.
+- **MTP defaults confirmed:** n_max=4, p_min=0.7 (HF recommendation). Sweep showed high MoE variance (±10-15%) — same config varied 51-57 t/s across runs. n_max=4 p_min=0.7 got 56.1 t/s, competitive with best.
 
 **For the pipeline:** 4k think is the speed champion (63.4 t/s), but 16k non-think has the best balance (52.6 t/s + 16K context for complex prompts).
 
