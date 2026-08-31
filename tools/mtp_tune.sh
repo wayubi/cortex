@@ -196,8 +196,9 @@ with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
     > /tmp/mtp_out.json 2>&1 &
   local PID=$!
 
-  # Placement poll: 80 samples x 2s = 160s
-  plog "  Polling CPU/GPU for 160s..."
+  # Placement poll: until request completes (min 3 samples), capped at 160s
+  POLL_MIN_SAMPLES=3
+  plog "  Polling CPU/GPU until request completes (max 160s)..."
   local CPU_SAMPLES=()
   for i in $(seq 1 80); do
     local TOP CPU GPU
@@ -207,12 +208,18 @@ with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
     [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
     [ $((i % 20)) -eq 0 ] && plog "    ...${i}x2s (CPU ${CPU}% GPU ${GPU}%)"
     sleep 2
+    if [ "$i" -ge "$POLL_MIN_SAMPLES" ] && ! kill -0 $PID 2>/dev/null; then
+      plog "    Request complete after ~$((i*2))s — stopping poll"
+      break
+    fi
   done
   wait $PID 2>/dev/null || true
 
-  # Averages (skip first 10 samples = warmup)
+  # Averages (skip first 10 samples as warmup if enough were collected)
   local CPU_SUM=0 CPU_CNT=0 AVG_CPU=0
-  for idx in $(seq 10 $((${#CPU_SAMPLES[@]} - 1))); do
+  local AVG_START=0
+  [ "${#CPU_SAMPLES[@]}" -gt 10 ] && AVG_START=10
+  for idx in $(seq $AVG_START $((${#CPU_SAMPLES[@]} - 1))); do
     [ -z "${CPU_SAMPLES[$idx]:-}" ] && continue
     CPU_SUM=$(echo "$CPU_SUM + ${CPU_SAMPLES[$idx]}" | bc 2>/dev/null || echo 0)
     CPU_CNT=$((CPU_CNT + 1))

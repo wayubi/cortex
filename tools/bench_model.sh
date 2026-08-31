@@ -112,9 +112,11 @@ log "  Firing request..."
 curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' -d @/tmp/bench_payload.json \
   > /tmp/bench_output.json 2>&1 &
+PID=$!
 
-# Poll CPU/GPU for 160s
-log "  Polling CPU/GPU for 160s..."
+# Poll CPU/GPU until the request completes (min 3 samples, capped at 160s)
+POLL_MIN_SAMPLES=3
+log "  Polling CPU/GPU until request completes (max 160s)..."
 CPU_SAMPLES=()
 GPU_SAMPLES=()
 for i in $(seq 1 80); do
@@ -128,8 +130,12 @@ for i in $(seq 1 80); do
   [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
   [ -n "$GPU" ] && GPU_SAMPLES+=("$GPU")
   sleep 2
+  if [ "$i" -ge "$POLL_MIN_SAMPLES" ] && ! kill -0 $PID 2>/dev/null; then
+    log "  Request complete after ~$((i*2))s — stopping poll"
+    break
+  fi
 done
-wait 2>/dev/null
+wait $PID 2>/dev/null || true
 
 # Compute averages
 CPU_SUM=0; CPU_CNT=0; GPU_SUM=0; GPU_CNT=0
