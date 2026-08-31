@@ -36,6 +36,15 @@ cortex/
 ├── README.md
 ├── LICENSE
 ├── BENCHMARKS.md          # all batch/MTP/quality bench results (configs, t/s, acceptance)
+├── full-metrics.md        # full table of all models.ini entries with all benchmark columns
+├── CPU_POLLING.md         # correct bench methodology (CPU/GPU placement verification)
+├── tools/                 # ALL scripts go here (bench, sweep, quality, generation)
+│   ├── bench_variant.sh       # benchmark with file-based payload (large prompts)
+│   ├── bench_variant_file.sh  # same, for large prompts
+│   ├── mtp_sweep.sh           # MTP n_max sweep
+│   ├── mtp_pmin_sweep.sh      # MTP p_min sweep
+│   ├── quality_bench.py       # quality benchmark (25 questions)
+│   └── gen_full_metrics.py    # generate full-metrics.md from models.ini
 ├── llama-cpp/
 │   ├── models.ini          # llama.cpp models preset file
 │   └── Dockerfile          # CUDA build from source
@@ -44,6 +53,8 @@ cortex/
     ├── nginx.conf           # lua_shared_dict directives, 2 server blocks
     └── coordinator.lua      # VRAM coordinator — API-based model unload
 ```
+
+**Rule: All scripts, tools, and utility files go in the `tools/` folder.**
 
 ## Stress-testing batch/ubatch (proven procedure)
 
