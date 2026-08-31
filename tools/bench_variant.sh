@@ -125,7 +125,11 @@ d = json.load(open('$OUTPUT'))
 if 'choices' in d:
     t = d.get('timings', {})
     u = d.get('usage', {})
-    print(f'prefill={t.get(\"prompt_per_second\",0):.0f} t/s decode={t.get(\"predicted_per_second\",0):.1f} t/s prompt_tokens={u.get(\"prompt_tokens\",\"?\")} completion_tokens={u.get(\"completion_tokens\",\"?\")}')
+    print(f'prefill={t.get(\"prompt_per_second\",0):.0f} t/s decode={t.get(\"predicted_per_second\",0):.1f} t/s')
+    print(f'prefill_total={t.get(\"prompt_ms\",0):.0f}ms decode_total={t.get(\"predicted_ms\",0):.0f}ms')
+    print(f'prefill_per_token={t.get(\"prompt_per_token_ms\",0):.2f}ms/token decode_per_token={t.get(\"predicted_per_token_ms\",0):.2f}ms/token')
+    print(f'prompt_tokens={u.get(\"prompt_tokens\",\"?\")} completion_tokens={u.get(\"completion_tokens\",\"?\")} total_tokens={u.get(\"total_tokens\",\"?\")}')
+    print(f'cache_hits={t.get(\"cache_n\",0)}')
 else:
     print('ERROR: ' + json.dumps(d)[:200])
 "
