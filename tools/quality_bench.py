@@ -111,8 +111,8 @@ def run_benchmark(model, label):
     return results
 
 def main():
-    q8_model = "lfm2.5-8b-a1b-q8-think-16k"
-    q4_model = "lfm2.5-8b-a1b-q4-think-16k"
+    q8_model = "lfm-2.5-8b-a1b-q8-16k-think"
+    q4_model = "lfm-2.5-8b-a1b-q4-16k-think"
 
     print("=" * 60)
     print("QUALITY BENCHMARK: Q8 vs Q4 (25 questions)")
