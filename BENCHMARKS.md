@@ -33,8 +33,8 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `gemma-4-26b-a4b-q4-qat-mtp-think-8k` | 8k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 40.9 | **1568** | ~0.94 | ⚠️ CPU |
 | `gemma-4-26b-a4b-q4-qat-mtp-4k` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 45.4 | **1392** | ~0.96 | ⚠️ CPU |
 | `gemma-4-26b-a4b-q4-qat-mtp-think-4k` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 63.4 | **1456** | ~0.94 | ⚠️ CPU |
-| `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | — | 376 | — | ✅ |
-| `lfm2.5-8b-a1b-q4-think-16k` | 16k | 16384 | — | none (no MTP) | ~131 | — | **5972** | — | ✅ |
+| `lfm2.5-8b-a1b-q8-think-16k` | 16k | 8192 | — | none (no MTP) | 110.2 | 106.6 | **5363** | — | ✅ |
+| `lfm2.5-8b-a1b-q4-think-16k` | 16k | 16384 | — | none (no MTP) | ~131 | **133.6** | **5407** | — | ✅ |
 | `lfm2.5-8b-a1b-q4-think-32k` | 32k | 16384 | — | none (no MTP) | ~134 | — | 5611 | — | ✅ |
 | `lfm2.5-8b-a1b-q4-think-64k` | 64k | 8192 | — | none (no MTP) | ~128 | — | 5599 | — | ✅ |
 | `ornith-1.5-9b-q4-mtp-think-64k` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | 46 | **1523** | ~0.89 | ✅ |
@@ -138,13 +138,13 @@ All 6 variants run MTP draft on CPU (~1000-1200% CPU). 25.2B total / 3.8B active
 - 1.5B active → tiny compute → always fits on GPU regardless of batch. CPU stays ~96% (host orchestration only, no spill). VRAM: 10863 MiB (9.34 GB model + ~1.5 GB KV + graph).
 - Batch sweep (decode t/s): 4096=111.8, **8192=111.1** (best), 12288=110.6, 16384=86.9, 20480=77.1, 32768=88.5, 65536=88.8.
 - **Batch 8192** chosen (best decode + prefill 352 t/s). Saturation + long-decode validated.
-- Decode 110.2 t/s (long-decode), prefill 376 t/s — fastest model in the stack.
+- Decode 106.6 t/s (proper bench), prefill 5363 t/s — fully on GPU.
 
 ### lfm2.5-8b-a1b-q4-think-{16k,32k,64k} (UD-Q4_K_XL — new build)
 - Same lfm2moe arch (24 blocks, only 6 layers carry KV, 32 exp / 4 active, 1.5B active). Native ctx 128000 → 64K is within native.
-- Q4 frees ~4.5 GB: VRAM 6353 MiB @ 16k vs Q8's 10863 MiB.
-- **Q4 decode is faster than Q8**: ~131 t/s vs 110 (Q4 weights halve memory bandwidth).
-- Per-entry batch bisects: **16k=16384** (prefill peak 5972 t/s; decode 131 flat), **32k=16384** (decode 134, prefill 5611), **64k=8192** (decode 128, prefill 5599; 24576+ spills to CPU — 369% CPU, decode 84 t/s). Decode flat across batch at all ctx (compute-bound), so prefill is the tiebreaker.
+- Q4 frees ~4.5 GB: VRAM 7511 MiB @ 16k vs Q8's 10541 MiB.
+- **Q4 decode is faster than Q8**: 133.6 t/s vs 106.6 (Q4 weights halve memory bandwidth). Prefill identical (5407 vs 5363).
+- Per-entry batch bisects: **16k=16384** (prefill peak 5407 t/s; decode 133.6 flat), **32k=16384** (decode 134, prefill 5611), **64k=8192** (decode 128, prefill 5599; 24576+ spills to CPU — 369% CPU, decode 84 t/s). Decode flat across batch at all ctx (compute-bound), so prefill is the tiebreaker.
 - 64k saturation: hit ceiling (65536, 0 OOM). Math gate: **6/6 correct** on 16k.
 
 ### ornith-1.5-9b-q4-mtp-think-{64k,128k,256k} (Q4_K_M, qwen35 hybrid — new build)
