@@ -6,6 +6,7 @@
 # Captures: CPU%, GPU util%, GPU temp, GPU power, VRAM, system RAM, process RSS
 # Placement: polls for 160s, classifies GPU vs CPU based on sustained CPU
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL=$1
 LABEL=$2
 PROMPT_TOKENS=$3
@@ -20,7 +21,7 @@ if [ -z "$MODEL" ] || [ -z "$LABEL" ] || [ -z "$PROMPT_TOKENS" ]; then
 fi
 
 # Pre-flight check: verify batch-size is explicitly set in models.ini
-BATCH_CHECK=$(grep -A 20 "\[$MODEL\]" /mnt/md2/docker-containers/cortex/llama-cpp/models.ini | grep -c "batch-size")
+BATCH_CHECK=$(grep -A 20 "\[$MODEL\]" "$ROOT/llama-cpp/models.ini" | grep -c "batch-size")
 if [ "$BATCH_CHECK" -eq 0 ]; then
   echo "WARNING: $MODEL has no explicit batch-size in models.ini — inherits default 4096 from [*]"
   echo "This is WRONG. Run batch bisect first: AGENTS.md 'Stress-testing batch/ubatch'"
@@ -28,7 +29,7 @@ if [ "$BATCH_CHECK" -eq 0 ]; then
 fi
 
 echo "=== RESTARTING: $LABEL ==="
-cd /mnt/md2/docker-containers/cortex && docker compose restart llama-cpp
+cd "$ROOT" && docker compose restart llama-cpp
 sleep 5
 
 # Generate a filler prompt of N tokens (~4 chars per token for English)

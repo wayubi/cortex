@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Generate full-metrics.md from models.ini + benchmark data."""
+import os
 import re
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+INI_PATH = os.path.join(ROOT, "llama-cpp", "models.ini")
+OUT_PATH = os.path.join(ROOT, "full-metrics.md")
 
 # Benchmark data from recent runs (4000-token bench with full metrics)
 BENCH_DATA = {
@@ -90,7 +95,7 @@ BENCH_DATA = {
 def parse_ini():
     entries = {}
     current = None
-    with open("/mnt/md2/docker-containers/cortex/llama-cpp/models.ini") as f:
+    with open(INI_PATH) as f:
         for line in f:
             m = re.match(r'^\[(.+)\]$', line.strip())
             if m and m.group(1) != "*":
@@ -204,7 +209,7 @@ for name in all_entries:
     ]
     lines.append("| " + " | ".join(row) + " |")
 
-with open("/mnt/md2/docker-containers/cortex/full-metrics.md", "w") as f:
+with open(OUT_PATH, "w") as f:
     f.write("\n".join(lines) + "\n")
 
 print(f"Generated full-metrics.md with {len(all_entries)} entries")

@@ -5,42 +5,53 @@
 #   ./tools/batch_bisect.sh <model-name>                    # full bisection
 #   ./tools/batch_bisect.sh <model-name> <test-batch>       # test specific batch
 #   ./tools/batch_bisect.sh <model-name> resume <lo> <hi>   # skip coarse sweep, bisect from known bracket
+#   ./tools/batch_bisect.sh <model-name> resume <batch>     # re-validate a finished/known batch
 #
 # Reads ctx-size from models.ini. Updates models.ini with optimal batch.
 # Logs to stdout + logs/batch_bisect_{model}.log
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL=${1:-}
 ARG2=${2:-}
 TEST_BATCH=0
 RESUME=0
 RESUME_LO=0
 RESUME_HI=0
+RESUME_BATCH=0
 
 if [ -z "$MODEL" ]; then
-  echo "Usage: $0 <model-name> [test-batch|resume <lo> <hi>]"
+  echo "Usage: $0 <model-name> [test-batch|resume <lo> <hi>|resume <batch>]"
   exit 1
 fi
 
 if [ "$ARG2" = "resume" ]; then
-  RESUME=1
-  RESUME_LO=${3:-0}
-  RESUME_HI=${4:-0}
-  if ! [ "$RESUME_LO" -gt 0 ] 2>/dev/null || ! [ "$RESUME_HI" -gt "$RESUME_LO" ] 2>/dev/null; then
-    echo "Usage: $0 <model-name> resume <lo> <hi>"
-    echo "  lo = highest batch known to PASS, hi = lowest batch known to OOM (hi > lo > 0)"
+  if [[ "${3:-}" =~ ^[0-9]+$ ]] && [[ "${4:-}" =~ ^[0-9]+$ ]]; then
+    RESUME=1
+    RESUME_LO=$3
+    RESUME_HI=$4
+    if ! [ "$RESUME_LO" -gt 0 ] 2>/dev/null || ! [ "$RESUME_HI" -gt "$RESUME_LO" ] 2>/dev/null; then
+      echo "Usage: $0 <model-name> resume <lo> <hi>"
+      echo "  lo = highest batch known to PASS, hi = lowest batch known to OOM (hi > lo > 0)"
+      exit 1
+    fi
+  elif [[ "${3:-}" =~ ^[0-9]+$ ]]; then
+    RESUME_BATCH=1
+    TEST_BATCH=$3
+  else
+    echo "Usage: $0 <model-name> resume <lo> <hi> | resume <batch>"
     exit 1
   fi
 elif [ -n "$ARG2" ]; then
   TEST_BATCH=$ARG2
 fi
-INI="/mnt/md2/docker-containers/cortex/llama-cpp/models.ini"
-LOG_FILE="/mnt/md2/docker-containers/cortex/logs/batch_bisect_${MODEL}.log"
+INI="$ROOT/llama-cpp/models.ini"
+LOG_FILE="$ROOT/logs/batch_bisect_${MODEL}.log"
 DOCKER_LOG="cortex-llama-cpp-1"
 OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error: out of memory|cuMemCreate"
 
-mkdir -p /mnt/md2/docker-containers/cortex/logs
+mkdir -p "$ROOT/logs"
 
 log() { echo "$1" | tee -a "$LOG_FILE"; }
 
@@ -91,7 +102,7 @@ print(f'  batch={batch} ubatch={batch} (= at col {target+1})')
 
 restart() {
   log "  Restarting llama-cpp..."
-  cd /mnt/md2/docker-containers/cortex && docker compose restart llama-cpp
+  cd "$ROOT" && docker compose restart llama-cpp
   sleep 5
   log "  Restarted — model will load on first request"
 }
@@ -120,20 +131,72 @@ tiny_probe() {
   return $?
 }
 
-saturation_test() {
-  local SAT_SIZE=$(python3 -c "print(int($CTX * 2.5))")
-  local MAX_TOK=$(python3 -c "print(int($CTX * 0.2))")
-  log "  Saturation: prompt ~${SAT_SIZE} chars, max_tokens=$MAX_TOK"
+# Measure chars-per-token ratio for this model (also warms the model up)
+CHARS_PER_TOK=0
+measure_ratio() {
+  local MEASURE_CHARS=2000
   python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*1000)[:$MEASURE_CHARS]}],'max_tokens':1}
+with open('/tmp/ratio_payload.json','w') as f: json.dump(payload, f)
+"
+  logmark
+  curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' -d @/tmp/ratio_payload.json \
+    > /tmp/ratio_response.json 2>&1
+  local TOK=$(python3 -c "
+import json
+try:
+    d = json.load(open('/tmp/ratio_response.json'))
+    print(d.get('usage',{}).get('prompt_tokens',0))
+except: print(0)
+" 2>/dev/null || echo 0)
+  if [ "$TOK" -gt 0 ] 2>/dev/null; then
+    CHARS_PER_TOK=$(python3 -c "print('%.1f' % ($MEASURE_CHARS / $TOK))" 2>/dev/null || echo 0)
+    log "  Measured ratio: $MEASURE_CHARS chars = $TOK tokens → ${CHARS_PER_TOK} chars/tok"
+    return 0
+  fi
+  log "  Measure probe failed — using fallback heuristic"
+  CHARS_PER_TOK=0
+  return 1
+}
+
+saturation_test() {
+  local MAX_TOK=$(python3 -c "print(int($CTX * 0.2))")
+  local TARGET_TOK=$(python3 -c "print(int($CTX * 0.85))")
+  local SAT_SIZE=0
+  local ATTEMPT=1
+
+  measure_ratio || true
+  if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
+    SAT_SIZE=$(python3 -c "print(int($TARGET_TOK * $CHARS_PER_TOK))")
+    log "  Saturation: target ~${TARGET_TOK} tokens (85% of ctx), prompt ~${SAT_SIZE} chars, max_tokens=$MAX_TOK"
+  else
+    SAT_SIZE=$(python3 -c "print(int($CTX * 2.5))")
+    log "  Saturation: fallback prompt ~${SAT_SIZE} chars, max_tokens=$MAX_TOK"
+  fi
+
+  while [ "$ATTEMPT" -le 3 ]; do
+    python3 -c "
 import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*1000)[:$SAT_SIZE]}],'max_tokens':$MAX_TOK,'ignore_eos':True}
 with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 print(f'  Payload: {len(json.dumps(payload))} bytes')
 "
-  logmark
-  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/sat_payload.json \
-    > /tmp/sat_response.json 2>&1
+    logmark
+    curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
+      -H 'Content-Type: application/json' -d @/tmp/sat_payload.json \
+      > /tmp/sat_response.json 2>&1
+
+    if grep -q "exceeds the available context" /tmp/sat_response.json 2>/dev/null; then
+      log "  Prompt too large — shrinking 10% (attempt $ATTEMPT)"
+      SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * 0.9))")
+      ATTEMPT=$((ATTEMPT + 1))
+      continue
+    fi
+    break
+  done
+
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then
     log "  Saturation: OOM"
@@ -173,7 +236,11 @@ else: print('  Long-decode: FAIL'); exit(1)
 
 # ── MAIN ──
 if [ "$TEST_BATCH" -gt 0 ] 2>/dev/null; then
-  log ""; log "=== TESTING BATCH $TEST_BATCH ==="
+  if [ "$RESUME_BATCH" -eq 1 ]; then
+    log ""; log "=== RESUMING VALIDATION OF BATCH $TEST_BATCH ==="
+  else
+    log ""; log "=== TESTING BATCH $TEST_BATCH ==="
+  fi
   set_batch "$TEST_BATCH"; restart
   log ""; log "=== PHASE 1: TINY PROBE ==="
   tiny_probe && log "  PASS" || { log "  FAIL"; exit 1; }

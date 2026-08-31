@@ -3,11 +3,12 @@
 # Usage: ./tools/mtp_sweep.sh <model-name> <label> <prompt-tokens> <max-tokens>
 # Example: ./tools/mtp_sweep.sh gemma-4-26b-a4b-q4-qat-mtp-16k "16k non-think" 12000 1000
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL=$1
 LABEL=$2
 PROMPT_TOKENS=$3
 MAX_TOKENS=$4
-INI="/mnt/md2/docker-containers/cortex/llama-cpp/models.ini"
+INI="$ROOT/llama-cpp/models.ini"
 LOG="/tmp/mtp_sweep_${MODEL}.log"
 
 if [ -z "$MODEL" ] || [ -z "$LABEL" ] || [ -z "$PROMPT_TOKENS" ] || [ -z "$MAX_TOKENS" ]; then
@@ -34,7 +35,7 @@ for N_MAX in 1 2 3 4 5; do
   sed -i "/^\[$MODEL\]/,/^\[/ s/spec-draft-n-max = .*/spec-draft-n-max = $N_MAX/" "$INI"
 
   # Restart
-  cd /mnt/md2/docker-containers/cortex && docker compose restart llama-cpp
+  cd "$ROOT" && docker compose restart llama-cpp
   sleep 5
 
   # Wait for VRAM

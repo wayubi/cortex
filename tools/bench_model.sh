@@ -8,10 +8,11 @@
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL=$1
 PROMPT_TOKENS=${2:-0}
-INI="/mnt/md2/docker-containers/cortex/llama-cpp/models.ini"
-MODELS_DIR="/mnt/md2/docker-containers/cortex/llama-cpp/models"
+INI="$ROOT/llama-cpp/models.ini"
+MODELS_DIR="$ROOT/llama-cpp/models"
 JSON_FILE="${MODELS_DIR}/${MODEL}.json"
 DOCKER_LOG="cortex-llama-cpp-1"
 
@@ -64,15 +65,41 @@ log "Model: $MODEL | ctx: $CTX | batch: $BATCH | prompt: ${PROMPT_TOKENS} tokens
 # ── Prefill + decode bench ──
 log ""
 log "=== PREFILL + DECODE BENCH ==="
-cd /mnt/md2/docker-containers/cortex && docker compose restart llama-cpp
+cd "$ROOT" && docker compose restart llama-cpp
 sleep 5
 log "  Restarted — model will load on first request"
+
+# Measure chars/token ratio (also warms the model so polling captures clean prefill+decode)
+log "  Measuring tokenizer ratio..."
+python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*1000)[:2000]}],'max_tokens':1}
+with open('/tmp/ratio_payload.json','w') as f: json.dump(payload, f)
+"
+curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' -d @/tmp/ratio_payload.json \
+  > /tmp/ratio_response.json 2>&1 || true
+MEASURED_TOK=$(python3 -c "
+import json
+try:
+    d = json.load(open('/tmp/ratio_response.json'))
+    print(d.get('usage',{}).get('prompt_tokens',0))
+except: print(0)
+" 2>/dev/null || echo 0)
+if [ "$MEASURED_TOK" -gt 0 ] 2>/dev/null; then
+  CHARS_PER_TOK=$(python3 -c "print('%.1f' % (2000 / $MEASURED_TOK))" 2>/dev/null || echo 0)
+  log "  Measured: 2000 chars = $MEASURED_TOK tokens → ${CHARS_PER_TOK} chars/tok"
+  PROMPT_CHARS=$(python3 -c "print(int($PROMPT_TOKENS * $CHARS_PER_TOK))" 2>/dev/null || echo $((PROMPT_TOKENS * 4)))
+else
+  log "  Measure probe failed — fallback to $((PROMPT_TOKENS * 4)) chars"
+  PROMPT_CHARS=$((PROMPT_TOKENS * 4))
+fi
 
 # Generate payload
 python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
-target_chars = $PROMPT_TOKENS * 4
+target_chars = $PROMPT_CHARS
 prompt = ''
 while len(prompt) < target_chars: prompt += filler
 prompt = prompt[:target_chars]

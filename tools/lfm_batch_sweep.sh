@@ -3,10 +3,11 @@
 # Usage: ./tools/lfm_batch_sweep.sh <model-name> <label> <ctx-size>
 # Tests batch sizes 4096, 8192, 16384, 24576
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MODEL=$1
 LABEL=$2
 CTX=$3
-INI="/mnt/md2/docker-containers/cortex/llama-cpp/models.ini"
+INI="$ROOT/llama-cpp/models.ini"
 LOG="/tmp/lfm_batch_sweep_${MODEL}.log"
 
 if [ -z "$MODEL" ] || [ -z "$LABEL" ] || [ -z "$CTX" ]; then
@@ -35,7 +36,7 @@ for BATCH in 4096 8192 16384 24576; do
   sed -i "/^\[$MODEL\]/,/^\[/ s/ubatch-size\s*= .*/ubatch-size       = $BATCH/" "$INI"
 
   # Restart
-  cd /mnt/md2/docker-containers/cortex && docker compose restart llama-cpp
+  cd "$ROOT" && docker compose restart llama-cpp
   sleep 5
 
   # Wait for VRAM
