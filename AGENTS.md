@@ -64,10 +64,11 @@ Procedure (per candidate value):
    - **No floor** — if the down-sweep never passes, keep going until it does.
 7. **PASS** on the tiny probe → confirm with 2 more requests (expect `http=200`). This is only a **quick filter** — it does NOT prove the value is good (see Phase 2).
 8. **Placement check — is the compute actually on GPU?** `-fit` never budgets the **MTP draft's** memory (`failed to measure the memory of the extra model, fitting without it`), so on tight models the draft silently lands on CPU even when the main model fits — a batch can pass every OOM test yet decode slowly with heavy CPU. Verify placement on any quick-filter PASS:
-   - Fire a ~600-token decode (`max_tokens` ~600, `ignore_eos`) and, ~10s in, sample the child CPU: `ps -p $(pgrep -f "llama-server --host 127.0.0.1") -o %cpu=`.
-   - **On GPU:** CPU ~50–150% and decode t/s at the model's expected speed.
-   - **Draft on CPU:** CPU ~300%+ and decode t/s drops sharply (observed Gemma 12B Q6: 59.8 t/s on GPU vs 36 t/s with the draft on CPU).
+   - Use `./tools/bench_variant.sh <model> <label> <prompt-tokens>` — it defaults to 4000 tokens and 160s CPU polling.
+   - **On GPU:** avg CPU < 100% and decode t/s at the model's expected speed.
+   - **Draft on CPU:** avg CPU > 200% and decode t/s drops sharply (observed Gemma 12B Q6: 59.8 t/s on GPU vs 36 t/s with the draft on CPU).
    - If the draft is on CPU → **step the batch down** (this is a separate, usually lower ceiling than the OOM max). First shrink the draft's footprint with `spec-draft-type-k/v = q4_0` (draft KV cache, default f16), then re-bisect. Do NOT use `spec-draft-ngl` to force it — that drops main-model layers to CPU instead (worse).
+   - **WARNING:** A 600-token decode with 50s polling is NOT enough. Models show ~100% CPU in the first 50s, then spike to 1300%+ later. Always use 4000+ tokens and 160s polling.
 9. **Phase 2 — TRUE test: full-context saturation + compaction.** The tiny probe only proves the compute graph fits at near-empty context. `-fit` leaves ~zero headroom, so memory peaks near full context (KV compaction temp buffers, hybrid/SSM state re-derivation) — a value can still OOM once the context fills and compacts. Note the prefill (PP) graph buffer scales ~2 MiB/unit and is **far larger than the tiny probe's decode graph**, so a value that passes the tiny probe can still OOM on a long-prompt prefill — the saturation run re-brackets the winner downward (observed on both the 35B and 9B models).
    - The saturation prompt is sized to the target entry's `ctx-size` (**NOT** a fixed 16K): for `ctx-size = 16384` saturate to ~14.5K tokens; for `ctx-size = 131072` saturate to ~115K tokens. Target ~90% of that ctx.
    - Send one request with a prompt filling ~90% of that ctx and `max_tokens` large enough to overflow it and force KV compaction (~20% of ctx):

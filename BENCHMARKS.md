@@ -13,56 +13,56 @@ Old-build numbers are kept for comparison; only new-build numbers are current.
 
 ## Current configs + decode t/s (new build)
 
-Decode measured via 6000-token long-decode (real prompt) and 4000-token essay bench; acceptance = draft acceptance (MTP). GPU column: ✅ = 100% GPU (<100% CPU), ⚠️ CPU = MTP draft on CPU (~1400-1600% CPU).
+Decode measured via 6000-token long-decode (real prompt) and 4000-token essay bench; acceptance = draft acceptance (MTP). Coder variants share benchmarks with their non-coder equivalents (same model, same batch, just different sampling params). **Placement requires re-verification** — use `./tools/bench_variant.sh` with 4000+ tokens and 160s polling.
 
-| Model | ctx | batch | n_max / p_min | drafter | long-decode t/s | essay t/s | prefill t/s | acceptance | GPU |
-|---|---|---|---|---|---|---|---|---|---|
-| `qwen-3.5-9b-q4-mtp-16k` | 16k | 2048 | 2 / 0.7 | in-model | 70.4 | ~66 | **1545** | ~0.95 | ✅ |
-| `qwen-3.5-9b-q4-mtp-16k-think` | 16k | 2048 | 2 / 0.5 | in-model | 67.4 | 63.6 | ~1545 | ~0.84 | ✅ |
-| `qwen-3.6-35b-a3b-q4-mtp-16k` | 16k | 3584 | 2 / 0.7 | in-model | 45.9 | 48.7 | **1263** | ~0.96 | ⚠️ CPU |
-| `qwen-3.6-35b-a3b-q4-mtp-16k-think` | 16k | 3584 | 2 / 0.7 | in-model | 44.4 | 28.5 | **1258** | ~0.94 | ⚠️ CPU |
-| `qwen-3.6-35b-a3b-q4-mtp-8k` | 8k | 8192 | 2 / 0.7 | in-model | 37.5 | 44.6 | **1312** | ~0.96 | ⚠️ CPU |
-| `qwen-3.6-35b-a3b-q4-mtp-8k-think` | 8k | 8192 | 2 / 0.7 | in-model | 36.8 | 42.3 | **1311** | ~0.94 | ⚠️ CPU |
-| `qwen-3.6-35b-a3b-q4-mtp-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.6 | 49.4 | **1066** | ~0.96 | ⚠️ CPU |
-| `qwen-3.6-35b-a3b-q4-mtp-4k-think` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | 44.0 | **1073** | ~0.94 | ⚠️ CPU |
-| `gemma-4-12b-q4-qat-mtp-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 | ✅ |
-| `gemma-4-12b-q4-qat-mtp-16k-think` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 | ✅ |
-| `gemma-4-26b-a4b-q4-qat-mtp-16k` | 16k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 52.6 | **1766** | ~0.96 | ⚠️ CPU |
-| `gemma-4-26b-a4b-q4-qat-mtp-16k-think` | 16k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 43.9 | **1752** | ~0.94 | ⚠️ CPU |
-| `gemma-4-26b-a4b-q4-qat-mtp-8k` | 8k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 47.0 | **1612** | ~0.96 | ⚠️ CPU |
-| `gemma-4-26b-a4b-q4-qat-mtp-8k-think` | 8k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 40.9 | **1568** | ~0.94 | ⚠️ CPU |
-| `gemma-4-26b-a4b-q4-qat-mtp-4k` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 45.4 | **1392** | ~0.96 | ⚠️ CPU |
-| `gemma-4-26b-a4b-q4-qat-mtp-4k-think` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 63.4 | **1456** | ~0.94 | ⚠️ CPU |
-| `lfm-2.5-8b-a1b-q8-16k-think` | 16k | 8192 | — | none (no MTP) | 110.2 | 106.6 | **5363** | — | ✅ |
-| `lfm-2.5-8b-a1b-q4-4k-think` | 4k | 16384 | — | none (no MTP) | — | **140.7** | **5382** | — | ✅ |
-| `lfm-2.5-8b-a1b-q4-8k-think` | 8k | 16384 | — | none (no MTP) | — | 130.0 | **5835** | — | ✅ |
-| `lfm-2.5-8b-a1b-q4-16k-think` | 16k | 16384 | — | none (no MTP) | ~131 | **135.4** | **5622** | — | ✅ |
-| `lfm-2.5-8b-a1b-q4-32k-think` | 32k | 16384 | — | none (no MTP) | ~134 | 120.4 | 4374 | — | ✅ |
-| `ornith-1.5-9b-q4-mtp-64k-think` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | 46 | **1523** | ~0.89 | ✅ |
-| `ornith-1.5-9b-q4-mtp-64k-coder` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | — | ~1523 | ~0.94 | ✅ |
-| `ornith-1.5-9b-q4-mtp-128k-think` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | **1530** | ~0.91 | ✅ |
-| `ornith-1.5-9b-q4-mtp-128k-coder` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | ~1530 | ~0.95 | ✅ |
-| `ornith-1.5-9b-q4-mtp-256k-think` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | **1523** | ~0.93 | ✅ |
-| `ornith-1.5-9b-q4-mtp-256k-coder` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | ~1523 | ~0.92 | ✅ |
-| `zamai-llama3-pashto-q8-8k` | 8k | 8192 | — | none (no MTP) | 34.0 | — | 2012 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-64k` | 64k | 4096 | — | none | 24.2 | 24.2 | 512 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-64k-think` | 64k | 4096 | — | none | 23.9 | 23.9 | 511 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-128k` | 128k | 4096 | — | none | 23.2 | 23.2 | 504 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-128k-think` | 128k | 4096 | — | none | 18.2 | 18.2 | 503 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-198k` | 198k | 4096 | — | none | 20.5 | 20.5 | 496 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-198k-think` | 198k | 4096 | — | none | 19.7 | 19.7 | 499 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-64k-coder` | 64k | 4096 | — | none | 24.2 | 24.2 | 512 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-128k-coder` | 128k | 4096 | — | none | 23.2 | 23.2 | 504 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-198k-coder` | 198k | 4096 | — | none | 20.5 | 20.5 | 496 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-64k-think-coder` | 64k | 4096 | — | none | 23.9 | 23.9 | 511 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-128k-think-coder` | 128k | 4096 | — | none | 18.2 | 18.2 | 503 | — | ✅ |
-| `glm-4.7-30b-a3b-flash-q4-198k-think-coder` | 198k | 4096 | — | none | 19.7 | 19.7 | 499 | — | ✅ |
-| `gpt-oss-20b-a4b-q4-low-64k` | 64k | 4096 | — | none | 30.4 | 30.4 | 2013 | — | ✅ |
-| `gpt-oss-20b-a4b-q4-mid-64k` | 64k | 4096 | — | none | 28.5 | 28.5 | 2019 | — | ✅ |
-| `gpt-oss-20b-a4b-q4-high-64k` | 64k | 4096 | — | none | 30.1 | 30.1 | 2002 | — | ✅ |
-| `gpt-oss-20b-a4b-q4-low-128k` | 128k | 4096 | — | none | 28.5 | 28.5 | 1961 | — | ✅ |
-| `gpt-oss-20b-a4b-q4-mid-128k` | 128k | 4096 | — | none | 26.5 | 26.5 | 1961 | — | ✅ |
-| `gpt-oss-20b-a4b-q4-high-128k` | 128k | 4096 | — | none | 27.3 | 27.3 | 1945 | — | ✅ |
+| Model | ctx | batch | n_max / p_min | drafter | long-decode t/s | essay t/s | prefill t/s | acceptance |
+|---|---|---|---|---|---|---|---|---|
+| `qwen-3.5-9b-q4-mtp-16k` | 16k | 2048 | 2 / 0.7 | in-model | 70.4 | ~66 | **1545** | ~0.95 |
+| `qwen-3.5-9b-q4-mtp-16k-think` | 16k | 2048 | 2 / 0.5 | in-model | 67.4 | 63.6 | ~1545 | ~0.84 |
+| `qwen-3.6-35b-a3b-q4-mtp-16k` | 16k | 3584 | 2 / 0.7 | in-model | 45.9 | 48.7 | **1263** | ~0.96 |
+| `qwen-3.6-35b-a3b-q4-mtp-16k-think` | 16k | 3584 | 2 / 0.7 | in-model | 44.4 | 28.5 | **1258** | ~0.94 |
+| `qwen-3.6-35b-a3b-q4-mtp-8k` | 8k | 8192 | 2 / 0.7 | in-model | 37.5 | 44.6 | **1312** | ~0.96 |
+| `qwen-3.6-35b-a3b-q4-mtp-8k-think` | 8k | 8192 | 2 / 0.7 | in-model | 36.8 | 42.3 | **1311** | ~0.94 |
+| `qwen-3.6-35b-a3b-q4-mtp-4k` | 4k | 4096 | 2 / 0.7 | in-model | 33.6 | 49.4 | **1066** | ~0.96 |
+| `qwen-3.6-35b-a3b-q4-mtp-4k-think` | 4k | 4096 | 2 / 0.7 | in-model | 33.7 | 44.0 | **1073** | ~0.94 |
+| `gemma-4-12b-q4-qat-mtp-16k` | 16k | 8640 | 5 / 0.7 | **Q4_0 (root)** | **86.1** | 79.3 | — | ~0.79 |
+| `gemma-4-12b-q4-qat-mtp-16k-think` | 16k | 8576 | 5 / 0.5 | **Q4_0 (root)** | 76.7 | ~70 | — | ~0.56–0.71 |
+| `gemma-4-26b-a4b-q4-qat-mtp-16k` | 16k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 52.6 | **1766** | ~0.96 |
+| `gemma-4-26b-a4b-q4-qat-mtp-16k-think` | 16k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 43.9 | **1752** | ~0.94 |
+| `gemma-4-26b-a4b-q4-qat-mtp-8k` | 8k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 47.0 | **1612** | ~0.96 |
+| `gemma-4-26b-a4b-q4-qat-mtp-8k-think` | 8k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 40.9 | **1568** | ~0.94 |
+| `gemma-4-26b-a4b-q4-qat-mtp-4k` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 45.4 | **1392** | ~0.96 |
+| `gemma-4-26b-a4b-q4-qat-mtp-4k-think` | 4k | 4096 | 4 / 0.7 | **Q4_0 (root)** | — | 63.4 | **1456** | ~0.94 |
+| `lfm-2.5-8b-a1b-q8-16k-think` | 16k | 8192 | — | none (no MTP) | 110.2 | 106.6 | **5363** | — |
+| `lfm-2.5-8b-a1b-q4-4k-think` | 4k | 16384 | — | none (no MTP) | — | **140.7** | **5382** | — |
+| `lfm-2.5-8b-a1b-q4-8k-think` | 8k | 16384 | — | none (no MTP) | — | 130.0 | **5835** | — |
+| `lfm-2.5-8b-a1b-q4-16k-think` | 16k | 16384 | — | none (no MTP) | ~131 | **135.4** | **5622** | — |
+| `lfm-2.5-8b-a1b-q4-32k-think` | 32k | 16384 | — | none (no MTP) | ~134 | 120.4 | 4374 | — |
+| `ornith-1.5-9b-q4-mtp-64k-think` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | 46 | **1523** | ~0.89 |
+| `ornith-1.5-9b-q4-mtp-64k-coder` | 64k | 8192 | 3 / 0.7 | in-model | ~53 | — | ~1523 | ~0.94 |
+| `ornith-1.5-9b-q4-mtp-128k-think` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | **1530** | ~0.91 |
+| `ornith-1.5-9b-q4-mtp-128k-coder` | 128k | 4736 | 2 / 0.7 | in-model | ~53 | — | ~1530 | ~0.95 |
+| `ornith-1.5-9b-q4-mtp-256k-think` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | **1523** | ~0.93 |
+| `ornith-1.5-9b-q4-mtp-256k-coder` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | ~1523 | ~0.92 |
+| `zamai-llama3-pashto-q8-8k` | 8k | 8192 | — | none (no MTP) | 34.0 | — | 2012 | — |
+| `glm-4.7-30b-a3b-flash-q4-64k` | 64k | 4096 | — | none | 24.2 | 24.2 | 512 | — |
+| `glm-4.7-30b-a3b-flash-q4-64k-think` | 64k | 4096 | — | none | 23.9 | 23.9 | 511 | — |
+| `glm-4.7-30b-a3b-flash-q4-128k` | 128k | 4096 | — | none | 23.2 | 23.2 | 504 | — |
+| `glm-4.7-30b-a3b-flash-q4-128k-think` | 128k | 4096 | — | none | 18.2 | 18.2 | 503 | — |
+| `glm-4.7-30b-a3b-flash-q4-198k` | 198k | 4096 | — | none | 20.5 | 20.5 | 496 | — |
+| `glm-4.7-30b-a3b-flash-q4-198k-think` | 198k | 4096 | — | none | 19.7 | 19.7 | 499 | — |
+| `glm-4.7-30b-a3b-flash-q4-64k-coder` | 64k | 4096 | — | none | 24.2 | 24.2 | 512 | — |
+| `glm-4.7-30b-a3b-flash-q4-128k-coder` | 128k | 4096 | — | none | 23.2 | 23.2 | 504 | — |
+| `glm-4.7-30b-a3b-flash-q4-198k-coder` | 198k | 4096 | — | none | 20.5 | 20.5 | 496 | — |
+| `glm-4.7-30b-a3b-flash-q4-64k-think-coder` | 64k | 4096 | — | none | 23.9 | 23.9 | 511 | — |
+| `glm-4.7-30b-a3b-flash-q4-128k-think-coder` | 128k | 4096 | — | none | 18.2 | 18.2 | 503 | — |
+| `glm-4.7-30b-a3b-flash-q4-198k-think-coder` | 198k | 4096 | — | none | 19.7 | 19.7 | 499 | — |
+| `gpt-oss-20b-a4b-q4-low-64k` | 64k | 4096 | — | none | 30.4 | 30.4 | 2013 | — |
+| `gpt-oss-20b-a4b-q4-mid-64k` | 64k | 4096 | — | none | 28.5 | 28.5 | 2019 | — |
+| `gpt-oss-20b-a4b-q4-high-64k` | 64k | 4096 | — | none | 30.1 | 30.1 | 2002 | — |
+| `gpt-oss-20b-a4b-q4-low-128k` | 128k | 4096 | — | none | 28.5 | 28.5 | 1961 | — |
+| `gpt-oss-20b-a4b-q4-mid-128k` | 128k | 4096 | — | none | 26.5 | 26.5 | 1961 | — |
+| `gpt-oss-20b-a4b-q4-high-128k` | 128k | 4096 | — | none | 27.3 | 27.3 | 1945 | — |
 
 ## Performance ranking (4k/8k/16k qwen-3.6-35b-a3b variants)
 
