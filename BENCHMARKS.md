@@ -45,18 +45,24 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `ornith-1.5-9b-q4-mtp-256k-think` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | **1523** | ~0.93 |
 | `ornith-1.5-9b-q4-mtp-256k-coder` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | ~1523 | ~0.92 |
 | `zamai-llama3-pashto-q8-8k` | 8k | 8192 | — | none (no MTP) | 34.0 | — | 2012 | — |
-| `glm-4.7-30b-a3b-flash-q4-64k` | 64k | 4096 | — | none | 24.2 | 24.2 | 512 | — |
-| `glm-4.7-30b-a3b-flash-q4-64k-think` | 64k | 4096 | — | none | 23.9 | 23.9 | 511 | — |
-| `glm-4.7-30b-a3b-flash-q4-128k` | 128k | 4096 | — | none | 23.2 | 23.2 | 504 | — |
-| `glm-4.7-30b-a3b-flash-q4-128k-think` | 128k | 4096 | — | none | 18.2 | 18.2 | 503 | — |
-| `glm-4.7-30b-a3b-flash-q4-198k` | 198k | 4096 | — | none | 20.5 | 20.5 | 496 | — |
-| `glm-4.7-30b-a3b-flash-q4-198k-think` | 198k | 4096 | — | none | 19.7 | 19.7 | 499 | — |
-| `glm-4.7-30b-a3b-flash-q4-64k-coder` | 64k | 4096 | — | none | 24.2 | 24.2 | 512 | — |
-| `glm-4.7-30b-a3b-flash-q4-128k-coder` | 128k | 4096 | — | none | 23.2 | 23.2 | 504 | — |
-| `glm-4.7-30b-a3b-flash-q4-198k-coder` | 198k | 4096 | — | none | 20.5 | 20.5 | 496 | — |
-| `glm-4.7-30b-a3b-flash-q4-64k-think-coder` | 64k | 4096 | — | none | 23.9 | 23.9 | 511 | — |
-| `glm-4.7-30b-a3b-flash-q4-128k-think-coder` | 128k | 4096 | — | none | 18.2 | 18.2 | 503 | — |
-| `glm-4.7-30b-a3b-flash-q4-198k-think-coder` | 198k | 4096 | — | none | 19.7 | 19.7 | 499 | — |
+| `glm-4.7-30b-a3b-flash-q4-64k` | 64k | 4096 | — | none | 24.6 | 24.6 | 510 | — |
+| `glm-4.7-30b-a3b-flash-q4-64k-think` | 64k | 4096 | — | none | 22.9 | 22.9 | 511 | — |
+| `glm-4.7-30b-a3b-flash-q4-128k` | 128k | 4096 | — | none | 22.4 | 22.4 | 504 | — |
+| `glm-4.7-30b-a3b-flash-q4-128k-think` | 128k | 4096 | — | none | 22.4 | 22.4 | 504 | — |
+| `glm-4.7-30b-a3b-flash-q4-198k` | 198k | 4096 | — | none | 17.6 | 17.6 | 499 | — |
+| `glm-4.7-30b-a3b-flash-q4-198k-think` | 198k | 4096 | — | none | 19.8 | 19.8 | 499 | — |
+| `glm-4.7-30b-a3b-flash-q4-64k-coder` | 64k | 4096 | — | none | 24.6 | 24.6 | 510 | — |
+| `glm-4.7-30b-a3b-flash-q4-128k-coder` | 128k | 4096 | — | none | 22.4 | 22.4 | 504 | — |
+| `glm-4.7-30b-a3b-flash-q4-198k-coder` | 198k | 4096 | — | none | 17.6 | 17.6 | 499 | — |
+| `glm-4.7-30b-a3b-flash-q4-64k-think-coder` | 64k | 4096 | — | none | 22.9 | 22.9 | 511 | — |
+| `glm-4.7-30b-a3b-flash-q4-128k-think-coder` | 128k | 4096 | — | none | 22.4 | 22.4 | 504 | — |
+| `glm-4.7-30b-a3b-flash-q4-198k-think-coder` | 198k | 4096 | — | none | 19.8 | 19.8 | 499 | — |
+| `glm-4.7-23b-a3b-flash-reap-q4-64k` | 64k | 4096 | — | none | 25.0 | 25.0 | 525 | — |
+| `glm-4.7-23b-a3b-flash-reap-q4-64k-think` | 64k | 4096 | — | none | 23.7 | 23.7 | 523 | — |
+| `glm-4.7-23b-a3b-flash-reap-q4-128k` | 128k | 4096 | — | none | 22.7 | 22.7 | 517 | — |
+| `glm-4.7-23b-a3b-flash-reap-q4-128k-think` | 128k | 4096 | — | none | 23.3 | 23.3 | 517 | — |
+| `glm-4.7-23b-a3b-flash-reap-q4-198k` | 198k | 4096 | — | none | 19.7 | 19.7 | 510 | — |
+| `glm-4.7-23b-a3b-flash-reap-q4-198k-think` | 198k | 4096 | — | none | 18.1 | 18.1 | 509 | — |
 | `gpt-oss-20b-a4b-q4-low-64k` | 64k | 4096 | — | none | 30.9 | 30.9 | 2018 | — |
 | `gpt-oss-20b-a4b-q4-mid-64k` | 64k | 4096 | — | none | 29.9 | 29.9 | 2001 | — |
 | `gpt-oss-20b-a4b-q4-high-64k` | 64k | 4096 | — | none | 30.4 | 30.4 | 2034 | — |
@@ -239,9 +245,15 @@ Winner: **n_max 5, p_min 0.5** (math gate 6/6 correct, faster A/B; acceptance un
 - ±10–15% run-to-run decode variance exceeded config deltas — defaults retained (n_max 2, p_min 0.7).
 
 ### glm-4.7-30b-a3b-flash (UD-Q4_K_XL)
-- 30B total, 3B active (MoE). Fits in ~11 GB VRAM. No MTP.
-- Decode ~18-24 t/s, prefill ~496-512 t/s. Fully on GPU (CPU ~97%).
-- Non-think slightly faster than think (24.2 vs 23.9 at 64k).
+- 30B total, 3B active (MoE). GGUF ~17 GB, fits in VRAM (~11 GB used).
+- **Hybrid compute**: CPU ~740-1130% + GPU util 61-69% during decode.
+- Decode ~18-25 t/s, prefill ~499-511 t/s.
+- Non-think slightly faster than think at 64k (24.6 vs 22.9), similar at 128k/198k.
+
+### glm-4.7-23b-a3b-flash-reap (UD-Q4_K_XL)
+- 23B total, 3B active (MoE, 48 experts pruned from 64). GGUF ~14 GB, fits in VRAM (~10.9 GB used).
+- **Hybrid compute**: CPU ~715-1150% + GPU util 62-72% during decode.
+- Decode ~18-25 t/s, prefill ~509-525 t/s. Similar to original GLM 4.7.
 
 ### gpt-oss-20b-a4b (UD-Q4_K_XL)
 - 21B total, 3.6B active (MoE). GGUF ~11 GB, fits in VRAM (~10.9 GB used).
