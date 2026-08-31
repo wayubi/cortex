@@ -45,6 +45,18 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `ornith-1.5-9b-q4-mtp-256k-think` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | **1523** | ~0.93 | ✅ |
 | `ornith-1.5-9b-q4-mtp-256k-coder` | 256k | 960 | 2 / 0.7 | in-model | ~54 | — | ~1523 | ~0.92 | ✅ |
 | `zamai-llama3-pashto-q8-8k` | 8k | 8192 | — | none (no MTP) | 34.0 | — | 2012 | — | ✅ |
+| `glm-4.7-30b-a3b-flash-q4-64k` | 64k | 4096 | — | none | 24.2 | 24.2 | 512 | — | ✅ |
+| `glm-4.7-30b-a3b-flash-q4-64k-think` | 64k | 4096 | — | none | 23.9 | 23.9 | 511 | — | ✅ |
+| `glm-4.7-30b-a3b-flash-q4-128k` | 128k | 4096 | — | none | 23.2 | 23.2 | 504 | — | ✅ |
+| `glm-4.7-30b-a3b-flash-q4-128k-think` | 128k | 4096 | — | none | 18.2 | 18.2 | 503 | — | ✅ |
+| `glm-4.7-30b-a3b-flash-q4-198k` | 198k | 4096 | — | none | 20.5 | 20.5 | 496 | — | ✅ |
+| `glm-4.7-30b-a3b-flash-q4-198k-think` | 198k | 4096 | — | none | 19.7 | 19.7 | 499 | — | ✅ |
+| `gpt-oss-20b-q4-low-64k` | 64k | 4096 | — | none | 30.4 | 30.4 | 2013 | — | ✅ |
+| `gpt-oss-20b-q4-mid-64k` | 64k | 4096 | — | none | 28.5 | 28.5 | 2019 | — | ✅ |
+| `gpt-oss-20b-q4-high-64k` | 64k | 4096 | — | none | 30.1 | 30.1 | 2002 | — | ✅ |
+| `gpt-oss-20b-q4-low-128k` | 128k | 4096 | — | none | 28.5 | 28.5 | 1961 | — | ✅ |
+| `gpt-oss-20b-q4-mid-128k` | 128k | 4096 | — | none | 26.5 | 26.5 | 1961 | — | ✅ |
+| `gpt-oss-20b-q4-high-128k` | 128k | 4096 | — | none | 27.3 | 27.3 | 1945 | — | ✅ |
 
 ## Performance ranking (4k/8k/16k qwen-3.6-35b-a3b variants)
 
@@ -219,6 +231,17 @@ Winner: **n_max 5, p_min 0.5** (math gate 6/6 correct, faster A/B; acceptance un
 
 ### Qwen3.6-35B-MTP (old build)
 - ±10–15% run-to-run decode variance exceeded config deltas — defaults retained (n_max 2, p_min 0.7).
+
+### glm-4.7-30b-a3b-flash (UD-Q4_K_XL)
+- 30B total, 3B active (MoE). Fits in ~11 GB VRAM. No MTP.
+- Decode ~18-24 t/s, prefill ~496-512 t/s. Fully on GPU (CPU ~97%).
+- Non-think slightly faster than think (24.2 vs 23.9 at 64k).
+
+### gpt-oss-20b (UD-Q4_K_XL)
+- 20B dense. Fits in ~11 GB VRAM. No MTP.
+- Decode ~26-30 t/s, prefill ~1945-2019 t/s. Fully on GPU.
+- Low/high reasoning effort variants: CPU ~900% (heavy reasoning). Mid: CPU ~15%.
+- Prefill much faster than GLM (2000 vs 500 t/s) — smaller model.
 
 ## Hard-task quality gates (6 math/logic questions, max_tokens 2048)
 
