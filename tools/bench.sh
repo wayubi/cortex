@@ -1100,13 +1100,89 @@ cmd_bisect() {
   if [ "$R_FIT" = "CPU" ]; then
     IS_CPU_ONLY=1
     log "  GPU-fit check: CPU — model spills to CPU even at batch 256"
-    log "  → CPU-only bisect mode: finding ceiling via tiny probe (no saturation)"
+    log "  → CPU-only bisect mode: floor check at 256, then ceiling search"
   else
     log "  GPU-fit check: ${R_FIT} — proceeding with GPU saturation-gated bisect"
   fi
 
-  local LO HI VALIDATED PASS CANDIDATES
-  if [ "$RESUME" -eq 1 ]; then
+  # ── CPU-ONLY: FLOOR CHECK (256 batch saturation) + CEILING SEARCH ──
+  if [ "$IS_CPU_ONLY" -eq 1 ]; then
+    local LO HI VALIDATED PASS CANDIDATES
+
+    # 256-batch saturation test — the floor. If this OOMs, the model can't
+    # saturate full context at any batch ≥256 on this GPU.
+    log ""; log "=== CPU-ONLY FLOOR CHECK (batch=256 saturation) ==="
+    set_batch 256; restart
+    saturation_test "$CTX"
+    local FLOOR_RC=$?
+    if [ "$FLOOR_RC" -eq 2 ]; then
+      log "  STALL during floor-check saturation (network/HF fetch)"
+      exit 1
+    fi
+    if [ "$FLOOR_RC" -eq 1 ]; then
+      log "  256 batch CANNOT saturate full context on this GPU"
+      log "  → needs override-tensor=exps=CPU (free VRAM) or lower ctx-size"
+      exit 1
+    fi
+    log "  256 batch saturates full context — floor confirmed"
+    LO=256
+
+    # Ceiling search: probe ctx first, then double-up from 256
+    ceiling_probe() {
+      local B=$1
+      set_batch "$B"; restart
+      log "  Tiny probe @ batch=$B..."
+      local T_RC=0
+      tiny_probe; T_RC=$?
+      if [ "$T_RC" -eq 2 ]; then
+        log "  STALL at $B (network/HF fetch — not an OOM ceiling)"
+        log "  Aborting bisect: model can't cold-load. Re-run when huggingface.co is reachable."
+        exit 1
+      fi
+      if [ "$T_RC" -eq 0 ]; then
+        log "  Probe PASS at $B — saturation-validating..."
+        saturation_test "$CTX"
+        local S_RC=$?
+        if [ "$S_RC" -eq 2 ]; then
+          log "  STALL during saturation at $B (network/HF fetch)"
+          exit 1
+        fi
+        if [ "$S_RC" -eq 0 ]; then
+          log "  PASS at $B (probe + saturation)"
+          return 0
+        fi
+      fi
+      log "  OOM at $B"
+      return 1
+    }
+
+    log ""; log "=== CPU-ONLY CEILING SEARCH (probe ctx, double-up from 256) ==="
+    if ceiling_probe "$CTX"; then
+      LO=$CTX; HI=$((CTX + 64)); VALIDATED=$CTX
+      log "  Bracket: lo=$LO (PASS), hi=$HI (assumed OOM above)"
+    else
+      HI=$CTX
+      local RUNG=256
+      while [ $((RUNG * 2)) -lt "$HI" ]; do
+        RUNG=$((RUNG * 2))
+        if ceiling_probe "$RUNG"; then
+          LO=$RUNG
+        else
+          HI=$RUNG
+          break
+        fi
+      done
+      if [ "$LO" -eq 256 ] && [ "$HI" -eq "$CTX" ]; then
+        log "  No batch above 256 saturates — 256 is the ceiling"
+      fi
+      log "  Bracket: lo=$LO (PASS), hi=$HI (OOM bound)"
+    fi
+    CANDIDATES=0
+
+    # ── PHASE 2 (shared GPU/CPU logic below) ──
+    # ... falls through to PHASE 2 ...
+
+  elif [ "$RESUME" -eq 1 ]; then
     LO=$RESUME_LO; HI=$RESUME_HI
     log ""; log "=== RESUMING BISECT (lo=$LO, hi=$HI, gap=$((HI-LO))) — skipping coarse sweep ==="
   else
