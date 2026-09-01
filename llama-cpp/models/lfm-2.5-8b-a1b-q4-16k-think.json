@@ -4,7 +4,7 @@
   "batch": 16384,
   "ubatch": 16384,
   "placement": "GPU",
-  "bench_date": "2026-08-31T22:20:47.620064",
+  "bench_date": "2026-09-01T02:30:41.267599",
   "bench_method": "bench_model.sh v2",
   "config": {
     "temp": "0.2",
@@ -32,12 +32,12 @@
     "wall_time_s": 28
   },
   "speed": {
-    "prefill_t_s": 5490.59,
-    "prefill_ms": 2191.02,
-    "prefill_ms_per_tok": 0.1821,
-    "decode_t_s": 150.86,
-    "decode_ms": 26508.07,
-    "decode_ms_per_tok": 6.6287
+    "prefill_t_s": 5369.86,
+    "prefill_ms": 2240.28,
+    "prefill_ms_per_tok": 0.1862,
+    "decode_t_s": 147.22,
+    "decode_ms": 27163.03,
+    "decode_ms_per_tok": 6.7925
   },
   "request": {
     "prefill_prompt_tokens": 12030,
@@ -86,20 +86,20 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 96.8,
-      "avg_gpu_util_pct": 66.5,
-      "avg_gpu_mem_util_pct": 62.1,
-      "cpu_stddev_pct": 2.1,
+      "avg_cpu_pct": 97.2,
+      "avg_gpu_util_pct": 68.8,
+      "avg_gpu_mem_util_pct": 64.2,
+      "cpu_stddev_pct": 2.2,
       "peak_vram_mib": 7535,
-      "peak_power_w": 154.12,
+      "peak_power_w": 154.51,
       "peak_temp_c": 63,
-      "peak_clocks_sm_mhz": 1965,
+      "peak_clocks_sm_mhz": 1957,
       "peak_clocks_mem_mhz": 7301,
       "final_vram_mib": 7535,
-      "final_temp_c": 58,
-      "final_power_w": 49.52,
-      "ram_used_mib": 40180,
-      "rss_mib": 1664,
+      "final_temp_c": 59,
+      "final_power_w": 67.84,
+      "ram_used_mib": 40279,
+      "rss_mib": 1665,
       "sample_count": 12
     }
   }
