@@ -196,7 +196,7 @@ measure_ratio() {
   local MEASURE_CHARS=2000
   python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*1000)[:$MEASURE_CHARS]}],'max_tokens':1}
+payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*30000)[:$MEASURE_CHARS]}],'max_tokens':1}
 with open('/tmp/ratio_payload.json','w') as f: json.dump(payload, f)
 "
   logmark
@@ -238,7 +238,7 @@ saturation_test() {
   while [ "$ATTEMPT" -le 3 ]; do
     python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*1000)[:$SAT_SIZE]}],'max_tokens':$MAX_TOK,'ignore_eos':True}
+payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*30000)[:$SAT_SIZE]}],'max_tokens':$MAX_TOK,'ignore_eos':True}
 with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 print(f'  Payload: {len(json.dumps(payload))} bytes')
 "
@@ -322,7 +322,7 @@ measure_speed() {
   # Prefill probe (75% ctx, max_tokens=1)
   python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*1000)[:$PREFILL_CHARS]}],'max_tokens':1,'ignore_eos':True}
+payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*30000)[:$PREFILL_CHARS]}],'max_tokens':1,'ignore_eos':True}
 with open('/tmp/perf_prefill_payload.json','w') as f: json.dump(payload, f)
 "
   curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
