@@ -1128,10 +1128,6 @@ cmd_bisect() {
         exit 1
       fi
       if [ "$T_RC" -eq 0 ]; then
-        if [ "$IS_CPU_ONLY" -eq 1 ]; then
-          log "  PASS at $B (CPU-only, no saturation)"
-          return 0
-        fi
         log "  Probe PASS at $B — saturation-validating..."
         saturation_test "$CTX"
         local S_RC=$?
@@ -1215,21 +1211,17 @@ cmd_bisect() {
       exit 1
     fi
     if [ "$T_RC" -eq 0 ]; then
-      if [ "$IS_CPU_ONLY" -eq 1 ]; then
-        log "  PASS (CPU-only, no saturation)"; LO=$MID
+      log "  Probe PASS — running saturation..."
+      saturation_test "$CTX"
+      local S_RC=$?
+      if [ "$S_RC" -eq 2 ]; then
+        log "  STALL during saturation at $MID — aborting bisect"
+        exit 1
+      fi
+      if [ "$S_RC" -eq 0 ]; then
+        log "  PASS (probe + saturation)"; LO=$MID
       else
-        log "  Probe PASS — running saturation..."
-        saturation_test "$CTX"
-        local S_RC=$?
-        if [ "$S_RC" -eq 2 ]; then
-          log "  STALL during saturation at $MID — aborting bisect"
-          exit 1
-        fi
-        if [ "$S_RC" -eq 0 ]; then
-          log "  PASS (probe + saturation)"; LO=$MID
-        else
-          log "  FAIL (saturation)"; HI=$MID
-        fi
+        log "  FAIL (saturation)"; HI=$MID
       fi
     else
       log "  OOM (probe)"; HI=$MID
@@ -1237,12 +1229,12 @@ cmd_bisect() {
   done
   VALIDATED=$LO
   if [ "$IS_CPU_ONLY" -eq 1 ]; then
-    log "  Refined lo=$LO — max batch passing tiny probe (CPU-only, no saturation)"
+    log "  Refined lo=$LO — max batch passing saturation (CPU-only, GPU residency skipped)"
     set_batch "$VALIDATED"
     log ""
-    log "  *** CPU-ONLY CEILING: batch=$VALIDATED (spills to CPU at all batches, no GPU saturation) ***"
+    log "  *** CPU-ONLY CEILING: batch=$VALIDATED (spills to CPU, full-context saturation validated) ***"
     log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-    log "  candidates=$CANDIDATES (CPU-only mode, tiny-probe criterion)"
+    log "  candidates=$CANDIDATES (CPU-only mode — GPU residency sweep skipped)"
     log ""; log "=== DONE ==="
     exit 0
   fi
@@ -2103,7 +2095,7 @@ run_full_suite() {
     if [ "$BISECT_FAILED" -eq 1 ]; then
       lshow "  bench: SKIPPED (bisect failed — models.ini batch unreliable)"
       VERDICTS["$NAME|bench"]="SKIPPED (bisect failed)"
-    elif [ "$(model_batch "$i")" != "1" ]; then
+    elif [ "$(read_batch)" = "" ]; then
       lshow "  bench: SKIPPED (no batch-size — run bisect first)"
       VERDICTS["$NAME|bench"]="SKIPPED"
     else
