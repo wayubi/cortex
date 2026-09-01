@@ -407,7 +407,7 @@ saturation_test() {
   local TARGET_TOK=$(python3 -c "print(int($CTX * 0.85))")
   local SAT_SIZE=0
   local ATTEMPT=1
-  local SHRUNK=0
+  local TARGET_PREFILL=$(python3 -c "print(int($CTX * 0.85))")
 
   measure_ratio || true
   if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
@@ -418,7 +418,7 @@ saturation_test() {
     log "  Saturation: fallback prompt ~${SAT_SIZE} chars, max_tokens=$MAX_TOK"
   fi
 
-  while [ "$ATTEMPT" -le 3 ]; do
+  while [ "$ATTEMPT" -le 4 ]; do
     python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
@@ -450,41 +450,61 @@ print(f'  Payload: {len(json.dumps(payload))} bytes')
     if grep -q "exceeds the available context" /tmp/sat_response.json 2>/dev/null; then
       log "  Prompt too large — shrinking 10% (attempt $ATTEMPT)"
       SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * 0.9))")
-      SHRUNK=1
       ATTEMPT=$((ATTEMPT + 1))
       continue
     fi
-    break
-  done
 
-  local OOM=$(oom_count_since_mark)
-  if [ "$OOM" -gt 0 ]; then
-    log "  Saturation: OOM"
-    oom_since_mark | tail -2 | tee -a "$LOG_FILE"
-    return 1
-  fi
-  python3 -c "
+    # Check for OOM (true VRAM failure)
+    local OOM=$(oom_count_since_mark)
+    if [ "$OOM" -gt 0 ]; then
+      log "  Saturation: OOM"
+      oom_since_mark | tail -2 | tee -a "$LOG_FILE"
+      return 1
+    fi
+
+    # Read actual prefill + completion from the response
+    local PT CT
+    python3 -c "
 import json
 d = json.load(open('/tmp/sat_response.json'))
-shrunk = int('$SHRUNK')
 if 'choices' in d:
-    t = d.get('timings', {})
     u = d.get('usage', {})
     pt = u.get('prompt_tokens', 0) or 0
     ct = u.get('completion_tokens', 0) or 0
-    total = pt + ct
-    ctx = $CTX
-    if total < ctx * 0.98 and shrunk == 0:
-        print(f'  Saturation: UNDER-SATURATED ({total}/{ctx} = {total/ctx*100:.1f}% of ctx)')
-        exit(1)
-    elif total < ctx * 0.98 and shrunk == 1:
-        print(f'  Saturation: PASS (prompt_tokens={pt}, completion_tokens={ct}, total={total}, ctx={ctx}) [shrunk — ratio estimate off]')
-    else:
-        print(f'  Saturation: PASS (prompt_tokens={pt}, completion_tokens={ct}, total={total}, ctx={ctx})')
+    print(pt, ct)
 else:
-    print('  Saturation: FAIL')
-    exit(1)
-" 2>/dev/null; return $?
+    print('FAIL')
+" 2>/dev/null | read -r PT CT
+    if [ "$PT" = "FAIL" ] || [ -z "$PT" ]; then
+      log "  Saturation: FAIL (no valid response)"
+      return 1
+    fi
+
+    # Scale the prefill if it fell short of 85% target
+    if [ "$PT" -lt "$TARGET_PREFILL" ] 2>/dev/null; then
+      SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * $TARGET_PREFILL / $PT))")
+      log "  Saturation: prefill reached ${PT} tokens (target ${TARGET_PREFILL}) — scaling prompt ${ATTEMPT}"
+      ATTEMPT=$((ATTEMPT + 1))
+      continue
+    fi
+
+    # Prefill reached 85%+ — now verify compaction: pt + ct >= ctx
+    if [ $((PT + CT)) -ge "$CTX" ]; then
+      log "  Saturation: PASS (prompt_tokens=${PT}, completion_tokens=${CT}, total=$((PT+CT)), ctx=${CTX})"
+      return 0
+    fi
+
+    # If prefill reached 85%+ but total < ctx: max_tokens wasn't enough.
+    # With MAX_TOK=20% of CTX, 85%+20% > 100% always — this branch is
+    # mathematically unreachable under normal conditions. If hit, the only
+    # remedy is growing the prefill slightly and retrying.
+    SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * $TARGET_PREFILL / $PT))")
+    log "  Saturation: prefill=${PT} but total=$((PT+CT)) < ctx=${CTX} — growing prompt (attempt $ATTEMPT)"
+    ATTEMPT=$((ATTEMPT + 1))
+  done
+
+  log "  Saturation: FAIL — could not reach compaction in $ATTEMPT attempts"
+  return 1
 }
 
 long_decode_check() {
@@ -1132,23 +1152,29 @@ cmd_bisect() {
       exit 1
     fi
     if [ "$FLOOR_RC" -eq 1 ]; then
-      log "  256 batch CANNOT saturate full context — applying override-tensor=exps=CPU to free VRAM"
-      set_key override-tensor exps=CPU
-      log "  Retrying floor check after override-tensor applied"
-      restart
-      saturation_test "$CTX"
-      local RETRY_RC=$?
-      if [ "$RETRY_RC" -eq 2 ]; then
-        log "  STALL during retry (network/HF fetch)"
+      FLOOR_OOM=$(oom_count_since_mark)
+      if [ "$FLOOR_OOM" -gt 0 ]; then
+        log "  256 batch CANNOT saturate full context (OOM) — applying override-tensor=exps=CPU to free VRAM"
+        set_key override-tensor exps=CPU
+        log "  Retrying floor check after override-tensor applied"
+        restart
+        saturation_test "$CTX"
+        local RETRY_RC=$?
+        if [ "$RETRY_RC" -eq 2 ]; then
+          log "  STALL during retry (network/HF fetch)"
+          exit 1
+        fi
+        if [ "$RETRY_RC" -eq 1 ]; then
+          log "  256 batch STILL cannot saturate full context even with override-tensor=exps=CPU"
+          log "  → ctx-size is too large for this GPU even with experts offloaded; consider lower ctx-size"
+          exit 1
+        fi
+        USE_STANDARD_FLOW=1
+      else
+        log "  256 batch CANNOT saturate full context (no OOM — model ran but prefill sizing failed)"
+        log "  → override-tensor=exps=CPU won't help; the model needs a lower ctx-size"
         exit 1
       fi
-      if [ "$RETRY_RC" -eq 1 ]; then
-        log "  256 batch STILL cannot saturate full context even with override-tensor=exps=CPU"
-        log "  → ctx-size is too large for this GPU even with experts offloaded; consider lower ctx-size"
-        exit 1
-      fi
-      # override applied, VRAM freed — 256 floor no longer relevant, use standard bisect
-      USE_STANDARD_FLOW=1
     fi
   fi
 
