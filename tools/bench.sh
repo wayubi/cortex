@@ -279,14 +279,72 @@ oom_since_mark() {
 }
 oom_count_since_mark() { oom_since_mark | wc -l | tr -d ' '; }
 
+# ── Cold-load stall watchdog ───────────────────────────────
+# The router logs "proxy_reques: proxying request to model <model> on port <N>"
+# ONLY after the model finishes loading and the request is being served.
+# A hung cold-load (e.g. HF network fetch stalled) never emits this line.
+# SERVED_GRACE = max seconds to wait for the line (generous for healthy big-model
+# loads; a true stall never produces it). Configurable via env.
+SERVED_GRACE=${SERVED_GRACE:-60}
+
+# Wait for the router log to show our request being served (proxy_reques line).
+# Takes the curl PID — if the curl has already exited (request completed, whether
+# 200 or 500), return 0 immediately so the caller can parse the response. Only
+# return 1 (hung) if the curl is STILL running and no proxy line appeared.
+# All logs → stderr (caller may capture stdout via $()).
+wait_served() {
+  local PID=$1
+  local i
+  for i in $(seq 1 $((SERVED_GRACE / 2))); do
+    if ! kill -0 "$PID" 2>/dev/null; then return 0; fi
+    if docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+         | grep -q "proxy_reques: proxying request to model $MODEL"; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# Fire a chat-completions POST from $1 (payload @file) to $2 (out), watching for
+# the router's proxy_reques line. On a cold-load hang: kill curl, restart, retry
+# once. Sets $FIRE_PID to the curl PID on success.
+# Returns: 0 = served (curl still running — caller waits), 2 = STALL (hung after retry).
+# All logs → stderr (safe inside $() captures).
+FIRE_PID=""
+fire_request() {
+  local PAYLOAD=$1 OUT=$2 LABEL=$3
+  local ATTEMPT PID
+  for ATTEMPT in 1 2; do
+    logmark
+    curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
+      -H 'Content-Type: application/json' -d @"$PAYLOAD" > "$OUT" 2>&1 &
+    PID=$!
+    if wait_served "$PID"; then
+      FIRE_PID=$PID
+      return 0
+    fi
+    kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null || true
+    log "  $LABEL: cold-load hang (no proxy line in ${SERVED_GRACE}s) — restarting + retry $ATTEMPT" >&2
+    restart >&2
+  done
+  log "  $LABEL: STALL — model never served after restart+retry (network/HF fetch)" >&2
+  FIRE_PID=""
+  return 2
+}
+
 # ── Probe primitives ────────────────────────────────────────
 tiny_probe() {
-  logmark
   log "  Probe started $(date +%H:%M:%S)..."
-  curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":8}" \
-    > /tmp/probe.json 2>&1
+  python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'Say hello'}],'max_tokens':8}
+with open('/tmp/probe_payload.json','w') as f: json.dump(payload, f)
+"
+  fire_request /tmp/probe_payload.json /tmp/probe.json "tiny-probe"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then return 2; fi
+  wait "$FIRE_PID" 2>/dev/null || true
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then
     log "  OOM: $(oom_since_mark | head -1)"
@@ -310,10 +368,10 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*30000)[:$MEASURE_CHARS]}],'max_tokens':1}
 with open('/tmp/ratio_payload.json','w') as f: json.dump(payload, f)
 "
-  logmark
-  curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/ratio_payload.json \
-    > /tmp/ratio_response.json 2>&1
+  fire_request /tmp/ratio_payload.json /tmp/ratio_response.json "measure-ratio"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then return 2; fi
+  wait "$FIRE_PID" 2>/dev/null || true
   local TOK=$(python3 -c "
 import json
 try:
@@ -354,25 +412,24 @@ payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history o
 with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 print(f'  Payload: {len(json.dumps(payload))} bytes')
 "
-    logmark
-    # Background curl + OOM watchdog: kill early if the log shows an OOM marker
-    # (dead-child/router cleanup can otherwise stall the request for ~10s+)
-    curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
-      -H 'Content-Type: application/json' -d @/tmp/sat_payload.json \
-      > /tmp/sat_response.json 2>&1 &
-    local SAT_PID=$!
+    fire_request /tmp/sat_payload.json /tmp/sat_response.json "saturation"
+    local RC=$?
+    if [ "$RC" -eq 2 ]; then return 2; fi
+
+    # OOM watchdog: kill early if the log shows an OOM marker (dead-child/router
+    # cleanup can otherwise stall the request for ~10s+)
     local WATCH=0
-    while kill -0 $SAT_PID 2>/dev/null; do
+    while kill -0 $FIRE_PID 2>/dev/null; do
       if [ "$(oom_count_since_mark)" -gt 0 ]; then
         log "  Saturation: OOM detected — killing curl"
-        kill $SAT_PID 2>/dev/null
+        kill $FIRE_PID 2>/dev/null
         break
       fi
       WATCH=$((WATCH + 1))
       [ $((WATCH % 30)) -eq 0 ] && log "    ...watchdog ${WATCH}x2s (request still running)"
       sleep 2
     done
-    wait $SAT_PID 2>/dev/null || true
+    wait $FIRE_PID 2>/dev/null || true
 
     if grep -q "exceeds the available context" /tmp/sat_response.json 2>/dev/null; then
       log "  Prompt too large — shrinking 10% (attempt $ATTEMPT)"
@@ -405,10 +462,10 @@ import json
 with open('/tmp/longdec_payload.json','w') as f:
     json.dump({'model':'$MODEL','messages':[{'role':'user','content':'Write a detailed essay explaining the history of computing.'}],'max_tokens':6000,'ignore_eos':True}, f)
 "
-  logmark
-  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/longdec_payload.json \
-    > /tmp/longdec_response.json 2>&1
+  fire_request /tmp/longdec_payload.json /tmp/longdec_response.json "long-decode"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then return 2; fi
+  wait "$FIRE_PID" 2>/dev/null || true
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then log "  Long-decode: OOM"; return 1; fi
   python3 -c "
@@ -438,9 +495,10 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*30000)[:$PREFILL_CHARS]}],'max_tokens':1,'ignore_eos':True}
 with open('/tmp/perf_prefill_payload.json','w') as f: json.dump(payload, f)
 "
-  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/perf_prefill_payload.json \
-    > /tmp/perf_prefill.json 2>&1
+  fire_request /tmp/perf_prefill_payload.json /tmp/perf_prefill.json "measure-prefill"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then echo "0|0|0"; return 0; fi
+  wait "$FIRE_PID" 2>/dev/null || true
 
   # Decode probe (short prompt, full 4000-token window) — poll CPU during it
   # for GPU-residency classification
@@ -449,10 +507,10 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
 with open('/tmp/perf_decode_payload.json','w') as f: json.dump(payload, f)
 "
-  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/perf_decode_payload.json \
-    > /tmp/perf_decode.json 2>&1 &
-  local DEC_PID=$!
+  fire_request /tmp/perf_decode_payload.json /tmp/perf_decode.json "measure-decode"
+  local DEC_RC=$?
+  if [ "$DEC_RC" -eq 2 ]; then echo "0|0|0"; return 0; fi
+  local DEC_PID=$FIRE_PID
   local CPU_SAMPLES=()
   for i in $(seq 1 40); do
     local TOP CPU
@@ -507,11 +565,13 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
 with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
 "
-  local R_PID
-  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/resid_payload.json \
-    > /tmp/resid_response.json 2>&1 &
-  R_PID=$!
+  fire_request /tmp/resid_payload.json /tmp/resid_response.json "residency"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then
+    log "  residency: STALL — model never served (network/HF fetch)" >&2
+    echo "STALL"; return 0
+  fi
+  local R_PID=$FIRE_PID
 
   local R_CPU_SUM=0 R_CPU_CNT=0 R_GPU_SEEN=0
   local R_CPU=0 R_GPU=0 R_TEMP=0 R_CPU_CONSEC=0 R_GPU_CONSEC=0
@@ -583,6 +643,10 @@ residency_descend() {
   # Probe the realistic floor (2048): if GPU, ladder up; if CPU-spilled, ladder down.
   set_batch 2048 >&2; restart >&2
   R=$(residency_probe)
+  if [ "$R" = "STALL" ]; then
+    log "  residency descend: STALL — model can't cold-load (network/HF fetch)" >&2
+    return 2
+  fi
   if [ "$R" = "GPU" ]; then
     LO=2048
     B=2048
@@ -590,6 +654,10 @@ residency_descend() {
       B=$((B * 2))
       set_batch "$B" >&2; restart >&2
       R=$(residency_probe)
+      if [ "$R" = "STALL" ]; then
+        log "  residency descend: STALL at $B — model can't cold-load" >&2
+        return 2
+      fi
       if [ "$R" = "GPU" ]; then LO=$B
       else HI=$B; break; fi
     done
@@ -600,6 +668,10 @@ residency_descend() {
     while [ "$B" -ge 64 ]; do
       set_batch "$B" >&2; restart >&2
       R=$(residency_probe)
+      if [ "$R" = "STALL" ]; then
+        log "  residency descend: STALL at $B — model can't cold-load" >&2
+        return 2
+      fi
       if [ "$R" = "GPU" ]; then LO=$B; break
       else HI=$B; B=$((B / 2 / 64 * 64)); fi
     done
@@ -651,11 +723,19 @@ detect_mtp() {
     ATTEMPT=$((ATTEMPT + 1))
     log "  --- MTP load attempt $ATTEMPT (batch=$CUR_BATCH) ---"
     restart
-    logmark
-    curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
-      -H 'Content-Type: application/json' \
-      -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":8}" \
-      > /tmp/mtp_detect.json 2>&1
+    python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'Say hello'}],'max_tokens':8}
+with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
+"
+    fire_request /tmp/mtp_payload.json /tmp/mtp_detect.json "mtp-detect"
+    local RC=$?
+    if [ "$RC" -eq 2 ]; then
+      log "  STALL during MTP detection (network/HF fetch) — aborting"
+      restore_section "$SNAP"
+      exit 1
+    fi
+    wait "$FIRE_PID" 2>/dev/null || true
 
     local OOM LOGS
     OOM=$(oom_count_since_mark)
@@ -742,11 +822,13 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':'$ESSAY'}],'max_tokens':4000,'ignore_eos':True}
 with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
 "
-  logmark
-  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/mtp_payload.json \
-    > /tmp/mtp_out.json 2>&1 &
-  local PID=$!
+  fire_request /tmp/mtp_payload.json /tmp/mtp_out.json "mtp-tune"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then
+    plog "  STALL — model never served (network/HF fetch)"
+    return 2
+  fi
+  local PID=$FIRE_PID
 
   # Placement poll: until request completes (min 3 samples), capped at 160s
   plog "  Polling CPU/GPU until request completes (max 160s)..."
@@ -853,6 +935,11 @@ cmd_mtp() {
     restart
     local RESULT SPEED ACC PLACEMENT AVGCPU QUALITY OOM
     RESULT=$(run_decode_test "n_max=$N, p_min=0.7")
+    local DEC_RC=$?
+    if [ "$DEC_RC" -eq 2 ]; then
+      log ""; log "  STALL during n_max=$N sweep — network/HF fetch, aborting tune"
+      return 1
+    fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
     NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
     if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "${QUALITY:-0}" -lt 2 ] 2>/dev/null; then
@@ -876,6 +963,11 @@ cmd_mtp() {
     restart
     local RESULT SPEED ACC PLACEMENT AVGCPU QUALITY OOM
     RESULT=$(run_decode_test "n_max=$WIN_NMAX, p_min=$P")
+    local DEC_RC=$?
+    if [ "$DEC_RC" -eq 2 ]; then
+      log ""; log "  STALL during p_min=$P sweep — network/HF fetch, aborting tune"
+      return 1
+    fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
     PMIN_RESULTS[$P]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
     if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "${QUALITY:-0}" -lt 2 ] 2>/dev/null; then
@@ -950,11 +1042,20 @@ cmd_bisect() {
     fi
     set_batch "$TEST_BATCH"; restart
     log ""; log "=== PHASE 1: TINY PROBE ==="
-    tiny_probe && log "  PASS" || { log "  FAIL"; exit 1; }
+    tiny_probe
+    local T_RC=$?
+    if [ "$T_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
+    if [ "$T_RC" -ne 0 ]; then log "  FAIL"; exit 1; fi
+    log "  PASS"
     log ""; log "=== PHASE 2: SATURATION ==="
-    saturation_test "$CTX" || { log "  FAILED"; exit 1; }
+    saturation_test "$CTX"
+    local S_RC=$?
+    if [ "$S_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
+    if [ "$S_RC" -ne 0 ]; then log "  FAILED"; exit 1; fi
     log ""; log "=== PHASE 3: LONG-DECODE ==="
-    long_decode_check || true
+    long_decode_check
+    local LD_RC=$?
+    if [ "$LD_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
     log ""; log "=== RESULT: batch=$TEST_BATCH ubatch=$TEST_BATCH ==="
     log "=== DONE ==="
     exit 0
@@ -975,9 +1076,22 @@ cmd_bisect() {
       local B=$1
       set_batch "$B"; restart
       log "  Tiny probe @ batch=$B..."
-      if tiny_probe; then
+      local T_RC=0
+      tiny_probe; T_RC=$?
+      if [ "$T_RC" -eq 2 ]; then
+        log "  STALL at $B (network/HF fetch — not an OOM ceiling)"
+        log "  Aborting bisect: model can't cold-load. Re-run when huggingface.co is reachable."
+        exit 1
+      fi
+      if [ "$T_RC" -eq 0 ]; then
         log "  Probe PASS at $B — saturation-validating..."
-        if saturation_test "$CTX"; then
+        saturation_test "$CTX"
+        local S_RC=$?
+        if [ "$S_RC" -eq 2 ]; then
+          log "  STALL during saturation at $B (network/HF fetch)"
+          exit 1
+        fi
+        if [ "$S_RC" -eq 0 ]; then
           log "  PASS at $B (probe + saturation)"
           return 0
         fi
@@ -1046,9 +1160,21 @@ cmd_bisect() {
     CANDIDATES=$((CANDIDATES + 1))
     log ""; log "  Testing batch=$MID (lo=$LO, hi=$HI, gap=$((HI-LO)))..."
     set_batch "$MID"; restart; log "  Tiny probe..."
-    if tiny_probe; then
+    local T_RC=0
+    tiny_probe; T_RC=$?
+    if [ "$T_RC" -eq 2 ]; then
+      log "  STALL at $MID (network/HF fetch) — aborting bisect"
+      exit 1
+    fi
+    if [ "$T_RC" -eq 0 ]; then
       log "  Probe PASS — running saturation..."
-      if saturation_test "$CTX"; then
+      saturation_test "$CTX"
+      local S_RC=$?
+      if [ "$S_RC" -eq 2 ]; then
+        log "  STALL during saturation at $MID — aborting bisect"
+        exit 1
+      fi
+      if [ "$S_RC" -eq 0 ]; then
         log "  PASS (probe + saturation)"; LO=$MID
       else
         log "  FAIL (saturation)"; HI=$MID
@@ -1065,7 +1191,13 @@ cmd_bisect() {
   log ""; log "=== FINAL CONFIRM (batch=$VALIDATED) ==="
   set_batch "$VALIDATED"; restart
   PASS=0
-  if saturation_test "$CTX"; then
+  saturation_test "$CTX"
+  local S_RC=$?
+  if [ "$S_RC" -eq 2 ]; then
+    log "  STALL during final-confirm saturation — aborting"
+    exit 1
+  fi
+  if [ "$S_RC" -eq 0 ]; then
     PASS=1
     log "  *** VALIDATED batch=$VALIDATED ***"
   else
@@ -1075,14 +1207,20 @@ cmd_bisect() {
     local BATCH=$((VALIDATED / 2))
     while [ "$BATCH" -ge 64 ]; do
       set_batch "$BATCH"; restart
-      if saturation_test "$CTX"; then LO=$BATCH; break
+      saturation_test "$CTX"
+      local BR_RC=$?
+      if [ "$BR_RC" -eq 2 ]; then log "  STALL in bracketed search — aborting"; exit 1; fi
+      if [ "$BR_RC" -eq 0 ]; then LO=$BATCH; break
       else HI=$BATCH; BATCH=$((BATCH / 2)); fi
     done
     while [ $((HI - LO)) -gt 64 ]; do
       MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
       [ "$MID" -le "$LO" ] && MID=$((LO + 64))
       set_batch "$MID"; restart
-      if saturation_test "$CTX"; then LO=$MID; else HI=$MID; fi
+      saturation_test "$CTX"
+      local BR_RC=$?
+      if [ "$BR_RC" -eq 2 ]; then log "  STALL in bracketed search — aborting"; exit 1; fi
+      if [ "$BR_RC" -eq 0 ]; then LO=$MID; else HI=$MID; fi
     done
     VALIDATED=$LO
     PASS=1
@@ -1091,7 +1229,12 @@ cmd_bisect() {
 
   log ""; log "=== LONG-DECODE CHECK ==="
   set_batch "$VALIDATED"; restart
-  long_decode_check || true
+  long_decode_check
+  local LD_RC=$?
+  if [ "$LD_RC" -eq 2 ]; then
+    log "  STALL during long-decode — aborting"
+    exit 1
+  fi
 
   # ── RESIDENCY GATE: decide if Phase 4 is worth running ──
   # A fast residency probe on the ceiling answers "GPU-resident or CPU-spilled?",
@@ -1106,6 +1249,10 @@ cmd_bisect() {
   log ""; log "=== RESIDENCY CHECK (batch=$VALIDATED) ==="
   local R_VERDICT R256 DESC
   R_VERDICT=$(residency_probe)
+  if [ "$R_VERDICT" = "STALL" ]; then
+    log "  residency: STALL — model can't cold-load (network/HF fetch)"
+    exit 1
+  fi
   if [ "$R_VERDICT" = "GPU" ]; then
     if [ "$VALIDATED" -eq "$CTX" ]; then
       log "  batch is GPU-resident (100% GPU) — value is ctx, skipping Phase 4"
@@ -1124,6 +1271,10 @@ cmd_bisect() {
     log "  batch spilled to CPU — checking if 100% GPU is possible at batch 256..."
     set_batch 256; restart
     R256=$(residency_probe)
+    if [ "$R256" = "STALL" ]; then
+      log "  residency 256: STALL — model can't cold-load (network/HF fetch)"
+      exit 1
+    fi
     if [ "$R256" = "CPU" ]; then
       log "  256 also spilled — CPU-compute model, 100% GPU impossible. Value is ceiling $VALIDATED"
       set_batch "$VALIDATED"
@@ -1139,6 +1290,11 @@ cmd_bisect() {
     if [ "$VALIDATED" -eq "$CTX" ]; then
       log "  ctx fits but spills — descending to largest GPU-resident batch"
       DESC=$(residency_descend "$CTX")
+      local DESC_RC=$?
+      if [ "$DESC_RC" -eq 2 ]; then
+        log "  residency descend: STALL — model can't cold-load (network/HF fetch)"
+        exit 1
+      fi
       VALIDATED=$DESC
       set_batch "$VALIDATED"
       log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (largest GPU-resident) ***"
@@ -1508,9 +1664,13 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*1000)[:2000]}],'max_tokens':1}
 with open('/tmp/ratio_payload.json','w') as f: json.dump(payload, f)
 "
-  curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/ratio_payload.json \
-    > /tmp/ratio_response.json 2>&1 || true
+  fire_request /tmp/ratio_payload.json /tmp/ratio_response.json "bench-ratio"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then
+    log "  STALL on ratio probe — aborting bench"
+    return 1
+  fi
+  wait "$FIRE_PID" 2>/dev/null || true
   local MEASURED_TOK
   MEASURED_TOK=$(python3 -c "
 import json
@@ -1551,9 +1711,10 @@ print(f'  Prefill payload: {len(prompt)} chars, ~{$PROMPT_TOKENS} tokens (max_to
 "
 
   log "  Phase A: prefill request ($PROMPT_TOKENS tokens)..."
-  curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/bench_prefill_payload.json \
-    > /tmp/bench_prefill.json 2>&1 || true
+  fire_request /tmp/bench_prefill_payload.json /tmp/bench_prefill.json "bench-prefill"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then log "  STALL on prefill — aborting bench"; return 1; fi
+  wait "$FIRE_PID" 2>/dev/null || true
 
   # ── Phase B: DECODE (short prompt, placement polling) ───────
   python3 -c "
@@ -1573,10 +1734,10 @@ print(f'  Decode payload: {len(prompt)} chars, ~$DECODE_PROMPT_TOKENS tokens (ma
   local REQUEST_START=$(date +%s)
 
   log "  Phase B: firing decode request..."
-  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/bench_payload.json \
-    > /tmp/bench_output.json 2>&1 &
-  local PID=$!
+  fire_request /tmp/bench_payload.json /tmp/bench_output.json "bench-decode"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then log "  STALL on decode — aborting bench"; return 1; fi
+  local PID=$FIRE_PID
 
   # Poll CPU/GPU until the request completes (min 3 samples, capped at 160s)
   log "  Polling CPU/GPU until request completes (max $((POLL_MAX_SAMPLES * 2))s)..."
