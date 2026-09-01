@@ -1,10 +1,10 @@
 {
   "model": "lfm-2.5-8b-a1b-q4-8k-think",
   "ctx": 8192,
-  "batch": 262080,
-  "ubatch": 262080,
+  "batch": 8192,
+  "ubatch": 8192,
   "placement": "GPU",
-  "bench_date": "2026-08-31T16:43:50.530640",
+  "bench_date": "2026-08-31T22:14:28.193421",
   "bench_method": "bench_model.sh v2",
   "config": {
     "temp": "0.2",
@@ -21,7 +21,7 @@
     "quant": "UD-Q4_K_XL",
     "reasoning": "off",
     "ctx": "8192",
-    "batch": "262080"
+    "batch": "8192"
   },
   "bench": {
     "max_tokens": 4000,
@@ -32,12 +32,12 @@
     "wall_time_s": 28
   },
   "speed": {
-    "prefill_t_s": 6234.84,
-    "prefill_ms": 965.54,
-    "prefill_ms_per_tok": 0.1604,
-    "decode_t_s": 146.57,
-    "decode_ms": 27284.01,
-    "decode_ms_per_tok": 6.8227
+    "prefill_t_s": 6387.6,
+    "prefill_ms": 942.45,
+    "prefill_ms_per_tok": 0.1566,
+    "decode_t_s": 147.9,
+    "decode_ms": 27038.89,
+    "decode_ms_per_tok": 6.7614
   },
   "request": {
     "prefill_prompt_tokens": 6020,
@@ -86,20 +86,20 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 98.3,
-      "avg_gpu_util_pct": 69.5,
-      "avg_gpu_mem_util_pct": 65.0,
-      "cpu_stddev_pct": 2.8,
+      "avg_cpu_pct": 98.2,
+      "avg_gpu_util_pct": 64.2,
+      "avg_gpu_mem_util_pct": 59.9,
+      "cpu_stddev_pct": 1.4,
       "peak_vram_mib": 6265,
-      "peak_power_w": 153.78,
-      "peak_temp_c": 65,
-      "peak_clocks_sm_mhz": 1957,
+      "peak_power_w": 153.04,
+      "peak_temp_c": 63,
+      "peak_clocks_sm_mhz": 1965,
       "peak_clocks_mem_mhz": 7301,
       "final_vram_mib": 6265,
-      "final_temp_c": 61,
-      "final_power_w": 67.08,
-      "ram_used_mib": 47404,
-      "rss_mib": 1118,
+      "final_temp_c": 59,
+      "final_power_w": 49.56,
+      "ram_used_mib": 38432,
+      "rss_mib": 1129,
       "sample_count": 12
     }
   }
