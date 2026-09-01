@@ -296,7 +296,7 @@ else: print('  Long-decode: FAIL'); exit(1)
 # Measure prefill + decode speed at the CURRENT batch (75%-ctx prefill probe,
 # then a full 4000-token decode window). Echoes "prefill_t_s|decode_t_s".
 measure_speed() {
-  measure_ratio || true
+  measure_ratio >&2 || true   # progress → stderr; stdout reserved for the result
   local PREFILL_CHARS=0
   if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
     PREFILL_CHARS=$(python3 -c "print(int($CTX * 0.75 * $CHARS_PER_TOK))")
