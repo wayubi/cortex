@@ -1084,6 +1084,27 @@ cmd_bisect() {
     exit 0
   fi
 
+  # ── GPU-FIT CLASSIFICATION (256 low-GPU check) ──
+  # Determine early if the model can run GPU-resident at all. If not (CPU-only),
+  # the bisect finds the batch ceiling using tiny probe only — full-context
+  # saturation is unachievable and the residency gate doesn't apply.
+  local IS_CPU_ONLY=0
+  log ""; log "=== GPU-FIT CHECK (batch=256) ==="
+  set_batch 256; restart
+  local R_FIT
+  R_FIT=$(residency_probe)
+  if [ "$R_FIT" = "STALL" ]; then
+    log "  GPU-fit check: STALL — model can't cold-load (network/HF fetch)"
+    exit 1
+  fi
+  if [ "$R_FIT" = "CPU" ]; then
+    IS_CPU_ONLY=1
+    log "  GPU-fit check: CPU — model spills to CPU even at batch 256"
+    log "  → CPU-only bisect mode: finding ceiling via tiny probe (no saturation)"
+  else
+    log "  GPU-fit check: ${R_FIT} — proceeding with GPU saturation-gated bisect"
+  fi
+
   local LO HI VALIDATED PASS CANDIDATES
   if [ "$RESUME" -eq 1 ]; then
     LO=$RESUME_LO; HI=$RESUME_HI
@@ -1107,6 +1128,10 @@ cmd_bisect() {
         exit 1
       fi
       if [ "$T_RC" -eq 0 ]; then
+        if [ "$IS_CPU_ONLY" -eq 1 ]; then
+          log "  PASS at $B (CPU-only, no saturation)"
+          return 0
+        fi
         log "  Probe PASS at $B — saturation-validating..."
         saturation_test "$CTX"
         local S_RC=$?
@@ -1190,23 +1215,37 @@ cmd_bisect() {
       exit 1
     fi
     if [ "$T_RC" -eq 0 ]; then
-      log "  Probe PASS — running saturation..."
-      saturation_test "$CTX"
-      local S_RC=$?
-      if [ "$S_RC" -eq 2 ]; then
-        log "  STALL during saturation at $MID — aborting bisect"
-        exit 1
-      fi
-      if [ "$S_RC" -eq 0 ]; then
-        log "  PASS (probe + saturation)"; LO=$MID
+      if [ "$IS_CPU_ONLY" -eq 1 ]; then
+        log "  PASS (CPU-only, no saturation)"; LO=$MID
       else
-        log "  FAIL (saturation)"; HI=$MID
+        log "  Probe PASS — running saturation..."
+        saturation_test "$CTX"
+        local S_RC=$?
+        if [ "$S_RC" -eq 2 ]; then
+          log "  STALL during saturation at $MID — aborting bisect"
+          exit 1
+        fi
+        if [ "$S_RC" -eq 0 ]; then
+          log "  PASS (probe + saturation)"; LO=$MID
+        else
+          log "  FAIL (saturation)"; HI=$MID
+        fi
       fi
     else
       log "  OOM (probe)"; HI=$MID
     fi
   done
   VALIDATED=$LO
+  if [ "$IS_CPU_ONLY" -eq 1 ]; then
+    log "  Refined lo=$LO — max batch passing tiny probe (CPU-only, no saturation)"
+    set_batch "$VALIDATED"
+    log ""
+    log "  *** CPU-ONLY CEILING: batch=$VALIDATED (spills to CPU at all batches, no GPU saturation) ***"
+    log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
+    log "  candidates=$CANDIDATES (CPU-only mode, tiny-probe criterion)"
+    log ""; log "=== DONE ==="
+    exit 0
+  fi
   log "  Refined lo=$LO — max batch passing tiny probe AND saturation"
 
   # ── FINAL CONFIRM (winner already passed saturation in the gated bisect;
