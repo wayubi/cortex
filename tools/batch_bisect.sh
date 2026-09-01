@@ -121,6 +121,26 @@ print(f'  batch={batch} ubatch={batch} (= at col {target+1})')
 "
 }
 
+# Snapshot the model's original batch so a failed run can restore it
+# (a mid-sweep crash must not leave a partial candidate in models.ini).
+ORIG_BATCH=$(python3 -c "
+import re
+with open('$INI') as f: content = f.read()
+m = re.search(r'\['+re.escape('$MODEL')+r'\].*?batch-size\s*=\s*(\d+)', content, re.DOTALL)
+print(m.group(1) if m else '')
+")
+RESTORED=0
+restore_batch() {
+  [ "$RESTORED" -eq 1 ] && return
+  if [ -n "$ORIG_BATCH" ]; then
+    log "  Restoring original batch=$ORIG_BATCH (run did not complete)"
+    set_batch "$ORIG_BATCH" >/dev/null 2>&1
+  fi
+  RESTORED=1
+}
+# Restore on failure only; the success path sets the winner before exiting 0.
+trap 'RC=$?; if [ "$RC" -ne 0 ]; then restore_batch; fi; exit $RC' EXIT
+
 restart() {
   log "  Restarting llama-cpp..."
   cd "$ROOT" && docker compose restart llama-cpp || {

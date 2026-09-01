@@ -263,6 +263,7 @@ for i in $MODEL_IDXS; do
   NAME=$(model_name "$i")
   lshow ""
   lshow "=============== MODEL: $NAME ==============="
+  BISECT_FAILED=0
   for s in $STEPS; do
     case "$s" in
       mtp)
@@ -275,7 +276,21 @@ for i in $MODEL_IDXS; do
         fi
         rm -f /tmp/run_bench_status.$$
         continue ;;
+      bisect)
+        run_step "$s" "$i" "$NAME"
+        if [ "$(cat /tmp/run_bench_status.$$)" = "FAIL" ]; then
+          BISECT_FAILED=1
+          log "  bisect FAILED — will skip bench for this model (stale batch risk)"
+        fi
+        VERDICTS["$NAME|$s"]=$(cat /tmp/run_bench_status.$$)
+        rm -f /tmp/run_bench_status.$$
+        continue ;;
       bench)
+        if [ "$BISECT_FAILED" -eq 1 ]; then
+          log "  bench: SKIPPED (bisect failed — models.ini batch unreliable)"
+          VERDICTS["$NAME|$s"]="SKIPPED (bisect failed)"
+          continue
+        fi
         if [ "$(model_batch "$i")" != "1" ] && ! [[ " $STEPS " == *" bisect "* ]]; then
           log "  bench: SKIPPED (no batch-size and bisect not selected)"
           VERDICTS["$NAME|$s"]="SKIPPED"
