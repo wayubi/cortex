@@ -142,35 +142,89 @@ detect_mtp() {
     set_key spec-draft-p-min 0.7
   fi
 
-  restart
-  logmark
-  curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":8}" \
-    > /tmp/mtp_detect.json 2>&1
+  local CUR_BATCH
+  CUR_BATCH=$(read_batch)
+  local ATTEMPT=0
+  local PROBE_RETRY=0
+  while true; do
+    ATTEMPT=$((ATTEMPT + 1))
+    log "  --- MTP load attempt $ATTEMPT (batch=$CUR_BATCH) ---"
+    restart
+    logmark
+    curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":8}" \
+      > /tmp/mtp_detect.json 2>&1
 
-  local OOM LOGS
-  OOM=$(oom_count_since_mark)
-  LOGS=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)))
+    local OOM LOGS
+    OOM=$(oom_count_since_mark)
+    LOGS=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)))
 
-  local PROBE_OK=0
-  python3 -c "import json; d=json.load(open('/tmp/mtp_detect.json')); exit(0 if 'choices' in d else 1)" 2>/dev/null && PROBE_OK=1
+    local PROBE_OK=0
+    python3 -c "import json; d=json.load(open('/tmp/mtp_detect.json')); exit(0 if 'choices' in d else 1)" 2>/dev/null && PROBE_OK=1
 
-  local MTP_ENGAGED=0
-  if echo "$LOGS" | grep -q -- "--spec-type" && echo "$LOGS" | grep -qiE "draft-mtp|loading draft model|n_layer_nextn[^0-9]*[1-9]"; then
-    MTP_ENGAGED=1
-  fi
+    local MTP_ENGAGED=0
+    if echo "$LOGS" | grep -q -- "--spec-type" && echo "$LOGS" | grep -qiE "draft-mtp|loading draft model|n_layer_nextn[^0-9]*[1-9]"; then
+      MTP_ENGAGED=1
+    fi
 
-  if [ "$OOM" -gt 0 ] || [ "$PROBE_OK" -eq 0 ] || [ "$MTP_ENGAGED" -eq 0 ]; then
-    log "  ✗ NOT MTP-SUPPORTED: load failed or MTP did not engage"
-    [ "$OOM" -gt 0 ] && log "    OOM/load error: $(oom_since_mark | head -1)"
-    [ "$PROBE_OK" -eq 0 ] && log "    probe request failed (no response)"
-    [ "$MTP_ENGAGED" -eq 0 ] && log "    no MTP engagement in load log (--spec-type draft-mtp / draft model / n_layer_nextn)"
-    log "  Restoring original config..."
-    restore_section "$SNAP"
-    log "  Exiting."
-    exit 1
-  fi
+    # Distinguish the two 'failed to create MTP context' causes:
+    #   (a) 'model doesn't contain MTP layers' → genuinely NOT an MTP model (no retry helps)
+    #   (b) VRAM OOM at load (no such line) → MTP draft context couldn't fit — step batch down.
+    if echo "$LOGS" | grep -q "model doesn't contain MTP layers"; then
+      log "  ✗ NOT MTP-SUPPORTED: GGUF has no MTP layers"
+      log "    $(echo "$LOGS" | grep "model doesn't contain MTP layers" | head -1)"
+      log "  Restoring original config..."
+      restore_section "$SNAP"
+      log "  Exiting."
+      exit 1
+    fi
+
+    if [ "$OOM" -gt 0 ]; then
+      if [ "$CUR_BATCH" -gt 2048 ]; then
+        local PREV=$CUR_BATCH
+        CUR_BATCH=$((CUR_BATCH / 2))
+        log "  MTP draft context OOM at batch=$PREV — stepping down to $CUR_BATCH"
+        set_batch "$CUR_BATCH"
+        PROBE_RETRY=0
+        continue
+      fi
+      log "  ✗ MTP context OOM persists down to batch=$CUR_BATCH (2048 floor)"
+      log "    OOM/load error: $(oom_since_mark | head -1)"
+      log "  Restoring original config..."
+      restore_section "$SNAP"
+      log "  Exiting."
+      exit 1
+    fi
+
+    # Probe failed with no OOM marker → transient (first request after a fresh
+    # restart can take >20s and time out while the model loads fine). Retry the
+    # SAME batch once before concluding anything.
+    if [ "$PROBE_OK" -eq 0 ]; then
+      if [ "$PROBE_RETRY" -lt 1 ]; then
+        PROBE_RETRY=$((PROBE_RETRY + 1))
+        log "  Probe failed (no OOM marker) — transient retry at batch=$CUR_BATCH"
+        continue
+      fi
+      log "  ✗ NOT MTP-SUPPORTED: probe failed twice with no OOM marker"
+      log "    probe request failed (no response)"
+      log "  Restoring original config..."
+      restore_section "$SNAP"
+      log "  Exiting."
+      exit 1
+    fi
+
+    if [ "$MTP_ENGAGED" -eq 0 ]; then
+      log "  ✗ NOT MTP-SUPPORTED: model loaded but MTP did not engage"
+      log "    no MTP engagement in load log (--spec-type draft-mtp / draft model / n_layer_nextn)"
+      log "  Restoring original config..."
+      restore_section "$SNAP"
+      log "  Exiting."
+      exit 1
+    fi
+
+    break
+  done
   log "  ✓ MTP-SUPPORTED: model loaded and MTP engaged"
   rm -f "$SNAP"
 }
@@ -189,6 +243,22 @@ with open(ini, 'w') as f:
     f.write(content[:m.start(2)] + snap + content[m.end(2):])
 print('  section restored')
 "
+}
+
+# Read the model's current batch-size from models.ini
+read_batch() {
+  python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'\['+re.escape('$MODEL')+r'\].*?batch-size\s*=\s*(\d+)', c, re.DOTALL)
+print(m.group(1) if m else '0')
+"
+}
+
+# Set batch-size + ubatch-size (keeps MTP draft fitting after a load OOM)
+set_batch() {
+  set_key batch-size "$1"
+  set_key ubatch-size "$1"
 }
 
 # ── Decode test (essay + placement polling) ─────────────────
