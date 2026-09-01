@@ -60,7 +60,7 @@ read_section() {
 import re, sys
 with open('$INI') as f: content = f.read()
 m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', content, re.DOTALL)
-print(m.group(1) if m else '')
+sys.stdout.write(m.group(1) if m else '')
 "
 }
 
