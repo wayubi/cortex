@@ -325,6 +325,7 @@ else
 
     # Probe 2: pick a mid batch (expect PASS for most). If it OOMs, step down.
     B2=32768
+    B2_OOM=0
     while [ "$B2" -gt "$B1" ]; do
       set_batch "$B2"; restart; log "  Tiny probe @ batch=$B2..."
       if tiny_probe; then
@@ -335,6 +336,7 @@ else
         break
       else
         log "  OOM at $B2 — stepping B2 down"
+        B2_OOM=$B2
         B2=$((B2 / 2))
       fi
     done
@@ -364,15 +366,22 @@ else:
     print(pred)
 ")
       if [ "$FIT_OK" = "FLAT" ] || ! [[ "$FIT_OK" =~ ^[0-9]+$ ]]; then
-        log "  Fit unreliable (slope flat or bad VRAM reads) — falling back to classic up-sweep"
-        LO=$B1; BATCH=$((B1 * 2)); HI=0
-        while true; do
-          log ""; log "  Testing batch=$BATCH..."
-          set_batch "$BATCH"; restart; log "  Tiny probe..."
-          if tiny_probe; then log "  PASS"; LO=$BATCH; BATCH=$((BATCH * 2))
-          else log "  OOM"; HI=$BATCH; break; fi
-          [ "$BATCH" -gt 131072 ] && { log "  Stopping sweep at $BATCH"; HI=$BATCH; break; }
-        done
+        if [ "$B2_OOM" -gt "$B2" ]; then
+          # Reuse the bracket already learned: B2 = highest PASS, B2_OOM = lowest OOM.
+          # Jump straight to Phase 2 bisect — no re-testing.
+          LO=$B2; HI=$B2_OOM
+          log "  Fit unreliable (slope flat) — using learned bracket lo=$LO (PASS), hi=$HI (OOM)"
+        else
+          log "  Fit unreliable (slope flat or bad VRAM reads) — falling back to classic up-sweep"
+          LO=$B1; BATCH=$((B1 * 2)); HI=0
+          while true; do
+            log ""; log "  Testing batch=$BATCH..."
+            set_batch "$BATCH"; restart; log "  Tiny probe..."
+            if tiny_probe; then log "  PASS"; LO=$BATCH; BATCH=$((BATCH * 2))
+            else log "  OOM"; HI=$BATCH; break; fi
+            [ "$BATCH" -gt 131072 ] && { log "  Stopping sweep at $BATCH"; HI=$BATCH; break; }
+          done
+        fi
       else
         MAX_BATCH=$FIT_OK
         SLOPE_MIB=$(python3 -c "print('%.4f' % (($USED2 - $USED1) / ($B2 - $B1)))")
