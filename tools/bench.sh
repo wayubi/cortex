@@ -825,49 +825,78 @@ cmd_bisect() {
     exit 0
   fi
 
-  local LO HI VALIDATED START_BATCH PASS CANDIDATES
+  local LO HI VALIDATED PASS CANDIDATES
   if [ "$RESUME" -eq 1 ]; then
     LO=$RESUME_LO; HI=$RESUME_HI
     log ""; log "=== RESUMING BISECT (lo=$LO, hi=$HI, gap=$((HI-LO))) — skipping coarse sweep ==="
   else
-    # ── PHASE 1: CEILING SEARCH (start at ctx, halve on OOM) ──
-    # The max useful batch can never exceed ctx: prefill is bounded by ctx and
-    # decode is 1 token per stream. Start AT ctx (the hard ceiling) and halve on
-    # failure until a batch passes probe + saturation. Result is min(VRAM ceiling,
-    # ctx) by construction — no arbitrary 4096 start, no VRAM fit, no batches
-    # above ctx are ever tested.
-    log ""; log "=== PHASE 1: CEILING SEARCH (start at ctx=$CTX) ==="
-    START_BATCH=$CTX
-    VALIDATED=0
-    HI=0
-    while [ "$START_BATCH" -ge 64 ]; do
-      set_batch "$START_BATCH"; restart
-      log "  Tiny probe @ batch=$START_BATCH..."
+    # ── PHASE 1: CEILING SEARCH (ctx first, then 2048+doubling ladder) ──
+    # The max useful batch can never exceed ctx. Test ctx first: PASS → the value
+    # is ctx. If ctx OOMs, the real ceiling is almost always ≤ 16384 (fleet data:
+    # every batch != ctx model is 448–8640), so jump straight to 2048 and ladder
+    # UP by doubling (2048 → 4096 → 8192 → 16384 → 32768…) — never halve down from
+    # a 64K/128K ctx. A failing rung becomes HI; Phase 2 bisects [LO, HI].
+    ceiling_probe() {
+      local B=$1
+      set_batch "$B"; restart
+      log "  Tiny probe @ batch=$B..."
       if tiny_probe; then
-        log "  Probe PASS at $START_BATCH — saturation-validating..."
+        log "  Probe PASS at $B — saturation-validating..."
         if saturation_test "$CTX"; then
-          log "  PASS at $START_BATCH (probe + saturation)"
-          VALIDATED=$START_BATCH
-          break
+          log "  PASS at $B (probe + saturation)"
+          return 0
+        fi
+      fi
+      log "  OOM at $B"
+      return 1
+    }
+
+    log ""; log "=== PHASE 1: CEILING SEARCH (ctx=$CTX, ladder 2048→up) ==="
+    LO=0; HI=0; VALIDATED=0
+
+    # Probe 1: ctx itself
+    if ceiling_probe "$CTX"; then
+      LO=$CTX; HI=$((CTX + 64)); VALIDATED=$CTX
+      log "  Bracket: lo=$LO (PASS), hi=$HI (assumed OOM above)"
+    else
+      HI=$CTX
+      if [ "$CTX" -gt 2048 ]; then
+        # Jump to the realistic region and ladder UP by doubling
+        if ceiling_probe 2048; then
+          LO=2048
+          RUNG=2048
+          while [ $((RUNG * 2)) -lt "$HI" ]; do
+            RUNG=$((RUNG * 2))
+            if ceiling_probe "$RUNG"; then
+              LO=$RUNG
+            else
+              HI=$RUNG
+              break
+            fi
+          done
         else
-          log "  SATURATION FAIL at $START_BATCH — halving down"
-          HI=$START_BATCH
+          # 2048 OOMs — halve DOWN from 2048 (cheap: few probes to sub-2048 values)
+          HI=2048
+          B=1024
+          while [ "$B" -ge 64 ]; do
+            if ceiling_probe "$B"; then LO=$B; break
+            else HI=$B; B=$((B / 2 / 64 * 64)); fi
+          done
         fi
       else
-        log "  OOM at $START_BATCH — halving down"
-        HI=$START_BATCH
+        # ctx <= 2048 and failed — halve down from ctx
+        B=$((CTX / 2 / 64 * 64))
+        while [ "$B" -ge 64 ]; do
+          if ceiling_probe "$B"; then LO=$B; break
+          else HI=$B; B=$((B / 2 / 64 * 64)); fi
+        done
       fi
-      START_BATCH=$((START_BATCH / 2 / 64 * 64))
-    done
-    if [ "$VALIDATED" -eq 0 ]; then
-      log "  ERROR: no PASS found at any batch down to 64. Lower ctx or free VRAM (override-tensor=exps=CPU)."
-      exit 1
+      if [ "$LO" -eq 0 ]; then
+        log "  ERROR: no PASS found at any batch down to 64. Lower ctx or free VRAM (override-tensor=exps=CPU)."
+        exit 1
+      fi
+      log "  Bracket: lo=$LO (PASS), hi=$HI (OOM bound)"
     fi
-    LO=$VALIDATED
-    # HI = the last failing batch seen while halving (tightest known OOM bound).
-    # If ctx itself passed (no failure ever), assume OOM just above ctx.
-    [ "$HI" -eq 0 ] && HI=$((VALIDATED + 64))
-    log "  Bracket: lo=$LO (PASS), hi=$HI (OOM bound)"
   fi
 
   # ── PHASE 2: REFINE BISECT (PASS = tiny probe AND saturation, until gap <= 64) ──
