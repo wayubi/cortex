@@ -306,6 +306,18 @@ wait_served() {
   return 1
 }
 
+# Compute an adaptive curl timeout for a request that must fully generate
+# max_tokens.  Assumes worst-case CPU decode ≈ 4 t/s with a 3x margin,
+# clamped to [600, 7200] seconds.
+adaptive_timeout() {
+  local MAX_TOK=$1
+  python3 -c "
+t = $MAX_TOK / 4 * 3
+t = max(600, min(7200, int(t)))
+print(t)
+"
+}
+
 # Fire a chat-completions POST from $1 (payload @file) to $2 (out), watching for
 # the router's proxy_reques line. On a cold-load hang: kill curl, restart, retry
 # once. Sets $FIRE_PID to the curl PID on success.
@@ -313,11 +325,11 @@ wait_served() {
 # All logs → stderr (safe inside $() captures).
 FIRE_PID=""
 fire_request() {
-  local PAYLOAD=$1 OUT=$2 LABEL=$3
+  local PAYLOAD=$1 OUT=$2 LABEL=$3 TIMEOUT=${4:-600}
   local ATTEMPT PID
   for ATTEMPT in 1 2; do
     logmark
-    curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
+    curl -s --max-time "$TIMEOUT" -X POST http://localhost:8080/v1/chat/completions \
       -H 'Content-Type: application/json' -d @"$PAYLOAD" > "$OUT" 2>&1 &
     PID=$!
     if wait_served "$PID"; then
@@ -416,7 +428,7 @@ payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_t
 with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 print(f'  Payload: {len(json.dumps(payload))} bytes')
 "
-    fire_request /tmp/sat_payload.json /tmp/sat_response.json "saturation"
+    fire_request /tmp/sat_payload.json /tmp/sat_response.json "saturation" "$(adaptive_timeout $MAX_TOK)"
     local RC=$?
     if [ "$RC" -eq 2 ]; then return 2; fi
 
@@ -482,7 +494,7 @@ import json
 with open('/tmp/longdec_payload.json','w') as f:
     json.dump({'model':'$MODEL','messages':[{'role':'user','content':'Write a detailed essay explaining the history of computing.'}],'max_tokens':6000,'ignore_eos':True}, f)
 "
-  fire_request /tmp/longdec_payload.json /tmp/longdec_response.json "long-decode"
+  fire_request /tmp/longdec_payload.json /tmp/longdec_response.json "long-decode" "$(adaptive_timeout 6000)"
   local RC=$?
   if [ "$RC" -eq 2 ]; then return 2; fi
   wait "$FIRE_PID" 2>/dev/null || true
@@ -530,7 +542,7 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
 with open('/tmp/perf_decode_payload.json','w') as f: json.dump(payload, f)
 "
-  fire_request /tmp/perf_decode_payload.json /tmp/perf_decode.json "measure-decode"
+  fire_request /tmp/perf_decode_payload.json /tmp/perf_decode.json "measure-decode" "$(adaptive_timeout 4000)"
   local DEC_RC=$?
   if [ "$DEC_RC" -eq 2 ]; then echo "0|0|0"; return 0; fi
   local DEC_PID=$FIRE_PID
@@ -588,7 +600,7 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
 with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
 "
-  fire_request /tmp/resid_payload.json /tmp/resid_response.json "residency"
+  fire_request /tmp/resid_payload.json /tmp/resid_response.json "residency" "$(adaptive_timeout 4000)"
   local RC=$?
   if [ "$RC" -eq 2 ]; then
     log "  residency: STALL — model never served (network/HF fetch)" >&2
@@ -845,7 +857,7 @@ import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':'$ESSAY'}],'max_tokens':4000,'ignore_eos':True}
 with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
 "
-  fire_request /tmp/mtp_payload.json /tmp/mtp_out.json "mtp-tune"
+  fire_request /tmp/mtp_payload.json /tmp/mtp_out.json "mtp-tune" "$(adaptive_timeout 4000)"
   local RC=$?
   if [ "$RC" -eq 2 ]; then
     plog "  STALL — model never served (network/HF fetch)"
@@ -1854,7 +1866,7 @@ print(f'  Decode payload: {len(prompt)} chars, ~$DECODE_PROMPT_TOKENS tokens (ma
   local REQUEST_START=$(date +%s)
 
   log "  Phase B: firing decode request..."
-  fire_request /tmp/bench_payload.json /tmp/bench_output.json "bench-decode"
+  fire_request /tmp/bench_payload.json /tmp/bench_output.json "bench-decode" "$(adaptive_timeout 4000)"
   local RC=$?
   if [ "$RC" -eq 2 ]; then log "  STALL on decode — aborting bench"; return 1; fi
   local PID=$FIRE_PID
