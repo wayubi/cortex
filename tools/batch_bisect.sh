@@ -692,7 +692,7 @@ print('%.1f' % min(scores)) if scores else print('0')
       VALIDATED=$LARGEST_RESIDENT
       V="${SWEEP_RESULTS[$VALIDATED]}"
       BEST_SCORE=$(echo "$V" | cut -d'|' -f3)
-      log ""; log "  Flat field: scores tied within 2% (max=${MAX_SCORE}, min=${MIN_SCORE}, spread=$(python3 -c "print('%.1f' % (($MAX_SCORE - $MIN_SCORE) / $MAX_SCORE * 100))")%)"
+      log ""; log "  Flat field: scores tied within 3% (max=${MAX_SCORE}, min=${MIN_SCORE}, spread=$(python3 -c "print('%.1f' % (($MAX_SCORE - $MIN_SCORE) / $MAX_SCORE * 100))")%)"
       log "  → skipping finalists, taking largest GPU-resident batch=$VALIDATED (headroom at zero throughput cost)"
       set_batch "$VALIDATED"
       log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (score=$BEST_SCORE, flat field — noise floor) ***"
