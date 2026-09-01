@@ -5,7 +5,7 @@
 #
 # For each models.ini entry, fills the metrics table from
 # llama-cpp/models/<name>.json if present. Missing JSON → '—' / 'unverified'.
-# Coder variants (-coder) copy their non-coder sibling's JSON when absent.
+# Each model (including -coder variants) is benched independently — no copying.
 
 set -euo pipefail
 
@@ -87,13 +87,10 @@ def bench_row(d):
         'rss': run.get('rss_mib'),
     }
 
-# ── Build rows (with coder-copy fallback) ──────────────────
+# ── Build rows (each model independent — no coder-copy) ─────
 rows = []
 for name in names:
     d = load_json(name)
-    if d is None and name.endswith('-coder'):
-        base = name[:-len('-coder')]
-        d = load_json(base)  # coder shares non-coder JSON
     b = bench_row(d)
     if b is None:
         sec = get_section(content, name)
@@ -164,7 +161,7 @@ lines.append("")
 lines.append("## Notes")
 lines.append("")
 lines.append("- Rows with `unverified` placement have no bench JSON yet — run `./tools/bench_model.sh <model>` after batch bisect.")
-lines.append("- Coder variants share the non-coder JSON (same model, different sampling).")
+lines.append("- Each model (including -coder variants) is benched independently — no values are copied between entries.")
 lines.append("- decode_t/s measured over a full 4000-token window (150-token decode prompt); prefill over a 75%-ctx prompt.")
 lines.append("")
 lines.append("## Benchmark Data")

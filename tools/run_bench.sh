@@ -17,6 +17,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INI="$ROOT/llama-cpp/models.ini"
+MODELS_DIR="$ROOT/llama-cpp/models"
 LOG_DIR="$ROOT/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/run_bench_$(date +%Y%m%d-%H%M).log"
@@ -198,11 +199,13 @@ else
     NAME=$(model_name "$i")
     B=$(model_batch "$i")
     M=$(model_mtp "$i")
+    S=$([ -f "$MODELS_DIR/$NAME.json" ] && echo "S" || echo "-")
     BFLAG=$([ "$B" = "1" ] && echo "B" || echo "-")
     MFLAG=$([ "$M" = "1" ] && echo "M" || echo "-")
-    printf "  %3d) [%s%s] %s\n" "$i" "$BFLAG" "$MFLAG" "$NAME"
+    printf "  %3d) [%s%s%s] %s\n" "$i" "$S" "$BFLAG" "$MFLAG" "$NAME"
   done
   echo ""
+  echo "  S = stats JSON exists | - = not benched"
   echo "  B = batch-size set | - = needs bisect"
   echo "  M = MTP model | - = not MTP"
   echo ""

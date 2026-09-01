@@ -64,7 +64,7 @@ cortex/
 4. **Run placement check** (step 8) after batch bisect to verify compute on GPU
 5. **THEN benchmark** with optimal batch using `./tools/bench_variant.sh` or `./tools/bench_variant_file.sh`
 
-**Coder variants do NOT need benchmarking.** They share the same model, same batch, same performance as their non-coder counterpart. Only sampling params (temp, top-p) differ. Copy the non-coder's benchmark numbers directly.
+**Coder variants are independent models and are benched separately.** No values are copied between entries — run bisect + bench on each coder variant like any other model.
 
 ## Stress-testing batch/ubatch (proven procedure)
 

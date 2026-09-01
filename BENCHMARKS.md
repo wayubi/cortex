@@ -13,7 +13,7 @@ Old-build numbers are kept for comparison; only new-build numbers are current.
 
 ## Current configs + decode t/s (new build)
 
-Decode measured via 6000-token long-decode (real prompt) and 4000-token essay bench; acceptance = draft acceptance (MTP). Coder variants share benchmarks with their non-coder equivalents (same model, same batch, just different sampling params). **Batch-size must be explicitly set in models.ini before benchmarking** — if not set, it inherits 4096 from `[*]` which is WRONG. **Placement requires re-verification** — use `./tools/bench_variant.sh` with 4000+ tokens and 160s polling.
+Decode measured via 6000-token long-decode (real prompt) and 4000-token essay bench; acceptance = draft acceptance (MTP). Coder variants are independent models and are benched separately (no values copied between entries). **Batch-size must be explicitly set in models.ini before benchmarking** — if not set, it inherits 4096 from `[*]` which is WRONG. **Placement requires re-verification** — use `./tools/bench_variant.sh` with 4000+ tokens and 160s polling.
 
 | Model | ctx | batch | n_max / p_min | drafter | long-decode t/s | essay t/s | prefill t/s | acceptance |
 |---|---|---|---|---|---|---|---|---|
