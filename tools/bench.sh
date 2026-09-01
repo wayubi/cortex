@@ -26,7 +26,7 @@ LOG_DIR="$ROOT/logs"
 mkdir -p "$LOG_DIR" "$MODELS_DIR"
 LOG_FILE="$LOG_DIR/bench_$(date +%Y%m%d-%H%M).log"
 DOCKER_LOG="cortex-llama-cpp-1"
-OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error: out of memory|cuMemCreate"
+OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error: out of memory|cuMemCreate|GGML_ASSERT|nbytes_shared|smpbo"
 ESSAY="Write a detailed 1000-word essay explaining transformers and MoE"
 POLL_MIN_SAMPLES=3
 POLL_MAX_SAMPLES=80
@@ -395,6 +395,7 @@ saturation_test() {
   local TARGET_TOK=$(python3 -c "print(int($CTX * 0.85))")
   local SAT_SIZE=0
   local ATTEMPT=1
+  local SHRUNK=0
 
   measure_ratio || true
   if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
@@ -408,7 +409,10 @@ saturation_test() {
   while [ "$ATTEMPT" -le 3 ]; do
     python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*30000)[:$SAT_SIZE]}],'max_tokens':$MAX_TOK,'ignore_eos':True}
+filler = 'The history of computing is long and complex. '
+SAT_SIZE = $SAT_SIZE
+prompt = (filler * ((SAT_SIZE // len(filler)) + 1))[:SAT_SIZE]
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':$MAX_TOK,'ignore_eos':True}
 with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 print(f'  Payload: {len(json.dumps(payload))} bytes')
 "
@@ -434,6 +438,7 @@ print(f'  Payload: {len(json.dumps(payload))} bytes')
     if grep -q "exceeds the available context" /tmp/sat_response.json 2>/dev/null; then
       log "  Prompt too large — shrinking 10% (attempt $ATTEMPT)"
       SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * 0.9))")
+      SHRUNK=1
       ATTEMPT=$((ATTEMPT + 1))
       continue
     fi
@@ -447,11 +452,26 @@ print(f'  Payload: {len(json.dumps(payload))} bytes')
     return 1
   fi
   python3 -c "
-import json; d=json.load(open('/tmp/sat_response.json'))
+import json
+d = json.load(open('/tmp/sat_response.json'))
+shrunk = int('$SHRUNK')
 if 'choices' in d:
-    t=d.get('timings',{}); u=d.get('usage',{})
-    print(f'  Saturation: PASS (prompt_tokens={u.get(\"prompt_tokens\",\"?\")}, completion_tokens={u.get(\"completion_tokens\",\"?\")})')
-else: print(f'  Saturation: FAIL'); exit(1)
+    t = d.get('timings', {})
+    u = d.get('usage', {})
+    pt = u.get('prompt_tokens', 0) or 0
+    ct = u.get('completion_tokens', 0) or 0
+    total = pt + ct
+    ctx = $CTX
+    if total < ctx * 0.98 and shrunk == 0:
+        print(f'  Saturation: UNDER-SATURATED ({total}/{ctx} = {total/ctx*100:.1f}% of ctx)')
+        exit(1)
+    elif total < ctx * 0.98 and shrunk == 1:
+        print(f'  Saturation: PASS (prompt_tokens={pt}, completion_tokens={ct}, total={total}, ctx={ctx}) [shrunk — ratio estimate off]')
+    else:
+        print(f'  Saturation: PASS (prompt_tokens={pt}, completion_tokens={ct}, total={total}, ctx={ctx})')
+else:
+    print('  Saturation: FAIL')
+    exit(1)
 " 2>/dev/null; return $?
 }
 
@@ -492,7 +512,10 @@ measure_speed() {
   # Prefill probe (75% ctx, max_tokens=1)
   python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*30000)[:$PREFILL_CHARS]}],'max_tokens':1,'ignore_eos':True}
+filler = 'The history of computing is long and complex. '
+target_chars = $PREFILL_CHARS
+prompt = (filler * ((target_chars // len(filler)) + 1))[:target_chars]
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
 with open('/tmp/perf_prefill_payload.json','w') as f: json.dump(payload, f)
 "
   fire_request /tmp/perf_prefill_payload.json /tmp/perf_prefill.json "measure-prefill"
