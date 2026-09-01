@@ -1,5 +1,8 @@
 #!/bin/bash
-# batch_bisect.sh — Find optimal batch-size/ubatch-size via bisection + saturation test
+# batch_bisect.sh — Find optimal batch-size/ubatch-size via VRAM-math estimate + saturation test
+#
+# Phase 1 estimates the ceiling from 2 VRAM probes (buffer size scales ~linearly with
+# batch), instead of a full up-then-down sweep. Falls back to classic sweep if the fit fails.
 #
 # Usage:
 #   ./tools/batch_bisect.sh <model-name>                    # full bisection
@@ -132,6 +135,11 @@ oom_since_mark() {
   docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -iE "$OMG_GREP" || true
 }
 oom_count_since_mark() { oom_since_mark | wc -l | tr -d ' '; }
+
+# Current GPU VRAM in MiB
+vram_now() {
+  nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' | head -1
+}
 
 tiny_probe() {
   logmark
@@ -273,45 +281,111 @@ else
     LO=$RESUME_LO; HI=$RESUME_HI
     log ""; log "=== RESUMING BISECT (lo=$LO, hi=$HI, gap=$((HI-LO))) — skipping coarse sweep ==="
   else
-  # ── PHASE 1: COARSE SWEEP (bracket lo/hi) ──
-  log ""; log "=== PHASE 1: COARSE SWEEP ==="
-  LO=0; HI=0; BATCH=4096
-  log "  Testing batch=$BATCH..."
-  set_batch "$BATCH"; restart; log "  Tiny probe..."
-  if tiny_probe; then
-    # 4096 PASS → sweep up (double) until OOM
-    log "  PASS at 4096 — sweeping up"
-    LO=4096; BATCH=8192
+  # ── PHASE 1: VRAM-MATH CEILING ESTIMATE (2 probes, linear model) ──
+  log ""; log "=== PHASE 1: VRAM-MATH CEILING ESTIMATE ==="
+  # Measure VRAM used at two PASS batches, fit buffer(B) = slope*B + base,
+  # then predict max_batch = (12288 - base) / slope. Falls back to the
+  # classic sweep+bisect if the model OOMs at the low probe or the fit is bad.
+  GPU_TOTAL_MIB=12288
+
+  # Probe 1 at 4096 (expect PASS for most models)
+  B1=4096
+  set_batch "$B1"; restart; log "  Tiny probe @ batch=$B1..."
+  if ! tiny_probe; then
+    log "  OOM at $B1 — falling back to classic down-sweep"
+    HI=$B1; BATCH=$((B1 / 2))
     while true; do
       log ""; log "  Testing batch=$BATCH..."
       set_batch "$BATCH"; restart; log "  Tiny probe..."
-      if tiny_probe; then
-        log "  PASS"; LO=$BATCH; BATCH=$((BATCH * 2))
-      else
-        log "  OOM"; HI=$BATCH; break
-      fi
-      [ "$BATCH" -gt 131072 ] && { log "  Stopping sweep at $BATCH"; HI=$BATCH; break; }
-    done
-  else
-    # 4096 OOM → sweep down (halve) until first PASS
-    log "  OOM at 4096 — sweeping down"
-    HI=4096; BATCH=2048
-    while true; do
-      log ""; log "  Testing batch=$BATCH..."
-      set_batch "$BATCH"; restart; log "  Tiny probe..."
-      if tiny_probe; then
-        log "  PASS"; LO=$BATCH; break
-      else
-        log "  OOM"; HI=$BATCH; BATCH=$((BATCH / 2))
-      fi
+      if tiny_probe; then log "  PASS"; LO=$BATCH; break
+      else log "  OOM"; HI=$BATCH; BATCH=$((BATCH / 2)); fi
       if [ "$BATCH" -lt 64 ]; then
         log "  ERROR: no PASS found below 64. Lower ctx or free VRAM (override-tensor=exps=CPU)."
         exit 1
       fi
     done
-  fi
+  else
+    log "  PASS at $B1"
+    sleep 2   # let VRAM settle after decode
+    USED1=$(vram_now)
+    log "  VRAM used @ batch=$B1: ${USED1} MiB"
 
-  log ""; log "  Bracket: lo=$LO (PASS), hi=$HI (OOM)"
+    # Probe 2: pick a mid batch (expect PASS for most). If it OOMs, step down.
+    B2=32768
+    while [ "$B2" -gt "$B1" ]; do
+      set_batch "$B2"; restart; log "  Tiny probe @ batch=$B2..."
+      if tiny_probe; then
+        log "  PASS at $B2"
+        sleep 2
+        USED2=$(vram_now)
+        log "  VRAM used @ batch=$B2: ${USED2} MiB"
+        break
+      else
+        log "  OOM at $B2 — stepping B2 down"
+        B2=$((B2 / 2))
+      fi
+    done
+    if [ "$B2" -le "$B1" ]; then
+      log "  Could not get a second PASS point — falling back to classic up-sweep"
+      LO=$B1; BATCH=$((B1 * 2))
+      while true; do
+        log ""; log "  Testing batch=$BATCH..."
+        set_batch "$BATCH"; restart; log "  Tiny probe..."
+        if tiny_probe; then log "  PASS"; LO=$BATCH; BATCH=$((BATCH * 2))
+        else log "  OOM"; HI=$BATCH; break; fi
+        [ "$BATCH" -gt 131072 ] && { log "  Stopping sweep at $BATCH"; HI=$BATCH; break; }
+      done
+    else
+      # Linear fit: slope = (USED2-USED1)/(B2-B1), base = USED1 - slope*B1
+      FIT_OK=$(python3 -c "
+used1=$USED1; used2=$USED2; b1=$B1; b2=$B2; total=$GPU_TOTAL_MIB
+slope = (used2 - used1) / (b2 - b1)
+# guard: slope too flat (VRAM didn't grow with batch) → unreliable fit
+if slope < 0.01:
+    print('FLAT')
+else:
+    base  = used1 - slope * b1
+    pred  = (total - base) / slope
+    pred = pred * 0.92
+    pred = int(max(pred, b2) // 64 * 64)
+    print(pred)
+")
+      if [ "$FIT_OK" = "FLAT" ] || ! [[ "$FIT_OK" =~ ^[0-9]+$ ]]; then
+        log "  Fit unreliable (slope flat or bad VRAM reads) — falling back to classic up-sweep"
+        LO=$B1; BATCH=$((B1 * 2)); HI=0
+        while true; do
+          log ""; log "  Testing batch=$BATCH..."
+          set_batch "$BATCH"; restart; log "  Tiny probe..."
+          if tiny_probe; then log "  PASS"; LO=$BATCH; BATCH=$((BATCH * 2))
+          else log "  OOM"; HI=$BATCH; break; fi
+          [ "$BATCH" -gt 131072 ] && { log "  Stopping sweep at $BATCH"; HI=$BATCH; break; }
+        done
+      else
+        MAX_BATCH=$FIT_OK
+        SLOPE_MIB=$(python3 -c "print('%.4f' % (($USED2 - $USED1) / ($B2 - $B1)))")
+        log "  Fit: slope=${SLOPE_MIB} MiB/batch → predicted max_batch=$MAX_BATCH"
+        log "  Setting batch=$MAX_BATCH to verify..."
+        set_batch "$MAX_BATCH"; restart; log "  Tiny probe..."
+        if tiny_probe; then
+          log "  PASS at predicted $MAX_BATCH"
+          LO=$MAX_BATCH
+          HI=$((MAX_BATCH + 64))
+          log "  Bracket: lo=$LO (PASS), hi=$HI (assumed OOM above)"
+        else
+          log "  OOM at predicted $MAX_BATCH — stepping down for bracket"
+          HI=$MAX_BATCH
+          LO=$B2
+          BATCH=$((MAX_BATCH - 64))
+          while [ "$BATCH" -ge "$LO" ]; do
+            set_batch "$BATCH"; restart; log "  Tiny probe @ batch=$BATCH..."
+            if tiny_probe; then log "  PASS"; LO=$BATCH; break
+            else log "  OOM"; HI=$BATCH; BATCH=$((BATCH - 64)); fi
+          done
+        fi
+        log ""; log "  Estimated bracket: lo=$LO (PASS), hi=$HI (OOM)"
+      fi
+    fi
+  fi
   fi
 
   # ── PHASE 2: REFINE BISECT (tiny probe only, until gap <= 64) ──
