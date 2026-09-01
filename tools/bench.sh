@@ -464,7 +464,7 @@ print(f'  Payload: {len(json.dumps(payload))} bytes')
 
     # Read actual prefill + completion from the response
     local PT CT
-    python3 -c "
+    read -r PT CT < <(python3 -c "
 import json
 d = json.load(open('/tmp/sat_response.json'))
 if 'choices' in d:
@@ -474,7 +474,7 @@ if 'choices' in d:
     print(pt, ct)
 else:
     print('FAIL')
-" 2>/dev/null | read -r PT CT
+" 2>/dev/null)
     if [ "$PT" = "FAIL" ] || [ -z "$PT" ]; then
       log "  Saturation: FAIL (no valid response)"
       return 1
