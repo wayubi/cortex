@@ -500,7 +500,8 @@ print(f'{p:.1f}|{d:.1f}|${AVG_CPU:-0}')
 GPU_ACTIVE_PCT=25
 RESID_MIN_FLOOR_SAMPLES=10   # 20s @2s before early-kill verdicts are allowed (belt-and-suspenders)
 residency_probe() {
-  local CTX=$1
+  # stdout is reserved for the single verdict (GPU|CPU|AMBIGUOUS); all progress
+  # logs go to stderr so command-substitution captures stay clean.
   python3 -c "
 import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
@@ -540,13 +541,13 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
       if [ "$R_CPU_CONSEC" -ge 3 ]; then
         kill $R_PID 2>/dev/null
         wait $R_PID 2>/dev/null || true
-        log "  residency: CPU (cpu ${R_CPU}%) — killed early"
+        log "  residency: CPU (cpu ${R_CPU}%) — killed early" >&2
         echo "CPU"; return 0
       fi
       if [ "$R_GPU_CONSEC" -ge 3 ]; then
         kill $R_PID 2>/dev/null
         wait $R_PID 2>/dev/null || true
-        log "  residency: GPU (cpu ${R_CPU}%, gpu ${R_GPU}%, temp ${R_TEMP}C) — killed early"
+        log "  residency: GPU (cpu ${R_CPU}%, gpu ${R_GPU}%, temp ${R_TEMP}C) — killed early" >&2
         echo "GPU"; return 0
       fi
     fi
@@ -560,33 +561,34 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
   local R_AVG=0
   [ "$R_CPU_CNT" -gt 0 ] && R_AVG=$(echo "scale=1; $R_CPU_SUM / $R_CPU_CNT" | bc)
   if [ "$(echo "$R_AVG > 200" | bc -l)" = "1" ]; then
-    log "  residency: CPU (avg ${R_AVG}%)"
+    log "  residency: CPU (avg ${R_AVG}%)" >&2
     echo "CPU"; return 0
   fi
   if [ "$(echo "$R_AVG <= 100" | bc -l)" = "1" ] && [ "$R_GPU_SEEN" -eq 1 ]; then
-    log "  residency: GPU (avg cpu ${R_AVG}%, gpu active)"
+    log "  residency: GPU (avg cpu ${R_AVG}%, gpu active)" >&2
     echo "GPU"; return 0
   fi
-  log "  residency: AMBIGUOUS (avg cpu ${R_AVG}%)"
+  log "  residency: AMBIGUOUS (avg cpu ${R_AVG}%)" >&2
   echo "AMBIGUOUS"; return 0
 }
 
 # Find the largest GPU-resident batch when the ceiling is CPU-spilled (e.g. a
 # 9B that fits 16384 OOM-wise but only runs 100% GPU at 2048). Ladders up from
 # 2048 (doubling) via fast residency probes, then bisects on residency at the
-# GPU/CPU boundary. Echoes the largest GPU-resident batch.
+# GPU/CPU boundary. Echoes the largest GPU-resident batch. stdout is reserved for
+# the numeric result — all progress (set_batch/restart/log) goes to stderr.
 residency_descend() {
   local UPPER=$1   # the OOM-validated ceiling to stay below
   local LO=0 HI=$UPPER B R MID
   # Probe the realistic floor (2048): if GPU, ladder up; if CPU-spilled, ladder down.
-  set_batch 2048; restart
+  set_batch 2048 >&2; restart >&2
   R=$(residency_probe)
   if [ "$R" = "GPU" ]; then
     LO=2048
     B=2048
     while [ $((B * 2)) -lt "$HI" ]; do
       B=$((B * 2))
-      set_batch "$B"; restart
+      set_batch "$B" >&2; restart >&2
       R=$(residency_probe)
       if [ "$R" = "GPU" ]; then LO=$B
       else HI=$B; break; fi
@@ -596,14 +598,15 @@ residency_descend() {
     HI=2048
     B=1024
     while [ "$B" -ge 64 ]; do
-      set_batch "$B"; restart
+      set_batch "$B" >&2; restart >&2
       R=$(residency_probe)
       if [ "$R" = "GPU" ]; then LO=$B; break
       else HI=$B; B=$((B / 2 / 64 * 64)); fi
     done
   fi
   if [ "$LO" -eq 0 ]; then
-    log "  ERROR: no GPU-resident batch found below $UPPER — using ceiling"
+    log "  ERROR: no GPU-resident batch found below $UPPER — using ceiling" >&2
+    set_batch "$UPPER" >&2
     echo "$UPPER"; return 0
   fi
   # Bisect on residency between LO (GPU) and HI (CPU/OOM), gap <= 64
@@ -611,11 +614,12 @@ residency_descend() {
     MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
     [ "$MID" -le "$LO" ] && MID=$((LO + 64))
     [ "$MID" -ge "$HI" ] && MID=$((HI - 64))
-    set_batch "$MID"; restart
+    set_batch "$MID" >&2; restart >&2
     R=$(residency_probe)
     if [ "$R" = "GPU" ]; then LO=$MID; else HI=$MID; fi
   done
-  log "  Largest GPU-resident batch: $LO"
+  log "  Largest GPU-resident batch: $LO" >&2
+  set_batch "$LO" >&2
   echo "$LO"
 }
 
