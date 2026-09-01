@@ -55,18 +55,21 @@ mkdir -p "$ROOT/logs"
 
 log() { echo "$1" | tee -a "$LOG_FILE"; }
 
-# Read ctx-size from models.ini
+# Read ctx-size from models.ini (scoped to the model's own section)
 CTX=$(python3 -c "
 import re
 with open('$INI') as f: content = f.read()
-m = re.search(r'\[$MODEL\].*?ctx-size\s*=\s*(\d+)', content, re.DOTALL)
-print(m.group(1) if m else '')
+m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', content, re.DOTALL)
+sec = m.group(1) if m else ''
+mm = re.search(r'^\s*ctx-size\s*=\s*(\d+)', sec, re.MULTILINE)
+print(mm.group(1) if mm else '')
 ")
 [ -z "$CTX" ] && { echo "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
 
 log "Model: $MODEL | ctx: $CTX | test-batch: $TEST_BATCH"
 
-# Dynamic alignment: set batch/ubatch aligned to the section's existing '=' column
+# Dynamic alignment: set batch/ubatch aligned to the section's existing '=' column.
+# Inserts the lines if the section has none (a batch-less model gets them added).
 set_batch() {
   local BATCH=$1
   python3 -c "
@@ -85,15 +88,30 @@ for line in section.split('\n'):
 if target is None:
     target = 17  # default: col 18
 new_lines = []
+found = False
 for line in section.split('\n'):
     if re.match(r'\s*batch-size\s*=', line) and 'ubatch' not in line:
         pad = target - len('batch-size')
         new_lines.append('batch-size' + ' ' * pad + '= ' + str(batch))
+        found = True
     elif re.match(r'\s*ubatch-size\s*=', line):
         pad = target - len('ubatch-size')
         new_lines.append('ubatch-size' + ' ' * pad + '= ' + str(batch))
     else:
         new_lines.append(line)
+if not found:
+    # No batch/ubatch lines in the section — insert them after the section header's
+    # first key line (aligned to the section's '=' column).
+    pad_b = target - len('batch-size')
+    pad_u = target - len('ubatch-size')
+    insert_at = 1
+    # find first non-comment key line index
+    for idx, line in enumerate(new_lines):
+        if '=' in line and not line.strip().startswith(('#', ';')):
+            insert_at = idx + 1
+            break
+    new_lines.insert(insert_at, 'batch-size' + ' ' * pad_b + '= ' + str(batch))
+    new_lines.insert(insert_at + 1, 'ubatch-size' + ' ' * pad_u + '= ' + str(batch))
 with open(ini, 'w') as f:
     f.write(content[:m.start(2)] + '\n'.join(new_lines) + content[m.end(2):])
 print(f'  batch={batch} ubatch={batch} (= at col {target+1})')

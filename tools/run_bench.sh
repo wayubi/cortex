@@ -138,6 +138,8 @@ resolve_models() {
 
 # ── Run one step for one model ──────────────────────────────
 # Sets the global STATUS var; the sub-script's stdout flows through live.
+# mtp_tune.sh exits 1 when it detects MTP is NOT supported (config restored) —
+# mapped to NOT_MTP so run_bench can record it as a skip, not a failure.
 run_step() {
   local STEP=$1 IDX=$2 NAME=$3
   local RC=0
@@ -153,6 +155,8 @@ run_step() {
   lshow "  $(date +%H:%M:%S) finished $STEP for $NAME (exit $RC)"
   if [ "$RC" -eq 0 ]; then
     STATUS="OK"
+  elif [ "$STEP" = "mtp" ] && [ "$RC" -eq 1 ]; then
+    STATUS="NOT_MTP"
   else
     STATUS="FAIL"
   fi
@@ -233,8 +237,7 @@ for i in $MODEL_IDXS; do
   for s in $STEPS; do
     case "$s" in
       mtp)
-        if [ "$(model_mtp "$i")" != "1" ]; then echo "    $s -> SKIPPED (not MTP)"
-        else echo "    $s"; fi ;;
+        echo "    $s (auto-detect)" ;;
       bench)
         if [ "$(model_batch "$i")" != "1" ] && ! [[ " $STEPS " == *" bisect "* ]]; then
           echo "    $s -> SKIPPED (no batch-size and bisect not selected)"
@@ -260,11 +263,15 @@ for i in $MODEL_IDXS; do
   for s in $STEPS; do
     case "$s" in
       mtp)
-        if [ "$(model_mtp "$i")" != "1" ]; then
-          log "  mtp: SKIPPED (not MTP)"
-          VERDICTS["$NAME|$s"]="SKIPPED"
-          continue
-        fi ;;
+        # No static pre-judgment — mtp_tune.sh empirically detects MTP support.
+        run_step "$s" "$i" "$NAME"
+        if [ "$(cat /tmp/run_bench_status.$$)" = "NOT_MTP" ]; then
+          VERDICTS["$NAME|$s"]="SKIPPED (not MTP)"
+        else
+          VERDICTS["$NAME|$s"]=$(cat /tmp/run_bench_status.$$)
+        fi
+        rm -f /tmp/run_bench_status.$$
+        continue ;;
       bench)
         if [ "$(model_batch "$i")" != "1" ] && ! [[ " $STEPS " == *" bisect "* ]]; then
           log "  bench: SKIPPED (no batch-size and bisect not selected)"

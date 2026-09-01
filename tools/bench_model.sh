@@ -104,21 +104,25 @@ try:
 except: print('')
 " 2>/dev/null || echo "")
 
-# Read ctx-size
+# Read ctx-size (scoped to the model's own section)
 CTX=$(python3 -c "
 import re
 with open('$INI') as f: content = f.read()
-m = re.search(r'\[$MODEL\].*?ctx-size\s*=\s*(\d+)', content, re.DOTALL)
-print(m.group(1) if m else '')
+m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', content, re.DOTALL)
+sec = m.group(1) if m else ''
+mm = re.search(r'^\s*ctx-size\s*=\s*(\d+)', sec, re.MULTILINE)
+print(mm.group(1) if mm else '')
 ")
 [ -z "$CTX" ] && { echo "ERROR: ctx-size not found"; exit 1; }
 
-# Read batch-size
+# Read batch-size (scoped to the model's own section)
 BATCH=$(python3 -c "
 import re
 with open('$INI') as f: content = f.read()
-m = re.search(r'\[$MODEL\].*?batch-size\s*=\s*(\d+)', content, re.DOTALL)
-print(m.group(1) if m else '')
+m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', content, re.DOTALL)
+sec = m.group(1) if m else ''
+mm = re.search(r'^\s*batch-size\s*=\s*(\d+)', sec, re.MULTILINE)
+print(mm.group(1) if mm else '')
 ")
 [ -z "$BATCH" ] && { echo "ERROR: batch-size not found — run batch_bisect.sh first"; exit 1; }
 
