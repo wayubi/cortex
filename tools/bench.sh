@@ -1120,9 +1120,21 @@ cmd_bisect() {
       exit 1
     fi
     if [ "$FLOOR_RC" -eq 1 ]; then
-      log "  256 batch CANNOT saturate full context on this GPU"
-      log "  → needs override-tensor=exps=CPU (free VRAM) or lower ctx-size"
-      exit 1
+      log "  256 batch CANNOT saturate full context — applying override-tensor=exps=CPU to free VRAM"
+      set_key override-tensor exps=CPU
+      log "  Retrying floor check after override-tensor applied"
+      restart
+      saturation_test "$CTX"
+      local RETRY_RC=$?
+      if [ "$RETRY_RC" -eq 2 ]; then
+        log "  STALL during retry (network/HF fetch)"
+        exit 1
+      fi
+      if [ "$RETRY_RC" -eq 1 ]; then
+        log "  256 batch STILL cannot saturate full context even with override-tensor=exps=CPU"
+        log "  → ctx-size is too large for this GPU even with experts offloaded; consider lower ctx-size"
+        exit 1
+      fi
     fi
     log "  256 batch saturates full context — floor confirmed"
     LO=256
