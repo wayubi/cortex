@@ -1463,6 +1463,11 @@ print(' '.join(order[:2]))
         SPILL_COUNT=$((SPILL_COUNT + 1))
         continue
       fi
+      # reject a finalist if a repeat run stalled (PRE=0, DEC=0 — no score)
+      if [ "$PRE" = "0" ] && [ "$DEC" = "0" ]; then
+        log "      run $r: STALL (no score — network stall) — excluded"
+        continue
+      fi
       SUM_SCORE=$(python3 -c "
 p=$PRE; d=$DEC; pt=$((CTX * 3 / 4)); dt=4000
 s = (pt + dt) / (pt/p + dt/d) if p > 0 and d > 0 else 0
