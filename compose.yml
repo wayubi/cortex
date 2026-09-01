@@ -26,6 +26,9 @@ services:
       memlock:
         soft: -1
         hard: -1
+      core:
+        soft: 0
+        hard: 0
     command:
       - "--models-preset"
       - "/models.ini"

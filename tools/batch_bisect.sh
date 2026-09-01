@@ -223,9 +223,24 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 print(f'  Payload: {len(json.dumps(payload))} bytes')
 "
     logmark
+    # Background curl + OOM watchdog: kill early if the log shows an OOM marker
+    # (dead-child/router cleanup can otherwise stall the request for ~10s+)
     curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
       -H 'Content-Type: application/json' -d @/tmp/sat_payload.json \
-      > /tmp/sat_response.json 2>&1
+      > /tmp/sat_response.json 2>&1 &
+    local SAT_PID=$!
+    local WATCH=0
+    while kill -0 $SAT_PID 2>/dev/null; do
+      if [ "$(oom_count_since_mark)" -gt 0 ]; then
+        log "  Saturation: OOM detected — killing curl"
+        kill $SAT_PID 2>/dev/null
+        break
+      fi
+      WATCH=$((WATCH + 1))
+      [ $((WATCH % 30)) -eq 0 ] && log "    ...watchdog ${WATCH}x2s (request still running)"
+      sleep 2
+    done
+    wait $SAT_PID 2>/dev/null || true
 
     if grep -q "exceeds the available context" /tmp/sat_response.json 2>/dev/null; then
       log "  Prompt too large — shrinking 10% (attempt $ATTEMPT)"
@@ -410,8 +425,8 @@ else:
   fi
   fi
 
-  # ── PHASE 2: REFINE BISECT (tiny probe only, until gap <= 64) ──
-  log ""; log "=== PHASE 2: BISECT (lo=$LO, hi=$HI) ==="
+  # ── PHASE 2: REFINE BISECT (PASS = tiny probe AND saturation, until gap <= 64) ──
+  log ""; log "=== PHASE 2: BISECT (lo=$LO, hi=$HI) — saturation-gated ==="
   CANDIDATES=0
   while [ $((HI - LO)) -gt 64 ]; do
     MID=$(((LO + HI) / 2)); REM=$((MID % 64))
@@ -423,34 +438,49 @@ else:
     log ""; log "  Testing batch=$MID (lo=$LO, hi=$HI, gap=$((HI-LO)))..."
     set_batch "$MID"; restart; log "  Tiny probe..."
     if tiny_probe; then
-      log "  PASS"; LO=$MID
+      log "  Probe PASS — running saturation..."
+      if saturation_test; then
+        log "  PASS (probe + saturation)"; LO=$MID
+      else
+        log "  FAIL (saturation)"; HI=$MID
+      fi
     else
-      log "  OOM"; HI=$MID
+      log "  OOM (probe)"; HI=$MID
     fi
   done
   VALIDATED=$LO
-  log "  Refined lo=$LO — max batch passing tiny probe"
+  log "  Refined lo=$LO — max batch passing tiny probe AND saturation"
 
-  # ── VERIFY: 2 more tiny probes ──
-  log ""; log "=== VERIFYING BATCH $VALIDATED ==="
+  # ── VERIFY: fresh-restart saturation confirm ──
+  log ""; log "=== VERIFYING BATCH $VALIDATED (saturation confirm) ==="
   set_batch "$VALIDATED"; restart
   PASS=0
-  for i in 1 2; do tiny_probe && { PASS=$((PASS+1)); log "  Verify $i: PASS"; } || log "  Verify $i: FAIL"; done
+  if saturation_test; then PASS=1; log "  Verify: PASS"; else log "  Verify: FAIL"; fi
 
-  # ── PHASE 3: SATURATION ON WINNER (step down 64 on fail) ──
-  log ""; log "=== PHASE 3: SATURATION ==="
-  while true; do
-    log "  Testing batch=$VALIDATED..."
-    set_batch "$VALIDATED"; restart
-    if saturation_test; then
-      log "  *** VALIDATED batch=$VALIDATED ***"
-      break
-    else
-      log "  FAIL — stepping down 64"
-      VALIDATED=$((VALIDATED - 64))
-      [ "$VALIDATED" -lt 64 ] && { log "  ERROR: saturation failed below 64"; exit 1; }
-    fi
-  done
+  # ── PHASE 3: FINAL CONFIRM + bracketed fallback ──
+  log ""; log "=== PHASE 3: SATURATION CONFIRM (batch=$VALIDATED) ==="
+  set_batch "$VALIDATED"; restart
+  if saturation_test; then
+    log "  *** VALIDATED batch=$VALIDATED ***"
+  else
+    # Bracketed halve-down + bisect (O(log) — replaces the -64 grind)
+    log "  Final confirm FAIL — bracketed halve-down search"
+    HI=$VALIDATED; LO=0
+    BATCH=$((VALIDATED / 2))
+    while [ "$BATCH" -ge 64 ]; do
+      set_batch "$BATCH"; restart
+      if saturation_test; then LO=$BATCH; break
+      else HI=$BATCH; BATCH=$((BATCH / 2)); fi
+    done
+    while [ $((HI - LO)) -gt 64 ]; do
+      MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
+      [ "$MID" -le "$LO" ] && MID=$((LO + 64))
+      set_batch "$MID"; restart
+      if saturation_test; then LO=$MID; else HI=$MID; fi
+    done
+    VALIDATED=$LO
+    log "  *** Saturation-validated batch=$VALIDATED (bracketed search) ***"
+  fi
 
   log ""; log "=== LONG-DECODE CHECK ==="
   set_batch "$VALIDATED"; restart
@@ -458,7 +488,7 @@ else:
 
   log ""; log "=== RESULT ==="
   log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-  log "  candidates=$CANDIDATES verification=$PASS/2"
+  log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
   log ""; log "  Next: run bench_model.sh $MODEL"
   log "=== DONE ==="
 fi
