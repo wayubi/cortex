@@ -96,9 +96,22 @@ print(f'  {key} = {value}')
 
 restart() {
   log "  Restarting llama-cpp..."
-  cd "$ROOT" && docker compose restart llama-cpp
-  sleep 5
-  log "  Restarted — model will load on first request"
+  cd "$ROOT" && docker compose restart llama-cpp || {
+    log "  ERROR: docker compose restart failed"
+    exit 1
+  }
+  local i
+  for i in $(seq 1 30); do
+    if curl -sf --max-time 3 http://localhost:8080/v1/models >/dev/null 2>&1; then
+      log "  Model router ready (${i}x2s)"
+      return 0
+    fi
+    sleep 2
+  done
+  log "  ERROR: llama-cpp did not become ready after restart"
+  docker ps -a | grep llama-cpp || true
+  docker logs --tail 20 $DOCKER_LOG 2>&1 || true
+  exit 1
 }
 
 # Log-marking for precise OOM detection

@@ -204,9 +204,25 @@ log "Model: $MODEL | ctx: $CTX | batch: $BATCH | prompt: ${PROMPT_TOKENS} tokens
 # ── Prefill + decode bench ──
 log ""
 log "=== PREFILL + DECODE BENCH ==="
-cd "$ROOT" && docker compose restart llama-cpp
-sleep 5
-log "  Restarted — model will load on first request"
+cd "$ROOT" && docker compose restart llama-cpp || {
+  log "ERROR: docker compose restart failed"
+  exit 1
+}
+RESTART_OK=0
+for i in $(seq 1 30); do
+  if curl -sf --max-time 3 http://localhost:8080/v1/models >/dev/null 2>&1; then
+    log "  Model router ready (${i}x2s)"
+    RESTART_OK=1
+    break
+  fi
+  sleep 2
+done
+if [ "$RESTART_OK" -eq 0 ]; then
+  log "ERROR: llama-cpp did not become ready after restart"
+  docker ps -a | grep llama-cpp || true
+  docker logs --tail 20 $DOCKER_LOG 2>&1 || true
+  exit 1
+fi
 
 # Measure chars/token ratio (also warms the model so polling captures clean prefill+decode)
 log "  Measuring tokenizer ratio..."
