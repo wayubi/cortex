@@ -488,6 +488,137 @@ print(f'{p:.1f}|{d:.1f}|${AVG_CPU:-0}')
 "
 }
 
+# Fast GPU/CPU residency classification. Unlike measure_speed, this only needs a
+# BINARY verdict (GPU vs CPU-spill), so it skips the prefill probe and kills the
+# decode curl as soon as the signal is provable — no full 4000-token wait.
+#
+# Classification rule (single llama-s process %):
+#   cpu > 200  → CPU spillover (all cores pegged ~900-2800%) — regardless of GPU
+#   gpu_util > GPU_ACTIVE_PCT AND cpu < 100 → GPU-resident (model active on GPU)
+#   100-200% is noise/AMBIGUOUS — not proven GPU, not proven CPU (never forced).
+# Echoes one of: GPU | CPU | AMBIGUOUS
+GPU_ACTIVE_PCT=25
+RESID_MIN_FLOOR_SAMPLES=10   # 20s @2s before early-kill verdicts are allowed (belt-and-suspenders)
+residency_probe() {
+  local CTX=$1
+  python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
+with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
+"
+  local R_PID
+  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' -d @/tmp/resid_payload.json \
+    > /tmp/resid_response.json 2>&1 &
+  R_PID=$!
+
+  local R_CPU_SUM=0 R_CPU_CNT=0 R_GPU_SEEN=0
+  local R_CPU=0 R_GPU=0 R_TEMP=0 R_CPU_CONSEC=0 R_GPU_CONSEC=0
+  local i
+  for i in $(seq 1 40); do
+    local TOP STATS
+    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
+    R_CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
+    STATS=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null)
+    R_GPU=$(echo "$STATS" | cut -d',' -f1 | tr -d ' ')
+    R_TEMP=$(echo "$STATS" | cut -d',' -f2 | tr -d ' ')
+
+    [ -n "$R_CPU" ] && [ "$R_CPU" != "0.0" ] && { R_CPU_SUM=$(echo "$R_CPU_SUM + $R_CPU" | bc 2>/dev/null || echo 0); R_CPU_CNT=$((R_CPU_CNT + 1)); }
+    { [ -n "$R_GPU" ] && [ "$R_GPU" -gt "$GPU_ACTIVE_PCT" ] 2>/dev/null; } && R_GPU_SEEN=1
+
+    # CPU-spill: definitive regardless of GPU (only all-cores >200% proves it)
+    if [ "$(echo "$R_CPU > 200" | bc -l)" = "1" ]; then
+      R_CPU_CONSEC=$((R_CPU_CONSEC + 1)); R_GPU_CONSEC=0
+    elif [ "$(echo "$R_CPU < 100" | bc -l)" = "1" ] && [ "$R_GPU" -gt "$GPU_ACTIVE_PCT" ] 2>/dev/null; then
+      R_GPU_CONSEC=$((R_GPU_CONSEC + 1)); R_CPU_CONSEC=0
+    else
+      # 100-200% is noise — reset both, keep polling
+      R_CPU_CONSEC=0; R_GPU_CONSEC=0
+    fi
+
+    if [ "$i" -ge "$RESID_MIN_FLOOR_SAMPLES" ]; then
+      if [ "$R_CPU_CONSEC" -ge 3 ]; then
+        kill $R_PID 2>/dev/null
+        wait $R_PID 2>/dev/null || true
+        log "  residency: CPU (cpu ${R_CPU}%) — killed early"
+        echo "CPU"; return 0
+      fi
+      if [ "$R_GPU_CONSEC" -ge 3 ]; then
+        kill $R_PID 2>/dev/null
+        wait $R_PID 2>/dev/null || true
+        log "  residency: GPU (cpu ${R_CPU}%, gpu ${R_GPU}%, temp ${R_TEMP}C) — killed early"
+        echo "GPU"; return 0
+      fi
+    fi
+
+    if ! kill -0 $R_PID 2>/dev/null; then break; fi
+    sleep 2
+  done
+  wait $R_PID 2>/dev/null || true
+
+  # Fallback: classify from the full window average
+  local R_AVG=0
+  [ "$R_CPU_CNT" -gt 0 ] && R_AVG=$(echo "scale=1; $R_CPU_SUM / $R_CPU_CNT" | bc)
+  if [ "$(echo "$R_AVG > 200" | bc -l)" = "1" ]; then
+    log "  residency: CPU (avg ${R_AVG}%)"
+    echo "CPU"; return 0
+  fi
+  if [ "$(echo "$R_AVG <= 100" | bc -l)" = "1" ] && [ "$R_GPU_SEEN" -eq 1 ]; then
+    log "  residency: GPU (avg cpu ${R_AVG}%, gpu active)"
+    echo "GPU"; return 0
+  fi
+  log "  residency: AMBIGUOUS (avg cpu ${R_AVG}%)"
+  echo "AMBIGUOUS"; return 0
+}
+
+# Find the largest GPU-resident batch when the ceiling is CPU-spilled (e.g. a
+# 9B that fits 16384 OOM-wise but only runs 100% GPU at 2048). Ladders up from
+# 2048 (doubling) via fast residency probes, then bisects on residency at the
+# GPU/CPU boundary. Echoes the largest GPU-resident batch.
+residency_descend() {
+  local UPPER=$1   # the OOM-validated ceiling to stay below
+  local LO=0 HI=$UPPER B R MID
+  # Probe the realistic floor (2048): if GPU, ladder up; if CPU-spilled, ladder down.
+  set_batch 2048; restart
+  R=$(residency_probe)
+  if [ "$R" = "GPU" ]; then
+    LO=2048
+    B=2048
+    while [ $((B * 2)) -lt "$HI" ]; do
+      B=$((B * 2))
+      set_batch "$B"; restart
+      R=$(residency_probe)
+      if [ "$R" = "GPU" ]; then LO=$B
+      else HI=$B; break; fi
+    done
+  else
+    # 2048 spilled — halve down until a GPU-resident batch is found
+    HI=2048
+    B=1024
+    while [ "$B" -ge 64 ]; do
+      set_batch "$B"; restart
+      R=$(residency_probe)
+      if [ "$R" = "GPU" ]; then LO=$B; break
+      else HI=$B; B=$((B / 2 / 64 * 64)); fi
+    done
+  fi
+  if [ "$LO" -eq 0 ]; then
+    log "  ERROR: no GPU-resident batch found below $UPPER — using ceiling"
+    echo "$UPPER"; return 0
+  fi
+  # Bisect on residency between LO (GPU) and HI (CPU/OOM), gap <= 64
+  while [ $((HI - LO)) -gt 64 ]; do
+    MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
+    [ "$MID" -le "$LO" ] && MID=$((LO + 64))
+    [ "$MID" -ge "$HI" ] && MID=$((HI - 64))
+    set_batch "$MID"; restart
+    R=$(residency_probe)
+    if [ "$R" = "GPU" ]; then LO=$MID; else HI=$MID; fi
+  done
+  log "  Largest GPU-resident batch: $LO"
+  echo "$LO"
+}
+
 # ── MTP capability detection (try-it-and-see) ──────────────
 # Snapshots the model's section to a temp file, sets MTP config, restarts, probes.
 # MTP supported = probe succeeds AND log shows MTP engagement.
@@ -958,22 +1089,22 @@ cmd_bisect() {
   set_batch "$VALIDATED"; restart
   long_decode_check || true
 
-  # ── RESIDENCY-GATED PHASE 4 SKIP ──
-  # Only when the ceiling IS ctx (small-ctx model that fits at ctx on the first
-  # probe) is a single residency check enough to decide whether the sweep is
-  # worth running. GPU-resident ctx → ctx is the value, skip Phase 4 entirely.
-  # CPU-spilled ctx → Phase 4 sweeps below and its residency filter finds the
-  # largest GPU-resident batch (e.g. a 128K ctx that passes OOM but decodes on
-  # CPU while 32K is 100% GPU — Phase 4 picks 32K).
-  if [ "$VALIDATED" -eq "$CTX" ]; then
-    log ""; log "=== RESIDENCY CHECK (batch=$VALIDATED == ctx) ==="
-    local SCORE_OF AVG_CPU
-    SCORE_OF=$(measure_speed "$CTX")
-    AVG_CPU=$(echo "$SCORE_OF" | cut -d'|' -f3)
-    if [ -n "$AVG_CPU" ] && [ "$(echo "$AVG_CPU > 200" | bc -l)" = "1" ]; then
-      log "  ctx spilled to CPU (avg ${AVG_CPU}%) — running Phase 4 to find the GPU-resident ceiling"
-    else
-      log "  ctx is GPU-resident (avg ${AVG_CPU:-?}%) — batch value is ctx, skipping Phase 4"
+  # ── RESIDENCY GATE: decide if Phase 4 is worth running ──
+  # A fast residency probe on the ceiling answers "GPU-resident or CPU-spilled?",
+  # and a 256 low-GPU check answers "is 100% GPU even possible for this model?".
+  #   ceiling GPU-resident + ceiling == ctx → ctx is the value, no sweep.
+  #   ceiling GPU-resident + ceiling < ctx → Phase 4 finds fastest below (unchanged).
+  #   ceiling spilled + 256 spilled (CPU-compute, e.g. gpt-oss) → 100% GPU impossible,
+  #        take the ceiling, skip Phase 4 entirely.
+  #   ceiling spilled + 256 GPU + ceiling == ctx (e.g. 9B @16384 spills, 2048 GPU) →
+  #        descend to the largest GPU-resident batch, no Phase 4.
+  #   ceiling spilled + 256 GPU + ceiling < ctx → Phase 4 residency filter finds it.
+  log ""; log "=== RESIDENCY CHECK (batch=$VALIDATED) ==="
+  local R_VERDICT R256 DESC
+  R_VERDICT=$(residency_probe)
+  if [ "$R_VERDICT" = "GPU" ]; then
+    if [ "$VALIDATED" -eq "$CTX" ]; then
+      log "  batch is GPU-resident (100% GPU) — value is ctx, skipping Phase 4"
       set_batch "$VALIDATED"
       log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (ctx, GPU-resident) ***"
       log ""; log "=== RESULT ==="
@@ -984,6 +1115,38 @@ cmd_bisect() {
       log "=== DONE ==="
       exit 0
     fi
+    log "  ceiling is GPU-resident — running Phase 4 to find fastest below"
+  else
+    log "  batch spilled to CPU — checking if 100% GPU is possible at batch 256..."
+    set_batch 256; restart
+    R256=$(residency_probe)
+    if [ "$R256" = "CPU" ]; then
+      log "  256 also spilled — CPU-compute model, 100% GPU impossible. Value is ceiling $VALIDATED"
+      set_batch "$VALIDATED"
+      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (CPU-compute ceiling) ***"
+      log ""; log "=== RESULT ==="
+      log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
+      log "  candidates=0 saturation-confirm=$PASS/1"
+      log "  residency: CPU-compute model (spills even at 256) — no sweep needed"
+      log ""; log "  Next: run bench.sh bench $MODEL"
+      log "=== DONE ==="
+      exit 0
+    fi
+    if [ "$VALIDATED" -eq "$CTX" ]; then
+      log "  ctx fits but spills — descending to largest GPU-resident batch"
+      DESC=$(residency_descend "$CTX")
+      VALIDATED=$DESC
+      set_batch "$VALIDATED"
+      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (largest GPU-resident) ***"
+      log ""; log "=== RESULT ==="
+      log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
+      log "  candidates=0 saturation-confirm=$PASS/1"
+      log "  residency: ctx spilled, descended to largest 100%-GPU batch"
+      log ""; log "  Next: run bench.sh bench $MODEL"
+      log "=== DONE ==="
+      exit 0
+    fi
+    log "  ceiling spilled but 100% GPU possible — running Phase 4 to find largest GPU-resident"
   fi
 
   # ── PHASE 4: PERFORMANCE SWEEP (find fastest batch below the ceiling) ──
@@ -1010,8 +1173,9 @@ print(' '.join(str(v) for v in sorted(vals)))
     local PRE=$(echo "$SCORE_OF" | cut -d'|' -f1)
     local DEC=$(echo "$SCORE_OF" | cut -d'|' -f2)
     local AVG_CPU=$(echo "$SCORE_OF" | cut -d'|' -f3)
-    # GPU-residency filter: a candidate that spills compute to CPU (avg CPU > 200%)
+    # GPU-residency filter: a candidate that pegs all cores to CPU (avg CPU > 200%)
     # is inherently slower (documented rationale) — exclude it from winning.
+    # 100-200% is noise and stays eligible.
     if [ -n "$AVG_CPU" ] && [ "$(echo "$AVG_CPU > 200" | bc -l)" = "1" ]; then
       log "  batch=$B: SPILL to CPU (avg ${AVG_CPU}%) — EXCLUDED"
       SWEEP_RESULTS[$B]="SPILL"
@@ -1110,7 +1274,7 @@ print(' '.join(order[:2]))
       local PRE=$(echo "$SCORE_OF" | cut -d'|' -f1)
       local DEC=$(echo "$SCORE_OF" | cut -d'|' -f2)
       local AVG_CPU=$(echo "$SCORE_OF" | cut -d'|' -f3)
-      # reject a finalist if a repeat run spills to CPU
+      # reject a finalist if a repeat run pegs all cores to CPU (avg CPU > 200%)
       if [ -n "$AVG_CPU" ] && [ "$(echo "$AVG_CPU > 200" | bc -l)" = "1" ]; then
         log "      run $r: SPILL (avg ${AVG_CPU}%) — penalizing"
         SPILL_COUNT=$((SPILL_COUNT + 1))

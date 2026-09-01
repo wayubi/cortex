@@ -32,7 +32,7 @@ A short prompt (~12 tokens) produces garbage prefill numbers (~30-55 t/s) that a
 3. **Use `top -bn1 | grep llama-s | head -n1`** — `ps -o %cpu=` gives instantaneous snapshot and can miss spikes
 4. **Default max_tokens=4000** — long decode reveals true placement
 5. **Poll CPU for 160s** — 80 samples × 2s. Never use 50s.
-6. **Placement classification** — average CPU from sample 10+: <100% = GPU, >200% = CPU
+6. **Placement classification** — average CPU from sample 10+: <100% = GPU, >200% = CPU, 100-200% = AMBIGUOUS
 7. **Coder variants are independent models** — bench them separately, no copying between entries
 8. **PREFILL BENCHMARK: prompt MUST be long** — ~75% of ctx-size tokens. A 12-token prompt gives garbage prefill numbers (~30-55 t/s) that are just setup overhead.
 9. **Prompt size per variant** — 4k ctx → 3000 tokens, 8k ctx → 6000 tokens, 16k ctx → 12000 tokens
