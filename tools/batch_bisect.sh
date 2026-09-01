@@ -288,6 +288,52 @@ else: print('  Long-decode: FAIL'); exit(1)
 " 2>/dev/null; return $?
 }
 
+# Measure prefill + decode speed at the CURRENT batch (75%-ctx prefill probe,
+# then a full 4000-token decode window). Echoes "prefill_t_s|decode_t_s".
+measure_speed() {
+  measure_ratio || true
+  local PREFILL_CHARS=0
+  if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
+    PREFILL_CHARS=$(python3 -c "print(int($CTX * 0.75 * $CHARS_PER_TOK))")
+  else
+    PREFILL_CHARS=$(python3 -c "print(int($CTX * 0.75 * 4))")
+  fi
+
+  # Prefill probe (75% ctx, max_tokens=1)
+  python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':('The history of computing is long and complex. '*1000)[:$PREFILL_CHARS]}],'max_tokens':1,'ignore_eos':True}
+with open('/tmp/perf_prefill_payload.json','w') as f: json.dump(payload, f)
+"
+  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' -d @/tmp/perf_prefill_payload.json \
+    > /tmp/perf_prefill.json 2>&1
+
+  # Decode probe (short prompt, full 4000-token window)
+  python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
+with open('/tmp/perf_decode_payload.json','w') as f: json.dump(payload, f)
+"
+  curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' -d @/tmp/perf_decode_payload.json \
+    > /tmp/perf_decode.json 2>&1
+
+  python3 -c "
+import json
+def ts(path, key):
+    try:
+        d = json.load(open(path))
+        if 'choices' in d:
+            return d.get('timings', {}).get(key, 0)
+    except Exception: pass
+    return 0
+p = ts('/tmp/perf_prefill.json', 'prompt_per_second')
+d = ts('/tmp/perf_decode.json', 'predicted_per_second')
+print(f'{p:.1f}|{d:.1f}')
+"
+}
+
 # ── MAIN ──
 if [ "$TEST_BATCH" -gt 0 ] 2>/dev/null; then
   if [ "$RESUME_BATCH" -eq 1 ]; then
@@ -523,9 +569,89 @@ else:
   set_batch "$VALIDATED"; restart
   long_decode_check || true
 
+  # ── PHASE 4: PERFORMANCE SWEEP (find fastest batch below the ceiling) ──
+  log ""; log "=== PHASE 4: PERFORMANCE SWEEP (ceiling=$VALIDATED) ==="
+  # Candidate batches: ceiling, /2, /4, /8, /16, floor 2048
+  CAND_LIST=$(python3 -c "
+ceiling=$VALIDATED
+vals = set()
+for d in (1, 2, 4, 8, 16):
+    v = (ceiling // d) // 64 * 64
+    if v >= 2048: vals.add(v)
+vals.add(2048)
+print(' '.join(str(v) for v in sorted(vals)))
+")
+  BEST_BATCH=$VALIDATED; BEST_SCORE=0
+  declare -A SWEEP_RESULTS
+  SCORE_OF=""
+  for B in $CAND_LIST; do
+    log ""; log "  Bench candidate batch=$B..."
+    set_batch "$B"; restart
+    SCORE_OF=$(measure_speed)
+    PRE=$(echo "$SCORE_OF" | cut -d'|' -f1)
+    DEC=$(echo "$SCORE_OF" | cut -d'|' -f2)
+    # combined throughput: total tokens / total time over a representative workload
+    # (75%-ctx prompt + 4000-token decode), self-weighted by phase duration
+    SCORE=$(python3 -c "
+p=$PRE; d=$DEC; pt=$((CTX * 3 / 4)); dt=4000
+if p <= 0 or d <= 0:
+    print('0')
+else:
+    print('%.1f' % ((pt + dt) / (pt/p + dt/d)))
+")
+    SWEEP_RESULTS[$B]="$PRE|$DEC|$SCORE"
+    log "  batch=$B: prefill=${PRE} t/s, decode=${DEC} t/s → score=$SCORE"
+    if [ "$(echo "$SCORE > $BEST_SCORE" | bc -l)" = "1" ]; then
+      BEST_SCORE=$SCORE; BEST_BATCH=$B
+    fi
+  done
+
+  # ── Re-verify top-2 finalists with 3x repeats (average score) ──
+  log ""; log "  Finalists: re-verifying top candidates 3x..."
+  # Rank candidates by sweep score (feed "batch score" lines via stdin)
+  TOP2=$(for B in $CAND_LIST; do
+    SC=$(echo "${SWEEP_RESULTS[$B]}" | cut -d'|' -f3)
+    echo "$B $SC"
+  done | python3 -c "
+import sys
+results = {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    b, score = line.split()
+    results[b] = float(score)
+order = sorted(results, key=results.get, reverse=True)
+print(' '.join(order[:2]))
+")
+  for B in $TOP2; do
+    SUM_SCORE=0; RUNS=0
+    for r in 1 2 3; do
+      log "    Finalist batch=$B run $r..."
+      set_batch "$B"; restart
+      SCORE_OF=$(measure_speed)
+      PRE=$(echo "$SCORE_OF" | cut -d'|' -f1)
+      DEC=$(echo "$SCORE_OF" | cut -d'|' -f2)
+      SUM_SCORE=$(python3 -c "
+p=$PRE; d=$DEC; pt=$((CTX * 3 / 4)); dt=4000
+s = (pt + dt) / (pt/p + dt/d) if p > 0 and d > 0 else 0
+print('%.1f' % ($SUM_SCORE + s))
+")
+      RUNS=$((RUNS + 1))
+    done
+    AVG=$(python3 -c "print('%.1f' % ($SUM_SCORE / $RUNS))")
+    log "    Finalist batch=$B avg score=$AVG (3 runs)"
+    if [ "$(echo "$AVG > $BEST_SCORE" | bc -l)" = "1" ]; then
+      BEST_SCORE=$AVG; BEST_BATCH=$B
+    fi
+  done
+
+  VALIDATED=$BEST_BATCH
+  log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (score=$BEST_SCORE) ***"
+
   log ""; log "=== RESULT ==="
   log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
   log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
+  log "  perf-sweep: fastest batch below ceiling (combined prefill+decode score)"
   log ""; log "  Next: run bench_model.sh $MODEL"
   log "=== DONE ==="
 fi
