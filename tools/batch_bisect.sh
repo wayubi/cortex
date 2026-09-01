@@ -495,6 +495,33 @@ else
   set_batch "$VALIDATED"; restart
   long_decode_check || true
 
+  # ── RESIDENCY-GATED PHASE 4 SKIP ──
+  # Only when the ceiling IS ctx (small-ctx model that fits at ctx on the first
+  # probe) is a single residency check enough to decide whether the sweep is
+  # worth running. GPU-resident ctx → ctx is the value, skip Phase 4 entirely.
+  # CPU-spilled ctx → Phase 4 sweeps below and its residency filter finds the
+  # largest GPU-resident batch (e.g. a 128K ctx that passes OOM but decodes on
+  # CPU while 32K is 100% GPU — Phase 4 picks 32K).
+  if [ "$VALIDATED" -eq "$CTX" ]; then
+    log ""; log "=== RESIDENCY CHECK (batch=$VALIDATED == ctx) ==="
+    SCORE_OF=$(measure_speed)
+    AVG_CPU=$(echo "$SCORE_OF" | cut -d'|' -f3)
+    if [ -n "$AVG_CPU" ] && [ "$(echo "$AVG_CPU > 200" | bc -l)" = "1" ]; then
+      log "  ctx spilled to CPU (avg ${AVG_CPU}%) — running Phase 4 to find the GPU-resident ceiling"
+    else
+      log "  ctx is GPU-resident (avg ${AVG_CPU:-?}%) — batch value is ctx, skipping Phase 4"
+      set_batch "$VALIDATED"
+      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (ctx, GPU-resident) ***"
+      log ""; log "=== RESULT ==="
+      log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
+      log "  candidates=0 saturation-confirm=$PASS/1"
+      log "  residency: ctx passes + GPU-resident — no sweep needed"
+      log ""; log "  Next: run bench_model.sh $MODEL"
+      log "=== DONE ==="
+      exit 0
+    fi
+  fi
+
   # ── PHASE 4: PERFORMANCE SWEEP (find fastest batch below the ceiling) ──
   log ""; log "=== PHASE 4: PERFORMANCE SWEEP (ceiling=$VALIDATED) ==="
   # Candidate batches: ceiling, /2, /4, /8, /16, floor 2048
