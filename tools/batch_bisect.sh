@@ -309,7 +309,8 @@ with open('/tmp/perf_prefill_payload.json','w') as f: json.dump(payload, f)
     -H 'Content-Type: application/json' -d @/tmp/perf_prefill_payload.json \
     > /tmp/perf_prefill.json 2>&1
 
-  # Decode probe (short prompt, full 4000-token window)
+  # Decode probe (short prompt, full 4000-token window) — poll CPU during it
+  # for GPU-residency classification
   python3 -c "
 import json
 payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
@@ -317,7 +318,27 @@ with open('/tmp/perf_decode_payload.json','w') as f: json.dump(payload, f)
 "
   curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
     -H 'Content-Type: application/json' -d @/tmp/perf_decode_payload.json \
-    > /tmp/perf_decode.json 2>&1
+    > /tmp/perf_decode.json 2>&1 &
+  local DEC_PID=$!
+  local CPU_SAMPLES=()
+  for i in $(seq 1 40); do
+    local TOP CPU
+    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
+    CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
+    [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
+    if ! kill -0 $DEC_PID 2>/dev/null; then break; fi
+    sleep 2
+  done
+  wait $DEC_PID 2>/dev/null || true
+
+  # Avg CPU (skip first sample = warmup), min 2 samples
+  local CPU_SUM=0 CPU_CNT=0 AVG_CPU=0
+  for idx in $(seq 1 $((${#CPU_SAMPLES[@]} - 1))); do
+    [ -z "${CPU_SAMPLES[$idx]:-}" ] && continue
+    CPU_SUM=$(echo "$CPU_SUM + ${CPU_SAMPLES[$idx]}" | bc 2>/dev/null || echo 0)
+    CPU_CNT=$((CPU_CNT + 1))
+  done
+  [ "$CPU_CNT" -gt 0 ] && AVG_CPU=$(echo "scale=1; $CPU_SUM / $CPU_CNT" | bc)
 
   python3 -c "
 import json
@@ -330,7 +351,7 @@ def ts(path, key):
     return 0
 p = ts('/tmp/perf_prefill.json', 'prompt_per_second')
 d = ts('/tmp/perf_decode.json', 'predicted_per_second')
-print(f'{p:.1f}|{d:.1f}')
+print(f'{p:.1f}|{d:.1f}|${AVG_CPU:-0}')
 "
 }
 
@@ -590,6 +611,14 @@ print(' '.join(str(v) for v in sorted(vals)))
     SCORE_OF=$(measure_speed)
     PRE=$(echo "$SCORE_OF" | cut -d'|' -f1)
     DEC=$(echo "$SCORE_OF" | cut -d'|' -f2)
+    AVG_CPU=$(echo "$SCORE_OF" | cut -d'|' -f3)
+    # GPU-residency filter: a candidate that spills compute to CPU (avg CPU > 200%)
+    # is inherently slower (documented rationale) — exclude it from winning.
+    if [ -n "$AVG_CPU" ] && [ "$(echo "$AVG_CPU > 200" | bc -l)" = "1" ]; then
+      log "  batch=$B: SPILL to CPU (avg ${AVG_CPU}%) — EXCLUDED"
+      SWEEP_RESULTS[$B]="SPILL"
+      continue
+    fi
     # combined throughput: total tokens / total time over a representative workload
     # (75%-ctx prompt + 4000-token decode), self-weighted by phase duration
     SCORE=$(python3 -c "
@@ -599,8 +628,8 @@ if p <= 0 or d <= 0:
 else:
     print('%.1f' % ((pt + dt) / (pt/p + dt/d)))
 ")
-    SWEEP_RESULTS[$B]="$PRE|$DEC|$SCORE"
-    log "  batch=$B: prefill=${PRE} t/s, decode=${DEC} t/s → score=$SCORE"
+    SWEEP_RESULTS[$B]="$PRE|$DEC|$SCORE|$AVG_CPU"
+    log "  batch=$B: prefill=${PRE} t/s, decode=${DEC} t/s, cpu=${AVG_CPU}% → score=$SCORE"
     if [ "$(echo "$SCORE > $BEST_SCORE" | bc -l)" = "1" ]; then
       BEST_SCORE=$SCORE; BEST_BATCH=$B
     fi
@@ -608,9 +637,11 @@ else:
 
   # ── Re-verify top-2 finalists with 3x repeats (average score) ──
   log ""; log "  Finalists: re-verifying top candidates 3x..."
-  # Rank candidates by sweep score (feed "batch score" lines via stdin)
+  # Rank candidates by sweep score, skipping SPILL entries (feed "batch score" via stdin)
   TOP2=$(for B in $CAND_LIST; do
-    SC=$(echo "${SWEEP_RESULTS[$B]}" | cut -d'|' -f3)
+    V="${SWEEP_RESULTS[$B]}"
+    [ "$V" = "SPILL" ] && continue
+    SC=$(echo "$V" | cut -d'|' -f3)
     echo "$B $SC"
   done | python3 -c "
 import sys
@@ -624,13 +655,20 @@ order = sorted(results, key=results.get, reverse=True)
 print(' '.join(order[:2]))
 ")
   for B in $TOP2; do
-    SUM_SCORE=0; RUNS=0
+    SUM_SCORE=0; RUNS=0; SPILL_COUNT=0
     for r in 1 2 3; do
       log "    Finalist batch=$B run $r..."
       set_batch "$B"; restart
       SCORE_OF=$(measure_speed)
       PRE=$(echo "$SCORE_OF" | cut -d'|' -f1)
       DEC=$(echo "$SCORE_OF" | cut -d'|' -f2)
+      AVG_CPU=$(echo "$SCORE_OF" | cut -d'|' -f3)
+      # reject a finalist if a repeat run spills to CPU
+      if [ -n "$AVG_CPU" ] && [ "$(echo "$AVG_CPU > 200" | bc -l)" = "1" ]; then
+        log "      run $r: SPILL (avg ${AVG_CPU}%) — penalizing"
+        SPILL_COUNT=$((SPILL_COUNT + 1))
+        continue
+      fi
       SUM_SCORE=$(python3 -c "
 p=$PRE; d=$DEC; pt=$((CTX * 3 / 4)); dt=4000
 s = (pt + dt) / (pt/p + dt/d) if p > 0 and d > 0 else 0
@@ -638,8 +676,12 @@ print('%.1f' % ($SUM_SCORE + s))
 ")
       RUNS=$((RUNS + 1))
     done
+    if [ "$RUNS" -eq 0 ]; then
+      log "    Finalist batch=$B: all runs spilled — EXCLUDED"
+      continue
+    fi
     AVG=$(python3 -c "print('%.1f' % ($SUM_SCORE / $RUNS))")
-    log "    Finalist batch=$B avg score=$AVG (3 runs)"
+    log "    Finalist batch=$B avg score=$AVG ($RUNS clean runs, $SPILL_COUNT spilled)"
     if [ "$(echo "$AVG > $BEST_SCORE" | bc -l)" = "1" ]; then
       BEST_SCORE=$AVG; BEST_BATCH=$B
     fi
