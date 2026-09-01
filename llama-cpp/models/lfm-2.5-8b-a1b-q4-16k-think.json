@@ -1,10 +1,10 @@
 {
   "model": "lfm-2.5-8b-a1b-q4-16k-think",
   "ctx": 16384,
-  "batch": 262080,
-  "ubatch": 262080,
+  "batch": 32768,
+  "ubatch": 32768,
   "placement": "GPU",
-  "bench_date": "2026-08-31T16:11:39.253833",
+  "bench_date": "2026-08-31T16:58:40.770950",
   "bench_method": "bench_model.sh v2",
   "config": {
     "temp": "0.2",
@@ -21,28 +21,30 @@
     "quant": "UD-Q4_K_XL",
     "reasoning": "off",
     "ctx": "16384",
-    "batch": "262080"
+    "batch": "32768"
   },
   "bench": {
     "max_tokens": 4000,
-    "prompt_tokens_requested": 12288,
+    "prefill_prompt_tokens": 12288,
+    "decode_prompt_tokens": 150,
     "model_file_size_gb": 4.98,
     "build_info": "b1-3737e41",
-    "wall_time_s": 33
+    "wall_time_s": 28
   },
   "speed": {
-    "decode_t_s": 133.3,
-    "prefill_t_s": 5282.57,
-    "prefill_ms": 2277.3,
-    "decode_ms": 29999.5,
-    "prefill_ms_per_tok": 0.1893,
-    "decode_ms_per_tok": 7.5018
+    "prefill_t_s": 5584.81,
+    "prefill_ms": 2154.06,
+    "prefill_ms_per_tok": 0.1791,
+    "decode_t_s": 148.03,
+    "decode_ms": 27014.75,
+    "decode_ms_per_tok": 6.7554
   },
   "request": {
+    "prefill_prompt_tokens": 12030,
+    "decode_prompt_tokens": 156,
     "max_tokens": 4000,
-    "prompt_tokens": 12030,
     "completion_tokens": 4000,
-    "total_tokens": 16030,
+    "total_tokens": 4156,
     "cached_tokens": 0,
     "cache_n": 0,
     "predicted_n": 4000,
@@ -84,21 +86,21 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 98.0,
-      "avg_gpu_util_pct": 68.8,
-      "avg_gpu_mem_util_pct": 58.6,
-      "cpu_stddev_pct": 2.2,
+      "avg_cpu_pct": 99.7,
+      "avg_gpu_util_pct": 67.1,
+      "avg_gpu_mem_util_pct": 61.5,
+      "cpu_stddev_pct": 1.6,
       "peak_vram_mib": 7535,
-      "peak_power_w": 169.7,
-      "peak_temp_c": 65,
-      "peak_clocks_sm_mhz": 1957,
+      "peak_power_w": 151.29,
+      "peak_temp_c": 61,
+      "peak_clocks_sm_mhz": 1965,
       "peak_clocks_mem_mhz": 7301,
       "final_vram_mib": 7535,
-      "final_temp_c": 61,
-      "final_power_w": 75.23,
-      "ram_used_mib": 41295,
-      "rss_mib": 1615,
-      "sample_count": 14
+      "final_temp_c": 57,
+      "final_power_w": 62.88,
+      "ram_used_mib": 41274,
+      "rss_mib": 1654,
+      "sample_count": 12
     }
   }
 }

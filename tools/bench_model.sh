@@ -22,7 +22,6 @@ INI="$ROOT/llama-cpp/models.ini"
 MODELS_DIR="$ROOT/llama-cpp/models"
 JSON_FILE="${MODELS_DIR}/${MODEL}.json"
 DOCKER_LOG="cortex-llama-cpp-1"
-MAX_TOKENS=4000
 POLL_MIN_SAMPLES=3
 POLL_MAX_SAMPLES=80
 
@@ -231,7 +230,14 @@ else
   PROMPT_CHARS=$((PROMPT_TOKENS * 4))
 fi
 
-# Generate payload
+# ── Phase A: PREFILL (75%-ctx prompt, max_tokens=1) ─────────
+# Decouple decode sizing: decode uses a short 150-token prompt so the full
+# decode window fits even on small-ctx models (4k → ~3946 decode tokens).
+DECODE_PROMPT_TOKENS=150
+DECODE_MAX_TOKENS=$((CTX - DECODE_PROMPT_TOKENS))
+[ "$DECODE_MAX_TOKENS" -gt 4000 ] && DECODE_MAX_TOKENS=4000
+DECODE_PROMPT_CHARS=$(python3 -c "print(int($DECODE_PROMPT_TOKENS * $CHARS_PER_TOK))" 2>/dev/null || echo $((DECODE_PROMPT_TOKENS * 4)))
+
 python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
@@ -239,16 +245,34 @@ target_chars = $PROMPT_CHARS
 prompt = ''
 while len(prompt) < target_chars: prompt += filler
 prompt = prompt[:target_chars]
-payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':$MAX_TOKENS,'ignore_eos':True}
-with open('/tmp/bench_payload.json','w') as f: json.dump(payload, f)
-print(f'  Payload: {len(prompt)} chars, ~{$PROMPT_TOKENS} tokens')
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
+with open('/tmp/bench_prefill_payload.json','w') as f: json.dump(payload, f)
+print(f'  Prefill payload: {len(prompt)} chars, ~{$PROMPT_TOKENS} tokens (max_tokens=1)')
 "
 
-# Mark log position for MTP + OOM capture of THIS request
+log "  Phase A: prefill request ($PROMPT_TOKENS tokens)..."
+curl -s --max-time 300 -X POST http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' -d @/tmp/bench_prefill_payload.json \
+  > /tmp/bench_prefill.json 2>&1 || true
+
+# ── Phase B: DECODE (short prompt, placement polling) ───────
+python3 -c "
+import json
+filler = 'The history of computing is long and complex. '
+target_chars = $DECODE_PROMPT_CHARS
+prompt = ''
+while len(prompt) < target_chars: prompt += filler
+prompt = prompt[:target_chars]
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':$DECODE_MAX_TOKENS,'ignore_eos':True}
+with open('/tmp/bench_payload.json','w') as f: json.dump(payload, f)
+print(f'  Decode payload: {len(prompt)} chars, ~$DECODE_PROMPT_TOKENS tokens (max_tokens=$DECODE_MAX_TOKENS)')
+"
+
+# Mark log position for MTP + OOM capture of the decode request
 LOG_MARK=$(docker logs $DOCKER_LOG 2>&1 | wc -l)
 REQUEST_START=$(date +%s)
 
-log "  Firing request..."
+log "  Phase B: firing decode request..."
 curl -s --max-time 600 -X POST http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' -d @/tmp/bench_payload.json \
   > /tmp/bench_output.json 2>&1 &
@@ -343,36 +367,50 @@ if (( $(echo "$AVG_CPU < 100" | bc -l) )); then PLACEMENT="GPU"
 elif (( $(echo "$AVG_CPU > 200" | bc -l) )); then PLACEMENT="CPU"
 else PLACEMENT="AMBIGUOUS"; fi
 
-# Extract speed + request signals
+# Extract speed + request signals (prefill from phase A, decode from phase B)
 SPEED=$(python3 -c "
 import json
-try:
-    d = json.load(open('/tmp/bench_output.json'))
-    if 'choices' in d:
-        t = d.get('timings', {}); u = d.get('usage', {})
-        print(json.dumps({
-            'speed': {
-                'decode_t_s': round(t.get('predicted_per_second', 0), 2),
-                'prefill_t_s': round(t.get('prompt_per_second', 0), 2),
-                'prefill_ms': round(t.get('prompt_ms', 0), 2),
-                'decode_ms': round(t.get('predicted_ms', 0), 2),
-                'prefill_ms_per_tok': round(t.get('prompt_per_token_ms', 0), 4),
-                'decode_ms_per_tok': round(t.get('predicted_per_token_ms', 0), 4),
-            },
-            'request': {
-                'max_tokens': $MAX_TOKENS,
-                'prompt_tokens': u.get('prompt_tokens', 0),
-                'completion_tokens': u.get('completion_tokens', 0),
-                'total_tokens': u.get('total_tokens', 0),
-                'cached_tokens': (u.get('prompt_tokens_details') or {}).get('cached_tokens', 0),
-                'cache_n': t.get('cache_n', 0),
-                'predicted_n': t.get('predicted_n', 0),
-                'finish_reason': d['choices'][0].get('finish_reason'),
-                'truncated': bool(d['choices'][0].get('finish_reason') == 'length'),
-            },
-        }))
-    else: print('{}')
-except Exception: print('{}')
+
+def load(path):
+    try:
+        d = json.load(open(path))
+        if 'choices' in d: return d
+    except Exception: pass
+    return None
+
+pd = load('/tmp/bench_prefill.json')   # Phase A prefill
+dd = load('/tmp/bench_output.json')    # Phase B decode
+out = {'speed': {}, 'request': {}}
+
+if pd:
+    t = pd.get('timings', {}); u = pd.get('usage', {})
+    out['speed'].update({
+        'prefill_t_s': round(t.get('prompt_per_second', 0), 2),
+        'prefill_ms': round(t.get('prompt_ms', 0), 2),
+        'prefill_ms_per_tok': round(t.get('prompt_per_token_ms', 0), 4),
+    })
+    out['request']['prefill_prompt_tokens'] = u.get('prompt_tokens', 0)
+
+if dd:
+    t = dd.get('timings', {}); u = dd.get('usage', {})
+    out['speed'].update({
+        'decode_t_s': round(t.get('predicted_per_second', 0), 2),
+        'decode_ms': round(t.get('predicted_ms', 0), 2),
+        'decode_ms_per_tok': round(t.get('predicted_per_token_ms', 0), 4),
+    })
+    out['request'].update({
+        'decode_prompt_tokens': u.get('prompt_tokens', 0),
+        'max_tokens': $DECODE_MAX_TOKENS,
+        'completion_tokens': u.get('completion_tokens', 0),
+        'total_tokens': u.get('total_tokens', 0),
+        'cached_tokens': (u.get('prompt_tokens_details') or {}).get('cached_tokens', 0),
+        'cache_n': t.get('cache_n', 0),
+        'predicted_n': t.get('predicted_n', 0),
+        'finish_reason': dd['choices'][0].get('finish_reason'),
+        'truncated': bool(dd['choices'][0].get('finish_reason') == 'length'),
+    })
+
+print(json.dumps(out))
 ")
 
 # MTP runtime capture (only if model is MTP)
@@ -436,8 +474,9 @@ data = {
     'bench_method': 'bench_model.sh v2',
     'config': meta['config'],
     'bench': {
-        'max_tokens': $MAX_TOKENS,
-        'prompt_tokens_requested': $PROMPT_TOKENS,
+        'max_tokens': $DECODE_MAX_TOKENS,
+        'prefill_prompt_tokens': $PROMPT_TOKENS,
+        'decode_prompt_tokens': $DECODE_PROMPT_TOKENS,
         'model_file_size_gb': ${MODEL_FILE_SIZE:-null},
         'build_info': '${BUILD_INFO}',
         'wall_time_s': $WALL_TIME_S,
