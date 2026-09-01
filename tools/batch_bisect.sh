@@ -627,6 +627,7 @@ print(' '.join(str(v) for v in sorted(vals)))
 ")
   BEST_BATCH=$VALIDATED; BEST_SCORE=0
   declare -A SWEEP_RESULTS
+  declare -A FINALIST_SCORES
   SCORE_OF=""
   for B in $CAND_LIST; do
     log ""; log "  Bench candidate batch=$B..."
@@ -658,6 +659,53 @@ else:
     fi
   done
 
+  # ── Flat-field gate: if every GPU-resident candidate scores within the
+  # noise floor (spread ≤ 2% of max), the sweep is selecting noise — batch
+  # has no meaningful throughput effect at this ctx (small-ctx workloads are
+  # decode-dominated; decode does not move with batch). Skip the finalists
+  # and take the LARGEST GPU-resident candidate (the ceiling) for headroom.
+  MAX_SCORE=$(for B in $CAND_LIST; do
+    V="${SWEEP_RESULTS[$B]}"; [ "$V" = "SPILL" ] && continue
+    echo "$V" | cut -d'|' -f3
+  done | python3 -c "
+import sys
+scores = [float(l) for l in sys.stdin if l.strip()]
+print('%.1f' % max(scores)) if scores else print('0')
+")
+  MIN_SCORE=$(for B in $CAND_LIST; do
+    V="${SWEEP_RESULTS[$B]}"; [ "$V" = "SPILL" ] && continue
+    echo "$V" | cut -d'|' -f3
+  done | python3 -c "
+import sys
+scores = [float(l) for l in sys.stdin if l.strip()]
+print('%.1f' % min(scores)) if scores else print('0')
+")
+  if [ "$(echo "$MAX_SCORE > 0" | bc -l)" = "1" ] && [ "$(echo "($MAX_SCORE - $MIN_SCORE) / $MAX_SCORE <= 0.02" | bc -l)" = "1" ]; then
+    # largest GPU-resident candidate (CAND_LIST is ascending → scan from the end)
+    LARGEST_RESIDENT=""
+    for B in $(echo "$CAND_LIST" | tr ' ' '\n' | sort -rn); do
+      V="${SWEEP_RESULTS[$B]}"
+      [ "$V" = "SPILL" ] && continue
+      LARGEST_RESIDENT=$B; break
+    done
+    if [ -n "$LARGEST_RESIDENT" ]; then
+      VALIDATED=$LARGEST_RESIDENT
+      V="${SWEEP_RESULTS[$VALIDATED]}"
+      BEST_SCORE=$(echo "$V" | cut -d'|' -f3)
+      log ""; log "  Flat field: scores tied within 2% (max=${MAX_SCORE}, min=${MIN_SCORE}, spread=$(python3 -c "print('%.1f' % (($MAX_SCORE - $MIN_SCORE) / $MAX_SCORE * 100))")%)"
+      log "  → skipping finalists, taking largest GPU-resident batch=$VALIDATED (headroom at zero throughput cost)"
+      set_batch "$VALIDATED"
+      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (score=$BEST_SCORE, flat field — noise floor) ***"
+      log ""; log "=== RESULT ==="
+      log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
+      log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
+      log "  flat-field: scores tied (noise floor) — largest GPU-resident batch kept"
+      log ""; log "  Next: run bench_model.sh $MODEL"
+      log "=== DONE ==="
+      exit 0
+    fi
+  fi
+
   # ── Re-verify top-2 finalists with 3x repeats (average score) ──
   log ""; log "  Finalists: re-verifying top candidates 3x..."
   # Rank candidates by sweep score, skipping SPILL entries (feed "batch score" via stdin)
@@ -679,7 +727,7 @@ print(' '.join(order[:2]))
 ")
   for B in $TOP2; do
     SUM_SCORE=0; RUNS=0; SPILL_COUNT=0
-    for r in 1 2; do
+    for r in 1 2 3; do
       log "    Finalist batch=$B run $r..."
       set_batch "$B"; restart
       SCORE_OF=$(measure_speed)
@@ -705,12 +753,24 @@ print('%.1f' % ($SUM_SCORE + s))
     fi
     AVG=$(python3 -c "print('%.1f' % ($SUM_SCORE / $RUNS))")
     log "    Finalist batch=$B avg score=$AVG ($RUNS clean runs, $SPILL_COUNT spilled)"
-    if [ "$(echo "$AVG > $BEST_SCORE" | bc -l)" = "1" ]; then
-      BEST_SCORE=$AVG; BEST_BATCH=$B
-    fi
+    FINALIST_SCORES[$B]="$AVG"
   done
 
+  # Winner = the finalist with the highest AVERAGED re-run score (direct
+  # comparison — not vs the single-run sweep score). Fall back to the sweep
+  # best only if every finalist spilled.
   VALIDATED=$BEST_BATCH
+  if [ ${#FINALIST_SCORES[@]} -gt 0 ]; then
+    BEST_SCORE=0
+    for B in $TOP2; do
+      AVG="${FINALIST_SCORES[$B]:-}"
+      [ -z "$AVG" ] && continue
+      if [ "$(echo "$AVG > $BEST_SCORE" | bc -l)" = "1" ]; then
+        BEST_SCORE=$AVG; VALIDATED=$B
+      fi
+    done
+  fi
+  set_batch "$VALIDATED"
   log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (score=$BEST_SCORE) ***"
 
   log ""; log "=== RESULT ==="
