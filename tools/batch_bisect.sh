@@ -660,7 +660,7 @@ else:
   done
 
   # ── Flat-field gate: if every GPU-resident candidate scores within the
-  # noise floor (spread ≤ 2% of max), the sweep is selecting noise — batch
+  # noise floor (spread ≤ 3% of max), the sweep is selecting noise — batch
   # has no meaningful throughput effect at this ctx (small-ctx workloads are
   # decode-dominated; decode does not move with batch). Skip the finalists
   # and take the LARGEST GPU-resident candidate (the ceiling) for headroom.
@@ -680,7 +680,7 @@ import sys
 scores = [float(l) for l in sys.stdin if l.strip()]
 print('%.1f' % min(scores)) if scores else print('0')
 ")
-  if [ "$(echo "$MAX_SCORE > 0" | bc -l)" = "1" ] && [ "$(echo "($MAX_SCORE - $MIN_SCORE) / $MAX_SCORE <= 0.02" | bc -l)" = "1" ]; then
+  if [ "$(echo "$MAX_SCORE > 0" | bc -l)" = "1" ] && [ "$(echo "($MAX_SCORE - $MIN_SCORE) / $MAX_SCORE <= 0.03" | bc -l)" = "1" ]; then
     # largest GPU-resident candidate (CAND_LIST is ascending → scan from the end)
     LARGEST_RESIDENT=""
     for B in $(echo "$CAND_LIST" | tr ' ' '\n' | sort -rn); do
@@ -757,8 +757,9 @@ print('%.1f' % ($SUM_SCORE + s))
   done
 
   # Winner = the finalist with the highest AVERAGED re-run score (direct
-  # comparison — not vs the single-run sweep score). Fall back to the sweep
-  # best only if every finalist spilled.
+  # comparison — not vs the single-run sweep score). On an equal average, the
+  # LARGER batch wins (headroom at zero throughput cost). Fall back to the
+  # sweep best only if every finalist spilled.
   VALIDATED=$BEST_BATCH
   if [ ${#FINALIST_SCORES[@]} -gt 0 ]; then
     BEST_SCORE=0
@@ -767,6 +768,8 @@ print('%.1f' % ($SUM_SCORE + s))
       [ -z "$AVG" ] && continue
       if [ "$(echo "$AVG > $BEST_SCORE" | bc -l)" = "1" ]; then
         BEST_SCORE=$AVG; VALIDATED=$B
+      elif [ "$(echo "$AVG == $BEST_SCORE" | bc -l)" = "1" ] && [ "$B" -gt "$VALIDATED" ]; then
+        VALIDATED=$B
       fi
     done
   fi
