@@ -170,9 +170,14 @@ tiny_probe() {
   return $?
 }
 
-# Measure chars-per-token ratio for this model (also warms the model up)
+# Measure chars-per-token ratio for this model (also warms the model up).
+# Cached after the first successful measurement — reused across all phases/candidates.
 CHARS_PER_TOK=0
 measure_ratio() {
+  # skip the probe if we already have a cached ratio
+  if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
+    return 0
+  fi
   local MEASURE_CHARS=2000
   python3 -c "
 import json
@@ -555,16 +560,13 @@ else:
   VALIDATED=$LO
   log "  Refined lo=$LO — max batch passing tiny probe AND saturation"
 
-  # ── VERIFY: fresh-restart saturation confirm ──
-  log ""; log "=== VERIFYING BATCH $VALIDATED (saturation confirm) ==="
+  # ── FINAL CONFIRM (winner already passed saturation in the gated bisect;
+  #    this fresh-restart run is the single re-confirm) ──
+  log ""; log "=== FINAL CONFIRM (batch=$VALIDATED) ==="
   set_batch "$VALIDATED"; restart
   PASS=0
-  if saturation_test; then PASS=1; log "  Verify: PASS"; else log "  Verify: FAIL"; fi
-
-  # ── PHASE 3: FINAL CONFIRM + bracketed fallback ──
-  log ""; log "=== PHASE 3: SATURATION CONFIRM (batch=$VALIDATED) ==="
-  set_batch "$VALIDATED"; restart
   if saturation_test; then
+    PASS=1
     log "  *** VALIDATED batch=$VALIDATED ***"
   else
     # Bracketed halve-down + bisect (O(log) — replaces the -64 grind)
@@ -583,6 +585,7 @@ else:
       if saturation_test; then LO=$MID; else HI=$MID; fi
     done
     VALIDATED=$LO
+    PASS=1
     log "  *** Saturation-validated batch=$VALIDATED (bracketed search) ***"
   fi
 
@@ -656,7 +659,7 @@ print(' '.join(order[:2]))
 ")
   for B in $TOP2; do
     SUM_SCORE=0; RUNS=0; SPILL_COUNT=0
-    for r in 1 2 3; do
+    for r in 1 2; do
       log "    Finalist batch=$B run $r..."
       set_batch "$B"; restart
       SCORE_OF=$(measure_speed)
