@@ -404,21 +404,12 @@ except: print(0)
 saturation_test() {
   local CTX=$1
   local MAX_TOK=$(python3 -c "print(int($CTX * 0.5))")
-  local TARGET_TOK=$(python3 -c "print(int($CTX * 0.85))")
-  local SAT_SIZE=0
+  local SAT_SIZE=$(python3 -c "print(int($CTX * 4.0))")   # deliberate overshoot (~1.4× ctx tokens)
   local ATTEMPT=1
-  local TARGET_PREFILL=$(python3 -c "print(int($CTX * 0.85))")
+  local MAX_ATTEMPTS=20
+  log "  Saturation: overshoot prompt ~${SAT_SIZE} chars (~ctx×4), max_tokens=$MAX_TOK"
 
-  measure_ratio || true
-  if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
-    SAT_SIZE=$(python3 -c "print(int($TARGET_TOK * $CHARS_PER_TOK))")
-    log "  Saturation: target ~${TARGET_TOK} tokens (85% of ctx), prompt ~${SAT_SIZE} chars, max_tokens=$MAX_TOK"
-  else
-    SAT_SIZE=$(python3 -c "print(int($CTX * 2.5))")
-    log "  Saturation: fallback prompt ~${SAT_SIZE} chars, max_tokens=$MAX_TOK"
-  fi
-
-  while [ "$ATTEMPT" -le 4 ]; do
+  while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
     python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
@@ -447,14 +438,15 @@ print(f'  Payload: {len(json.dumps(payload))} bytes')
     done
     wait $FIRE_PID 2>/dev/null || true
 
+    # Overshoot → rejected. Shrink and retry (fail fast, try again).
     if grep -q "exceeds the available context" /tmp/sat_response.json 2>/dev/null; then
-      log "  Prompt too large — shrinking 10% (attempt $ATTEMPT)"
       SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * 0.9))")
+      log "  Saturation: overshoot rejected (attempt $ATTEMPT) — shrinking prompt to ~${SAT_SIZE} chars"
       ATTEMPT=$((ATTEMPT + 1))
       continue
     fi
 
-    # Check for OOM (true VRAM failure)
+    # True VRAM failure
     local OOM=$(oom_count_since_mark)
     if [ "$OOM" -gt 0 ]; then
       log "  Saturation: OOM"
@@ -462,16 +454,14 @@ print(f'  Payload: {len(json.dumps(payload))} bytes')
       return 1
     fi
 
-    # Read actual prefill + completion from the response
+    # Accepted — read actual prefill + completion
     local PT CT
     read -r PT CT < <(python3 -c "
 import json
 d = json.load(open('/tmp/sat_response.json'))
 if 'choices' in d:
     u = d.get('usage', {})
-    pt = u.get('prompt_tokens', 0) or 0
-    ct = u.get('completion_tokens', 0) or 0
-    print(pt, ct)
+    print(u.get('prompt_tokens', 0) or 0, u.get('completion_tokens', 0) or 0)
 else:
     print('FAIL')
 " 2>/dev/null)
@@ -480,30 +470,20 @@ else:
       return 3
     fi
 
-    # Scale the prefill if it fell short of 85% target
-    if [ "$PT" -lt "$TARGET_PREFILL" ] 2>/dev/null; then
-      SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * $TARGET_PREFILL / $PT))")
-      log "  Saturation: prefill reached ${PT} tokens (target ${TARGET_PREFILL}) — scaling prompt ${ATTEMPT}"
-      ATTEMPT=$((ATTEMPT + 1))
-      continue
-    fi
-
-    # Prefill reached 85%+ — now verify compaction: pt + ct >= ctx
+    # Compaction reached → PASS. Accepted prefill is ~90% ctx, so with
+    # max_tokens=50%ctx this is essentially guaranteed once accepted.
     if [ $((PT + CT)) -ge "$CTX" ]; then
       log "  Saturation: PASS (prompt_tokens=${PT}, completion_tokens=${CT}, total=$((PT+CT)), ctx=${CTX})"
       return 0
     fi
 
-    # If prefill reached 85%+ but total < ctx: max_tokens wasn't enough.
-    # With MAX_TOK=20% of CTX, 85%+20% > 100% always — this branch is
-    # mathematically unreachable under normal conditions. If hit, the only
-    # remedy is growing the prefill slightly and retrying.
-    SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * $TARGET_PREFILL / $PT))")
-    log "  Saturation: prefill=${PT} but total=$((PT+CT)) < ctx=${CTX} — growing prompt (attempt $ATTEMPT)"
-    ATTEMPT=$((ATTEMPT + 1))
+    # Accepted but no compaction → we undershot badly (pt < 50% ctx). Should
+    # not happen given overshoot-shrink lands ~90%. Treat as sizing failure.
+    log "  Saturation: accepted but no compaction (pt=${PT}+ct=${CT} < ctx=${CTX})"
+    return 4
   done
 
-  log "  Saturation: FAIL — could not reach compaction in $ATTEMPT attempts"
+  log "  Saturation: FAIL — never accepted in $MAX_ATTEMPTS attempts"
   return 4
 }
 
