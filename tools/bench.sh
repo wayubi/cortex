@@ -451,21 +451,15 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
     local OOM=$(oom_count_since_mark)
     if [ "$OOM" -gt 0 ]; then log "  Saturation: OOM"; return 1; fi
 
-    # Capture prefill t/s from Phase 1 sizing: the line with the MOST tokens
-    # in the log window = the ~99% prefill (the real throughput measurement).
-    PREFILL_TPS_RAW=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
-      | grep "prompt eval time" | python3 -c "
-import sys, re
-best_tok = 0; best_tps = 0
-for line in sys.stdin:
-    m = re.search(r'prompt eval time = .+? / (\d+) tokens .+? (\d+[\d.]*) tokens per second', line)
-    if m:
-        tok = int(m.group(1)); tps = float(m.group(2))
-        if tok > best_tok: best_tok = tok; best_tps = tps
-print('%.1f' % best_tps if best_tok > 0 else '')
-" 2>/dev/null)
-    if [ -n "$PREFILL_TPS_RAW" ]; then
-      SAT_PREFILL_TPS="$PREFILL_TPS_RAW"
+    # Capture prefill t/s ONLY from the first accepted sizing probe. The first
+    # accepted request is from-scratch (no KV cache yet); later sizing probes and
+    # Phase 2 reuse LCP cache and prefill only a delta (not representative).
+    if [ -z "$SAT_PREFILL_TPS" ]; then
+      PREFILL_TPS_RAW=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+        | grep "prompt eval time" | grep -oE "[0-9.]+ tokens per second" | awk '{print $1}')
+      if [ -n "$PREFILL_TPS_RAW" ]; then
+        SAT_PREFILL_TPS="$PREFILL_TPS_RAW"
+      fi
     fi
 
     local PT CT
@@ -793,24 +787,24 @@ residency_descend() {
 # Doubling ladder from 256, each rung measured via full saturation_test (99% ctx prefill).
 # Captures prefill t/s per rung from the llama-cpp log. Stops on >15% drop below best.
 # Bisects between peak rung and drop-off rung down to 64 granularity.
-# Echoes winning batch (stdout). Progress → stderr.
+# Outputs "BATCH|TPS" to stdout (clean capture). Progress → stderr.
 cpu_saturation_sweep() {
   local CTX=$1
-  local BEST_TPS=0 BEST_BATCH=256 DROP_LO=0 DROP_HI=0
+  local BEST_TPS=0 BEST_BATCH=256 DROP_HI=0
   local B=256
 
-  log ""; log "=== CPU SATURATION SWEEP (ctx=$CTX) ==="
+  log "=== CPU SATURATION SWEEP (ctx=$CTX) ===" >&2
 
   # ── Ladder: doubling from 256 ──
-  log "  Ladder: doubling from 256..."
+  log "  Ladder: doubling from 256..." >&2
   while [ "$B" -le "$CTX" ]; do
-    log "  Testing batch=$B..."
+    log "  Testing batch=$B..." >&2
     set_batch "$B" >&2; restart >&2
     saturation_test "$CTX" >&2
     local S_RC=$?
-    if [ "$S_RC" -eq 2 ]; then log "  STALL — aborting sweep"; echo "$BEST_BATCH"; return 0; fi
+    if [ "$S_RC" -eq 2 ]; then log "  STALL — aborting sweep" >&2; set_batch "$BEST_BATCH"; echo "$BEST_BATCH|$BEST_TPS"; return 0; fi
     if [ "$S_RC" -eq 1 ]; then
-      log "  OOM at batch=$B — can't use this level"
+      log "  OOM at batch=$B — can't use this level" >&2
       break  # B is the hard VRAM bound, can't climb further
     fi
     local TPS=${SAT_PREFILL_TPS:-0}
@@ -820,8 +814,8 @@ cpu_saturation_sweep() {
     fi
     # Stop if TPS dropped >15% below best (noise-tolerant)
     if [ "$B" -gt 256 ] && [ "$BEST_TPS" -gt 0 ] 2>/dev/null && python3 -c "exit(0 if $TPS < $BEST_TPS * 0.85 else 1)" 2>/dev/null; then
-      log "  Drop-off: ${TPS} t/s at batch=$B is >15% below best ${BEST_TPS} t/s at batch=$BEST_BATCH"
-      DROP_HI=$B; DROP_LO=$BEST_BATCH
+      log "  Drop-off: ${TPS} t/s at batch=$B is >15% below best ${BEST_TPS} t/s at batch=$BEST_BATCH" >&2
+      DROP_HI=$B
       break
     fi
     B=$((B * 2))
@@ -829,13 +823,13 @@ cpu_saturation_sweep() {
 
   # If ladder never found a drop-off, winner is already BEST_BATCH
   if [ "$DROP_HI" -eq 0 ]; then
-    log "  No drop-off seen — best is batch=$BEST_BATCH (${BEST_TPS} t/s)"
-    log "  Winner: batch=$BEST_BATCH" >&2
-    echo "$BEST_BATCH"
+    log "  No drop-off seen — best is batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+    set_batch "$BEST_BATCH"
+    echo "$BEST_BATCH|$BEST_TPS"
     return 0
   fi
 
-  log "  Peak region: batch=$BEST_BATCH (${BEST_TPS} t/s) — bisecting down to 64..."
+  log "  Peak region: batch=$BEST_BATCH (${BEST_TPS} t/s) — bisecting down to 64..." >&2
   local LO=$BEST_BATCH HI=$DROP_HI
 
   # ── Bisect: bracketed max-search, granularity=64 ──
@@ -845,13 +839,13 @@ cpu_saturation_sweep() {
     [ "$MID" -ge "$HI" ] && MID=$((HI - 64))
     [ "$MID" -le "$LO" ] && break; [ "$MID" -ge "$HI" ] && break
 
-    log "  Bisect: testing batch=$MID (lo=$LO, hi=$HI, gap=$((HI-LO)))..."
+    log "  Bisect: testing batch=$MID (lo=$LO, hi=$HI, gap=$((HI-LO)))..." >&2
     set_batch "$MID" >&2; restart >&2
     saturation_test "$CTX" >&2
     local B_RC=$?
-    if [ "$B_RC" -eq 2 ]; then log "  STALL — aborting bisect"; break; fi
+    if [ "$B_RC" -eq 2 ]; then log "  STALL — aborting bisect" >&2; break; fi
     if [ "$B_RC" -eq 1 ]; then
-      log "  OOM at batch=$MID — narrowing downward"
+      log "  OOM at batch=$MID — narrowing downward" >&2
       HI=$MID; continue
     fi
     local TPS=${SAT_PREFILL_TPS:-0}
@@ -865,7 +859,8 @@ cpu_saturation_sweep() {
   done
 
   log "  Bisect done — best batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
-  echo "$BEST_BATCH"
+  set_batch "$BEST_BATCH"
+  echo "$BEST_BATCH|$BEST_TPS"
 }
 
 # ── MTP capability detection (try-it-and-see) ──────────────
@@ -1228,9 +1223,12 @@ cmd_bisect() {
   fi
   if [ "$R_FIT" = "CPU" ]; then
     log "  CPU-compute at batch 256 — skipping ceiling search, running saturation sweep"
-    local WIN
-    WIN=$(cpu_saturation_sweep "$CTX")
-    local WIN_TPS=${SAT_PREFILL_TPS:-unknown}
+    local SWEEP_OUT
+    SWEEP_OUT=$(cpu_saturation_sweep "$CTX")
+    local WIN WIN_TPS
+    WIN=$(echo "$SWEEP_OUT" | cut -d'|' -f1)
+    WIN_TPS=$(echo "$SWEEP_OUT" | cut -d'|' -f2)
+    [ -z "$WIN" ] && WIN="$SWEEP_OUT"  # fallback if no pipe present
     set_batch "$WIN"
     local VALIDATED=$WIN PASS=1 CANDIDATES=0
     log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$WIN (${WIN_TPS} t/s, CPU-compute, fastest prefill) ***"
