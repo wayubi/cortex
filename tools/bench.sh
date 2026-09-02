@@ -403,28 +403,28 @@ except: print(0)
 
 saturation_test() {
   local CTX=$1
-  local MAX_TOK=$(python3 -c "print(int($CTX * 0.5))")
-  local SAT_SIZE=$(python3 -c "print(int($CTX * 4.0))")   # deliberate overshoot (~1.4× ctx tokens)
+  local MAX_TOK=$(python3 -c "print(int($CTX * 0.5))")        # real saturation decode cap
+  local MEASURE_TOK=1                                          # cheap sizing decode cap
+  local TARGET=$(python3 -c "print(int($CTX * 0.99))")         # prefill goal = 99% of ctx
+  local SAT_SIZE=$(python3 -c "print(int($CTX * 4.0))")        # deliberate overshoot
   local ATTEMPT=1
-  local MAX_ATTEMPTS=20
-  log "  Saturation: overshoot prompt ~${SAT_SIZE} chars (~ctx×4), max_tokens=$MAX_TOK"
+  local MAX_ATTEMPTS=15
+  log "  Saturation: prefill target ~${TARGET} tokens (99% ctx), overshoot start ~${SAT_SIZE} chars"
 
+  # ---- Phase 1: cheap sizing (max_tokens=1) — discover ratio, land near 99% ctx ----
   while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
     python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
 SAT_SIZE = $SAT_SIZE
 prompt = (filler * ((SAT_SIZE // len(filler)) + 1))[:SAT_SIZE]
-payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':$MAX_TOK,'ignore_eos':True}
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':$MEASURE_TOK,'ignore_eos':True}
 with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
-print(f'  Payload: {len(json.dumps(payload))} bytes')
 "
-    fire_request /tmp/sat_payload.json /tmp/sat_response.json "saturation" "$(adaptive_timeout $MAX_TOK)"
+    fire_request /tmp/sat_payload.json /tmp/sat_response.json "sat-size" "$(adaptive_timeout $MEASURE_TOK)"
     local RC=$?
     if [ "$RC" -eq 2 ]; then return 2; fi
 
-    # OOM watchdog: kill early if the log shows an OOM marker (dead-child/router
-    # cleanup can otherwise stall the request for ~10s+)
     local WATCH=0
     while kill -0 $FIRE_PID 2>/dev/null; do
       if [ "$(oom_count_since_mark)" -gt 0 ]; then
@@ -441,20 +441,14 @@ print(f'  Payload: {len(json.dumps(payload))} bytes')
     # Overshoot → rejected. Shrink and retry (fail fast, try again).
     if grep -q "exceeds the available context" /tmp/sat_response.json 2>/dev/null; then
       SAT_SIZE=$(python3 -c "print(int($SAT_SIZE * 0.9))")
-      log "  Saturation: overshoot rejected (attempt $ATTEMPT) — shrinking prompt to ~${SAT_SIZE} chars"
+      log "  Saturation: overshoot rejected (attempt $ATTEMPT) — shrinking to ~${SAT_SIZE} chars"
       ATTEMPT=$((ATTEMPT + 1))
       continue
     fi
 
-    # True VRAM failure
     local OOM=$(oom_count_since_mark)
-    if [ "$OOM" -gt 0 ]; then
-      log "  Saturation: OOM"
-      oom_since_mark | tail -2 | tee -a "$LOG_FILE"
-      return 1
-    fi
+    if [ "$OOM" -gt 0 ]; then log "  Saturation: OOM"; return 1; fi
 
-    # Accepted — read actual prefill + completion
     local PT CT
     read -r PT CT < <(python3 -c "
 import json
@@ -470,20 +464,66 @@ else:
       return 3
     fi
 
-    # Compaction reached → PASS. Accepted prefill is ~90% ctx, so with
-    # max_tokens=50%ctx this is essentially guaranteed once accepted.
-    if [ $((PT + CT)) -ge "$CTX" ]; then
-      log "  Saturation: PASS (prompt_tokens=${PT}, completion_tokens=${CT}, total=$((PT+CT)), ctx=${CTX})"
-      return 0
+    # Rescale toward 99% of ctx using the measured ratio; stop when already close.
+    local NEW_SAT=$(python3 -c "print(int($SAT_SIZE * $TARGET / $PT))")
+    log "  Saturation: measured prefill ${PT} (attempt $ATTEMPT) — rescaling to ${NEW_SAT} chars"
+    if [ $((NEW_SAT - SAT_SIZE)) -lt $((SAT_SIZE / 50)) ] && [ $((NEW_SAT - SAT_SIZE)) -gt -$((SAT_SIZE / 50)) ]; then
+      SAT_SIZE=$NEW_SAT
+      break
     fi
-
-    # Accepted but no compaction → we undershot badly (pt < 50% ctx). Should
-    # not happen given overshoot-shrink lands ~90%. Treat as sizing failure.
-    log "  Saturation: accepted but no compaction (pt=${PT}+ct=${CT} < ctx=${CTX})"
-    return 4
+    SAT_SIZE=$NEW_SAT
+    ATTEMPT=$((ATTEMPT + 1))
   done
 
-  log "  Saturation: FAIL — never accepted in $MAX_ATTEMPTS attempts"
+  # ---- Phase 2: real saturation (max_tokens=50% ctx) — ~99% prefill + ~1% decode ----
+  python3 -c "
+import json
+filler = 'The history of computing is long and complex. '
+SAT_SIZE = $SAT_SIZE
+prompt = (filler * ((SAT_SIZE // len(filler)) + 1))[:SAT_SIZE]
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':$MAX_TOK,'ignore_eos':True}
+with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
+"
+  fire_request /tmp/sat_payload.json /tmp/sat_response.json "saturation" "$(adaptive_timeout $MAX_TOK)"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then return 2; fi
+
+  local WATCH=0
+  while kill -0 $FIRE_PID 2>/dev/null; do
+    if [ "$(oom_count_since_mark)" -gt 0 ]; then
+      log "  Saturation: OOM detected — killing curl"
+      kill $FIRE_PID 2>/dev/null
+      break
+    fi
+    WATCH=$((WATCH + 1))
+    [ $((WATCH % 30)) -eq 0 ] && log "    ...watchdog ${WATCH}x2s (request still running)"
+    sleep 2
+  done
+  wait $FIRE_PID 2>/dev/null || true
+
+  local OOM=$(oom_count_since_mark)
+  if [ "$OOM" -gt 0 ]; then log "  Saturation: OOM"; return 1; fi
+
+  local PT CT
+  read -r PT CT < <(python3 -c "
+import json
+d = json.load(open('/tmp/sat_response.json'))
+if 'choices' in d:
+    u = d.get('usage', {})
+    print(u.get('prompt_tokens', 0) or 0, u.get('completion_tokens', 0) or 0)
+else:
+    print('FAIL')
+" 2>/dev/null)
+  if [ "$PT" = "FAIL" ] || [ -z "$PT" ]; then
+    log "  Saturation: no valid response (model error / 500 / peg-native format)"
+    return 3
+  fi
+
+  if [ $((PT + CT)) -ge "$CTX" ]; then
+    log "  Saturation: PASS (prompt_tokens=${PT}, completion_tokens=${CT}, total=$((PT+CT)), ctx=${CTX})"
+    return 0
+  fi
+  log "  Saturation: accepted but no compaction (pt=${PT}+ct=${CT} < ctx=${CTX})"
   return 4
 }
 
