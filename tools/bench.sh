@@ -409,6 +409,7 @@ saturation_test() {
   local SAT_SIZE=$(python3 -c "print(int($CTX * 4.0))")        # deliberate overshoot
   local ATTEMPT=1
   local MAX_ATTEMPTS=15
+  SAT_PREFILL_TPS=""                                           # global: captured prefill t/s (caller reads)
   log "  Saturation: prefill target ~${TARGET} tokens (99% ctx), overshoot start ~${SAT_SIZE} chars"
 
   # ---- Phase 1: cheap sizing (max_tokens=1) — discover ratio, land near 99% ctx ----
@@ -504,6 +505,19 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then log "  Saturation: OOM"; return 1; fi
 
+  # Capture prefill t/s from the Phase 2 prompt eval time line (last such line
+  # in the log window = the real 99% saturation prefill, not sizing attempts).
+  # NOTE: anchor on "prompt eval time" to avoid grabbing the decode eval line
+  # (which also ends in "tokens per second" but appears AFTER prefill).
+  local PREFILL_TPS_RAW
+  PREFILL_TPS_RAW=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+    | grep "prompt eval time" | tail -1 \
+    | grep -oE "[0-9.]+ tokens per second" | awk '{print $1}')
+  if [ -n "$PREFILL_TPS_RAW" ]; then
+    SAT_PREFILL_TPS="$PREFILL_TPS_RAW"
+    log "  Saturation: prefill t/s=${SAT_PREFILL_TPS}"
+  fi
+
   local PT CT
   read -r PT CT < <(python3 -c "
 import json
@@ -520,7 +534,7 @@ else:
   fi
 
   if [ $((PT + CT)) -ge "$CTX" ]; then
-    log "  Saturation: PASS (prompt_tokens=${PT}, completion_tokens=${CT}, total=$((PT+CT)), ctx=${CTX})"
+    log "  Saturation: PASS (prompt_tokens=${PT}, completion_tokens=${CT}, total=$((PT+CT)), ctx=${CTX}, prefill=${SAT_PREFILL_TPS} t/s)"
     return 0
   fi
   log "  Saturation: accepted but no compaction (pt=${PT}+ct=${CT} < ctx=${CTX})"
@@ -770,188 +784,83 @@ residency_descend() {
   echo "$LO"
 }
 
-# ── Prefill t/s probe (pure prefill measurement) ───────────
-# Fixed ~16K-char prompt (~5K tokens) + max_tokens=1. Measures prefill throughput
-# at the current batch WITHOUT a long decode tail. Must be called after set_batch+restart.
-# Echoes prefill_t_s to stdout (0 on failure). Progress → stderr.
-prefill_probe() {
-  local PREFILL_CHARS=16000
-  python3 -c "
-import json
-filler = 'The history of computing is long and complex. '
-n = $PREFILL_CHARS
-prompt = (filler * ((n // len(filler)) + 1))[:n]
-payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
-with open('/tmp/prefill_probe_payload.json','w') as f: json.dump(payload, f)
-"
-  # Warm-up: first request triggers cold-load (untimed). Discard result.
-  fire_request /tmp/prefill_probe_payload.json /tmp/prefill_probe_warm.json "prefill-warmup" "$(adaptive_timeout 1)"
-  local RC=$?
-  if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
-  while kill -0 $FIRE_PID 2>/dev/null; do
-    if [ "$(oom_count_since_mark)" -gt 0 ]; then kill $FIRE_PID 2>/dev/null; break; fi
-    sleep 2
-  done
-  wait $FIRE_PID 2>/dev/null || true
-  local OOM=$(oom_count_since_mark)
-  if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
+# ── CPU-compute saturation sweep (find fastest prefill batch) ──
+# Doubling ladder from 256, each rung measured via full saturation_test (99% ctx prefill).
+# Captures prefill t/s per rung from the llama-cpp log. Stops on >15% drop below best.
+# Bisects between peak rung and drop-off rung down to 64 granularity.
+# Echoes winning batch (stdout). Progress → stderr.
+cpu_saturation_sweep() {
+  local CTX=$1
+  local BEST_TPS=0 BEST_BATCH=256 DROP_LO=0 DROP_HI=0
+  local B=256
 
-  # Timed: second request — model already warm, measures pure prefill.
-  local T0=$(date +%s%N)
-  fire_request /tmp/prefill_probe_payload.json /tmp/prefill_probe_response.json "prefill-probe" 120
-  RC=$?
-  if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
-  local WATCH=0
-  while kill -0 $FIRE_PID 2>/dev/null; do
-    if [ "$(oom_count_since_mark)" -gt 0 ]; then
-      kill $FIRE_PID 2>/dev/null; break
-    fi
-    WATCH=$((WATCH + 1))
-    [ $((WATCH % 10)) -eq 0 ] && log "    prefill-probe: still running (${WATCH}x2s)" >&2
-    sleep 2
-  done
-  wait $FIRE_PID 2>/dev/null || true
-  local T1=$(date +%s%N)
-  OOM=$(oom_count_since_mark)
-  if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
-  local PT
-  PT=$(python3 -c "
-import json
-d = json.load(open('/tmp/prefill_probe_response.json'))
-if 'usage' in d: print(d['usage'].get('prompt_tokens', 0) or 0)
-elif 'choices' in d: print(d.get('usage', {}).get('prompt_tokens', 0) or 0)
-else: print(0)
-" 2>/dev/null || echo 0)
-  if [ "$PT" -gt 0 ] 2>/dev/null; then
-    python3 -c "print('%.1f' % ($PT / (($T1 - $T0) / 1e9)))" 2>/dev/null || echo "0"
-  else
-    echo "0"
-  fi
-}
+  log ""; log "=== CPU SATURATION SWEEP (ctx=$CTX) ==="
 
-# ── CPU-compute prefill sweep (find fastest prefill batch) ──
-# Coarse doubling ladder from 256 → peak detection → fine +64-rounded refine →
-# top-3 noise re-runs. Echoes the winning batch (stdout). Progress → stderr.
-# No arbitrary cap: ladder stops on 2 consecutive rung declines (peak crossed).
-cpu_prefill_sweep() {
-  local CTX=$1 CEILING=$2
-  local PREFILL_T_FILE=/tmp/cpu_sweep_tps.txt
-  : > "$PREFILL_T_FILE"
-
-  log ""; log "=== CPU PREFILL SWEEP (ctx=$CTX, ceiling=$CEILING) ==="
-
-  # ── Coarse ladder: doubling from 256 ──
-  log "  Coarse ladder (doubling from 256)..."
-  local B=256 PREV_TPS=0 DECLINES=0 COARSE_BEST=256 COARSE_BEST_TPS=0
-  while [ "$B" -le "$CEILING" ]; do
+  # ── Ladder: doubling from 256 ──
+  log "  Ladder: doubling from 256..."
+  while [ "$B" -le "$CTX" ]; do
+    log "  Testing batch=$B..."
     set_batch "$B" >&2; restart >&2
-    local TPS=$(prefill_probe)
-    log "    batch=$B: prefill=${TPS} t/s" >&2
-    echo "$B $TPS" >> "$PREFILL_T_FILE"
-    if [ "$(echo "$TPS > $COARSE_BEST_TPS" | bc -l 2>/dev/null)" = "1" ]; then
-      COARSE_BEST=$B; COARSE_BEST_TPS=$TPS
+    saturation_test "$CTX" >&2
+    local S_RC=$?
+    if [ "$S_RC" -eq 2 ]; then log "  STALL — aborting sweep"; echo "$BEST_BATCH"; return 0; fi
+    if [ "$S_RC" -eq 1 ]; then
+      log "  OOM at batch=$B — can't use this level"
+      break  # B is the hard VRAM bound, can't climb further
     fi
-    if [ "$B" -gt 256 ] && [ "$(echo "$TPS < $PREV_TPS" | bc -l 2>/dev/null)" = "1" ]; then
-      DECLINES=$((DECLINES + 1))
-      if [ "$DECLINES" -ge 2 ]; then
-        log "    2 consecutive declines — peak detected" >&2
-        break
-      fi
-    else
-      DECLINES=0
+    local TPS=${SAT_PREFILL_TPS:-0}
+    log "  batch=$B: prefill=${TPS} t/s" >&2
+    if [ "$S_RC" -eq 0 ] 2>/dev/null && python3 -c "exit(0 if $TPS > $BEST_TPS else 1)" 2>/dev/null; then
+      BEST_TPS=$TPS; BEST_BATCH=$B
     fi
-    PREV_TPS=$TPS
+    # Stop if TPS dropped >15% below best (noise-tolerant)
+    if [ "$B" -gt 256 ] && [ "$BEST_TPS" -gt 0 ] 2>/dev/null && python3 -c "exit(0 if $TPS < $BEST_TPS * 0.85 else 1)" 2>/dev/null; then
+      log "  Drop-off: ${TPS} t/s at batch=$B is >15% below best ${BEST_TPS} t/s at batch=$BEST_BATCH"
+      DROP_HI=$B; DROP_LO=$BEST_BATCH
+      break
+    fi
     B=$((B * 2))
   done
-  log "  Coarse best: batch=$COARSE_BEST (${COARSE_BEST_TPS} t/s)" >&2
 
-  # ── Fine refine: adaptive step in bracket around coarse best ──
-  local C_PREV C_NEXT
-  C_PREV=$(python3 -c "
-vals = []
-with open('$PREFILL_T_FILE') as f:
-    for line in f: vals.append(int(line.split()[0]))
-vals.sort()
-idx = vals.index($COARSE_BEST) if $COARSE_BEST in vals else 0
-print(vals[idx-1] if idx > 0 else max(256, $COARSE_BEST // 2))
-" 2>/dev/null || echo 256)
-  C_NEXT=$(python3 -c "
-vals = []
-with open('$PREFILL_T_FILE') as f:
-    for line in f: vals.append(int(line.split()[0]))
-vals.sort()
-idx = vals.index($COARSE_BEST) if $COARSE_BEST in vals else len(vals)-1
-print(vals[idx+1] if idx < len(vals)-1 else min($CEILING, $COARSE_BEST * 2))
-" 2>/dev/null || echo $((COARSE_BEST * 2)))
+  # If ladder never found a drop-off, winner is already BEST_BATCH
+  if [ "$DROP_HI" -eq 0 ]; then
+    log "  No drop-off seen — best is batch=$BEST_BATCH (${BEST_TPS} t/s)"
+    log "  Winner: batch=$BEST_BATCH" >&2
+    echo "$BEST_BATCH"
+    return 0
+  fi
 
-  local WINDOW=$((C_NEXT - C_PREV))
-  local STEP
-  STEP=$(python3 -c "print(max(128, ((($WINDOW + 7) // 8 + 127) // 128) * 128))")
-  log "  Fine refine: window [$C_PREV, $C_NEXT], step=$STEP" >&2
+  log "  Peak region: batch=$BEST_BATCH (${BEST_TPS} t/s) — bisecting down to 64..."
+  local LO=$BEST_BATCH HI=$DROP_HI
 
-  python3 -c "
-c_prev=$C_PREV; c_next=$C_NEXT; step=$STEP
-candidates = list(range(c_prev, c_next + 1, step))
-if c_next not in candidates: candidates.append(c_next)
-tested = set()
-with open('$PREFILL_T_FILE') as f:
-    for line in f: tested.add(int(line.split()[0]))
-for c in candidates:
-    if c not in tested: print(c)
-" > /tmp/cpu_sweep_fine.txt 2>/dev/null
+  # ── Bisect: bracketed max-search, granularity=64 ──
+  while [ $((HI - LO)) -gt 64 ]; do
+    local MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
+    [ "$MID" -le "$LO" ] && MID=$((LO + 64))
+    [ "$MID" -ge "$HI" ] && MID=$((HI - 64))
+    [ "$MID" -le "$LO" ] && break; [ "$MID" -ge "$HI" ] && break
 
-  while IFS= read -r B; do
-    [ -z "$B" ] && continue
-    set_batch "$B" >&2; restart >&2
-    TPS=$(prefill_probe)
-    log "    batch=$B: prefill=${TPS} t/s" >&2
-    echo "$B $TPS" >> "$PREFILL_T_FILE"
-  done < /tmp/cpu_sweep_fine.txt
-
-  # ── Select top-3 for noise re-runs ──
-  local TOP3
-  TOP3=$(python3 -c "
-data = []
-with open('$PREFILL_T_FILE') as f:
-    for line in f: data.append((int(line.split()[0]), float(line.split()[1])))
-data.sort(key=lambda x: -x[1])
-for b, _ in data[:3]: print(b)
-" 2>/dev/null)
-
-  # ── Noise: top-3 × 3 runs total (1 baseline from sweep + 2 re-runs) ──
-  log "  Noise re-runs: top-3 × 3 runs..." >&2
-  local NOISE_FILE=/tmp/cpu_sweep_noise.txt
-  : > "$NOISE_FILE"
-  for B in $TOP3; do
-    python3 -c "
-with open('$PREFILL_T_FILE') as f:
-    for line in f:
-        b, t = line.split()
-        if int(b) == $B: print(f'{b} {t}')
-" >> "$NOISE_FILE"
-    for r in 2 3; do
-      set_batch "$B" >&2; restart >&2
-      TPS=$(prefill_probe)
-      log "    batch=$B: prefill=${TPS} t/s (run $r)" >&2
-      echo "$B $TPS" >> "$NOISE_FILE"
-    done
+    log "  Bisect: testing batch=$MID (lo=$LO, hi=$HI, gap=$((HI-LO)))..."
+    set_batch "$MID" >&2; restart >&2
+    saturation_test "$CTX" >&2
+    local B_RC=$?
+    if [ "$B_RC" -eq 2 ]; then log "  STALL — aborting bisect"; break; fi
+    if [ "$B_RC" -eq 1 ]; then
+      log "  OOM at batch=$MID — narrowing downward"
+      HI=$MID; continue
+    fi
+    local TPS=${SAT_PREFILL_TPS:-0}
+    log "  batch=$MID: prefill=${TPS} t/s" >&2
+    if [ "$B_RC" -eq 0 ] 2>/dev/null && python3 -c "exit(0 if $TPS > $BEST_TPS else 1)" 2>/dev/null; then
+      BEST_TPS=$TPS; BEST_BATCH=$MID
+      LO=$MID  # advance toward the higher-t/s side
+    else
+      HI=$MID  # decline, narrow downward
+    fi
   done
 
-  # ── Winner: highest mean prefill t/s ──
-  local WINNER
-  WINNER=$(python3 -c "
-from collections import defaultdict
-data = defaultdict(list)
-with open('$NOISE_FILE') as f:
-    for line in f:
-        b, t = line.split()
-        data[int(b)].append(float(t))
-best_b = max(data, key=lambda b: sum(data[b]) / len(data[b]))
-print(best_b)
-" 2>/dev/null)
-
-  log "  Winner: batch=$WINNER (best mean prefill t/s)" >&2
-  echo "$WINNER"
+  log "  Bisect done — best batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+  echo "$BEST_BATCH"
 }
 
 # ── MTP capability detection (try-it-and-see) ──────────────
@@ -1313,42 +1222,20 @@ cmd_bisect() {
     exit 1
   fi
   if [ "$R_FIT" = "CPU" ]; then
-    log "  CPU-compute at batch 256 — skipping ceiling search, running prefill sweep"
+    log "  CPU-compute at batch 256 — skipping ceiling search, running saturation sweep"
     local WIN
-    WIN=$(cpu_prefill_sweep "$CTX" "$CTX")
-    set_batch "$WIN"; restart
-    log "  Confirming saturation at winner batch=$WIN..."
-    saturation_test "$CTX"; local SW_RC=$?
-    if [ "$SW_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
-    if [ "$SW_RC" -eq 0 ]; then
-      local VALIDATED=$WIN PASS=1 CANDIDATES=0
-      set_batch "$VALIDATED"
-      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$WIN (CPU-compute, fastest prefill) ***"
-      log ""; log "=== RESULT ==="
-      log "  batch=$WIN ubatch=$WIN ctx=$CTX"
-      log "  candidates=0 saturation-confirm=$PASS/1"
-      log "  prefill-sweep: CPU-compute detected early, skipped ceiling search"
-      log ""; log "  Next: run bench.sh bench $MODEL"
-      log "=== DONE ==="
-      exit 0
-    fi
-    log "  sweep winner $WIN failed saturation — falling back to batch 256"
-    set_batch 256; restart
-    saturation_test "$CTX"; SW_RC=$?
-    if [ "$SW_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
-    if [ "$SW_RC" -eq 0 ]; then
-      local VALIDATED=256 PASS=1 CANDIDATES=0
-      log ""; log "  *** CPU-COMPUTE CEILING: batch=256 (full-context validated) ***"
-      log ""; log "=== RESULT ==="
-      log "  batch=256 ubatch=256 ctx=$CTX"
-      log "  candidates=0 saturation-confirm=$PASS/1"
-      log "  prefill-sweep failed, batch 256 is the floor"
-      log ""; log "  Next: run bench.sh bench $MODEL"
-      log "=== DONE ==="
-      exit 0
-    fi
-    log "  ERROR: no batch passes saturation on this CPU-compute model"
-    exit 1
+    WIN=$(cpu_saturation_sweep "$CTX")
+    local WIN_TPS=${SAT_PREFILL_TPS:-unknown}
+    set_batch "$WIN"
+    local VALIDATED=$WIN PASS=1 CANDIDATES=0
+    log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$WIN (${WIN_TPS} t/s, CPU-compute, fastest prefill) ***"
+    log ""; log "=== RESULT ==="
+    log "  batch=$WIN ubatch=$WIN ctx=$CTX"
+    log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
+    log "  saturation sweep: CPU-compute detected early, fastest prefill by saturation at 99% ctx"
+    log ""; log "  Next: run bench.sh bench $MODEL"
+    log "=== DONE ==="
+    exit 0
   fi
   log "  GPU/AMBIGUOUS at batch 256 — proceeding with ceiling search"
 
@@ -1537,7 +1424,7 @@ cmd_bisect() {
   # CPU-compute models: prefill sweep finds the fastest batch (prefill varies with batch,
   # decode is batch-invariant). No Phase 4 combined-throughput sweep needed.
   log ""; log "=== RESIDENCY CHECK (batch=$VALIDATED) ==="
-  local R_VERDICT R256 DESC
+  local R_VERDICT DESC
   R_VERDICT=$(residency_probe)
   if [ "$R_VERDICT" = "STALL" ]; then
     log "  residency: STALL — model can't cold-load (network/HF fetch)"
@@ -1558,44 +1445,7 @@ cmd_bisect() {
     fi
     log "  ceiling is GPU-resident — boundary is optimum (prefill monotonic, decode constant)"
   else
-    log "  batch spilled to CPU — checking if 100% GPU is possible at batch 256..."
-    set_batch 256; restart
-    R256=$(residency_probe)
-    if [ "$R256" = "STALL" ]; then
-      log "  residency 256: STALL — model can't cold-load (network/HF fetch)"
-      exit 1
-    fi
-    if [ "$R256" = "CPU" ]; then
-      log "  256 also spilled — CPU-compute model: running prefill sweep"
-      local WIN
-      WIN=$(cpu_prefill_sweep "$CTX" "$VALIDATED")
-      set_batch "$WIN"; restart
-      log "  Confirming saturation at winner batch=$WIN..."
-      saturation_test "$CTX"
-      local SW_RC=$?
-      if [ "$SW_RC" -eq 0 ]; then
-        VALIDATED=$WIN
-        set_batch "$VALIDATED"
-        log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (CPU-compute, fastest prefill) ***"
-        log ""; log "=== RESULT ==="
-        log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-        log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
-        log "  prefill-sweep: fastest batch by prefill t/s (CPU-compute)"
-        log ""; log "  Next: run bench.sh bench $MODEL"
-        log "=== DONE ==="
-        exit 0
-      fi
-      log "  saturation failed at sweep winner — falling back to ceiling $VALIDATED"
-      set_batch "$VALIDATED"; restart
-      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (CPU-compute ceiling) ***"
-      log ""; log "=== RESULT ==="
-      log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-      log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
-      log "  prefill-sweep winner failed saturation — CPU-compute ceiling used"
-      log ""; log "  Next: run bench.sh bench $MODEL"
-      log "=== DONE ==="
-      exit 0
-    fi
+    # Early gate confirmed GPU-capable at 256; ceiling spilled — descend to largest GPU-resident.
     if [ "$VALIDATED" -eq "$CTX" ]; then
       log "  ctx fits but spills — descending to largest GPU-resident batch"
       DESC=$(residency_descend "$CTX")
