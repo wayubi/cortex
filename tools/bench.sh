@@ -783,6 +783,64 @@ residency_descend() {
   echo "$LO"
 }
 
+# ── Short prefill t/s probe (fast, no saturation) ──────────
+# Sends a moderate ~8K-token prefill (max_tokens=1, no decode), waits for the request
+# to complete, then parses the STREAMING "prompt processing" lines from the llama-cpp
+# log (from LOG_MARK forward). Averages the t/s values from the non-warm-up lines.
+# Warm-up: fires an untimed probe first to clear the cold-load, then times the second.
+# Echoes prefill_t_s to stdout. Logs progress to stderr.
+prefill_probe() {
+  local PROBE_CHARS=32000  # ~10K tokens at ~3 chars/token — a few seconds of prefill
+  # Warm-up (untimed): clears cold-load, model loads for the timed probe
+  python3 -c "
+import json
+filler = 'The history of computing is long and complex. '
+n = $PROBE_CHARS
+prompt = (filler * ((n // len(filler)) + 1))[:n]
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
+with open('/tmp/pp_warm.json','w') as f: json.dump(payload, f)
+"
+  fire_request /tmp/pp_warm.json /tmp/pp_warm_out.json "pp-warmup" "$(adaptive_timeout 1)"
+  if [ $FIRE_PID -gt 0 ]; then wait $FIRE_PID 2>/dev/null || true; fi
+
+  # Timed probe: model is warm, same prompt
+  local T0=$(date +%s%N)
+  fire_request /tmp/pp_warm.json /tmp/pp_prefill.json "prefill-probe" "$(adaptive_timeout 1)"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
+  local WATCH=0
+  while kill -0 $FIRE_PID 2>/dev/null; do
+    if [ "$(oom_count_since_mark)" -gt 0 ]; then kill $FIRE_PID 2>/dev/null; break; fi
+    WATCH=$((WATCH + 1))
+    [ $((WATCH % 10)) -eq 0 ] && log "    prefill-probe: still running (${WATCH}x2s)" >&2
+    sleep 2
+  done
+  wait $FIRE_PID 2>/dev/null || true
+  local T1=$(date +%s%N)
+  local OOM=$(oom_count_since_mark)
+  if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
+
+  # Parse STREAMING "prompt processing" lines from LOG_MARK forward.
+  # Each line: "... prompt processing, n_tokens = N, ... t = X.XX s / NNN.NN tokens per second"
+  # Take lines 3-7 (skip first 2 warm-up ramp lines), average the t/s values.
+  local PPMATCH
+  PPMATCH=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+    | grep "prompt processing" \
+    | sed -n '3,7p' \
+    | grep -oE '[0-9]+\.?[0-9]* tokens per second' \
+    | awk '{print $1}' | python3 -c "
+import sys
+vals = [float(l) for l in sys.stdin if l.strip()]
+print('%.1f' % (sum(vals)/len(vals)) if vals else '0')
+")
+  if [ -n "$PPMATCH" ] && [ "$PPMATCH" != "0" ]; then
+    log "  prefill-probe: ${PPMATCH} t/s (${PROBE_CHARS} chars)" >&2
+    echo "$PPMATCH"
+  else
+    echo "0"
+  fi
+}
+
 # ── CPU-compute saturation sweep (find fastest prefill batch) ──
 # Doubling ladder from 256, each rung measured via full saturation_test (99% ctx prefill).
 # Peaks, then golden-section refinement to 64 granularity finds the true fastest batch
@@ -793,20 +851,17 @@ cpu_saturation_sweep() {
   local PTS=/tmp/cpu_sweep_points.txt
   : > "$PTS"
 
-  # Test a single batch via full saturation; append (batch tps) to $PTS.
-  # Echoes tps on stdout. $1 = batch.
+  # Test a single batch via SHORT prefill probe (fast, no saturation).
+  # Warm-up is inside prefill_probe (untimed first request, then timed).
+  # Echoes tps on stdout; appends (batch tps) to $PTS.
   test_rung() {
     local TB=$1
     set_batch "$TB" >&2; restart >&2
-    saturation_test "$CTX" >&2
-    local RC=$?
-    if [ "$RC" -eq 2 ]; then echo "STALL"; return 2; fi
-    if [ "$RC" -eq 1 ]; then echo "OOM"; return 1; fi
-    local TPS=${SAT_PREFILL_TPS:-0}
-    log "  batch=$TB: prefill=${TPS} t/s" >&2
+    local TPS
+    TPS=$(prefill_probe "$CTX")
+    log "  batch=$TB: prefill=${TPS} t/s (short probe)" >&2
     echo "$TB $TPS" >> "$PTS"
     echo "$TPS"
-    return 0
   }
 
   log "=== CPU SATURATION SWEEP (ctx=$CTX) ===" >&2
@@ -938,9 +993,46 @@ print(lo, hi)
     [ $((HI - LO)) -le 64 ] && break
   done
 
-  log "  Golden-section done — winner: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
-  set_batch "$BEST_BATCH"
-  echo "$BEST_BATCH|$BEST_TPS"
+  # ── Confirm: run saturation_test on the top-ranked candidates (99% ctx) ──
+  log "  Short-probe sweep done. Top-ranked candidates:" >&2
+  python3 -c "
+data = []
+with open('$PTS') as f:
+    for line in f: data.append((int(line.split()[0]), float(line.split()[1])))
+data.sort(key=lambda x: -x[1])
+for b, t in data[:5]: print(f'    batch={b}  prefill={t} t/s')
+" >&2 2>/dev/null
+
+  local CONFIRM_BATCH CONFIRM_TPS CONFIRM_FOUND=0
+  while read CONFIRM_BATCH CONFIRM_TPS; do
+    log "  Confirm: saturation_test at batch=$CONFIRM_BATCH..." >&2
+    set_batch "$CONFIRM_BATCH" >&2; restart >&2
+    saturation_test "$CTX" >&2
+    local C_RC=$?
+    if [ "$C_RC" -eq 0 ]; then
+      log "  Confirm PASS at batch=$CONFIRM_BATCH (${CONFIRM_TPS} t/s)" >&2
+      CONFIRM_FOUND=1; break
+    elif [ "$C_RC" -eq 2 ]; then
+      log "  STALL during confirm — aborting" >&2; break
+    else
+      log "  Confirm FAIL at batch=$CONFIRM_BATCH" >&2
+    fi
+  done < <(python3 -c "
+data = []
+with open('$PTS') as f:
+    for line in f: data.append((int(line.split()[0]), float(line.split()[1])))
+data.sort(key=lambda x: -x[1])
+for b, t in data[:3]: print(b, t)
+")
+
+  if [ "$CONFIRM_FOUND" -eq 1 ]; then
+    set_batch "$CONFIRM_BATCH"
+    echo "$CONFIRM_BATCH|$CONFIRM_TPS"
+  else
+    log "  All top candidates failed confirm — keeping fastest (best-effort): batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+    set_batch "$BEST_BATCH"
+    echo "$BEST_BATCH|$BEST_TPS"
+  fi
 }
 
 # ── MTP capability detection (try-it-and-see) ──────────────
