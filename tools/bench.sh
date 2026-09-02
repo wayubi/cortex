@@ -785,80 +785,160 @@ residency_descend() {
 
 # ── CPU-compute saturation sweep (find fastest prefill batch) ──
 # Doubling ladder from 256, each rung measured via full saturation_test (99% ctx prefill).
-# Captures prefill t/s per rung from the llama-cpp log. Stops on >15% drop below best.
-# Bisects between peak rung and drop-off rung down to 64 granularity.
-# Outputs "BATCH|TPS" to stdout (clean capture). Progress → stderr.
+# Peaks, then golden-section refinement to 64 granularity finds the true fastest batch
+# (which may sit between doubling rungs). Outputs "BATCH|TPS" to stdout (clean capture).
+# Progress → stderr. All measured (batch, tps) are kept in /tmp for bracket reconstruction.
 cpu_saturation_sweep() {
   local CTX=$1
-  local BEST_TPS=0 BEST_BATCH=256 DROP_HI=0
-  local B=256
+  local PTS=/tmp/cpu_sweep_points.txt
+  : > "$PTS"
+
+  # Test a single batch via full saturation; append (batch tps) to $PTS.
+  # Echoes tps on stdout. $1 = batch.
+  test_rung() {
+    local TB=$1
+    set_batch "$TB" >&2; restart >&2
+    saturation_test "$CTX" >&2
+    local RC=$?
+    if [ "$RC" -eq 2 ]; then echo "STALL"; return 2; fi
+    if [ "$RC" -eq 1 ]; then echo "OOM"; return 1; fi
+    local TPS=${SAT_PREFILL_TPS:-0}
+    log "  batch=$TB: prefill=${TPS} t/s" >&2
+    echo "$TB $TPS" >> "$PTS"
+    echo "$TPS"
+    return 0
+  }
 
   log "=== CPU SATURATION SWEEP (ctx=$CTX) ===" >&2
 
-  # ── Ladder: doubling from 256 ──
+  # ── Phase 1: doubling ladder, peak-anchored bracket ──
   log "  Ladder: doubling from 256..." >&2
+  local B=256 BEST_TPS=0 BEST_BATCH=256 DESC=0 STOP=0
   while [ "$B" -le "$CTX" ]; do
     log "  Testing batch=$B..." >&2
-    set_batch "$B" >&2; restart >&2
-    saturation_test "$CTX" >&2
-    local S_RC=$?
-    if [ "$S_RC" -eq 2 ]; then log "  STALL — aborting sweep" >&2; set_batch "$BEST_BATCH"; echo "$BEST_BATCH|$BEST_TPS"; return 0; fi
-    if [ "$S_RC" -eq 1 ]; then
+    local TPS
+    TPS=$(test_rung "$B")
+    if [ "$TPS" = "STALL" ]; then log "  STALL — aborting sweep" >&2; break; fi
+    if [ "$TPS" = "OOM" ]; then
       log "  OOM at batch=$B — can't use this level" >&2
-      break  # B is the hard VRAM bound, can't climb further
+      break
     fi
-    local TPS=${SAT_PREFILL_TPS:-0}
-    log "  batch=$B: prefill=${TPS} t/s" >&2
-    if [ "$S_RC" -eq 0 ] 2>/dev/null && python3 -c "exit(0 if $TPS > $BEST_TPS else 1)" 2>/dev/null; then
+    if python3 -c "exit(0 if $TPS > $BEST_TPS else 1)" 2>/dev/null; then
       BEST_TPS=$TPS; BEST_BATCH=$B
     fi
-    # Stop if TPS dropped >15% below best (noise-tolerant)
-    if [ "$B" -gt 256 ] && [ "$BEST_TPS" -gt 0 ] 2>/dev/null && python3 -c "exit(0 if $TPS < $BEST_TPS * 0.85 else 1)" 2>/dev/null; then
-      log "  Drop-off: ${TPS} t/s at batch=$B is >15% below best ${BEST_TPS} t/s at batch=$BEST_BATCH" >&2
-      DROP_HI=$B
-      break
+    # Descending side confirmed: count consecutive rungs strictly above the peak
+    # that are BELOW the best t/s. Two in a row → past the peak (noise-tolerant).
+    if [ "$B" -gt "$BEST_BATCH" ] 2>/dev/null \
+       && python3 -c "exit(0 if $TPS < $BEST_TPS else 1)" 2>/dev/null; then
+      DESC=$((DESC + 1))
+      if [ "$DESC" -ge 2 ]; then
+        log "  Descending side confirmed past peak batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+        STOP=1; break
+      fi
+    else
+      DESC=0
     fi
     B=$((B * 2))
   done
 
-  # If ladder never found a drop-off, winner is already BEST_BATCH
-  if [ "$DROP_HI" -eq 0 ]; then
-    log "  No drop-off seen — best is batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+  # If we never crossed the peak (monotonic rise to ctx/OOM), best is at the top.
+  if [ "$STOP" -eq 0 ]; then
+    log "  No descent seen — peak is at the tested edge. Best: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
     set_batch "$BEST_BATCH"
     echo "$BEST_BATCH|$BEST_TPS"
     return 0
   fi
 
-  log "  Peak region: batch=$BEST_BATCH (${BEST_TPS} t/s) — bisecting down to 64..." >&2
-  local LO=$BEST_BATCH HI=$DROP_HI
+  # Reconstruct bracket: LO = largest tested rung below the peak, HI = smallest
+  # tested rung above the peak. The true max lives somewhere in [LO, HI].
+  local LO HI
+  read -r LO HI < <(python3 -c "
+pts = []
+with open('$PTS') as f:
+    for line in f:
+        b, t = line.split(); pts.append((int(b), float(t)))
+pts.sort()
+peak = $BEST_BATCH
+lo = hi = None
+for b, t in pts:
+    if b < peak: lo = b
+    elif b == peak: continue
+    elif b > peak and hi is None: hi = b
+# default edges if peak is at an endpoint
+if lo is None: lo = 256
+if hi is None:
+    # no tested rung above peak — use next doubling rung or ctx cap
+    hi = min($CTX, peak * 2)
+print(lo, hi)
+" 2>/dev/null || echo "256 $CTX")
+  [ -z "$LO" ] && LO=256
+  [ -z "$HI" ] && HI=$CTX
+  log "  Peak=$BEST_BATCH (${BEST_TPS} t/s) → golden-section bracket [$LO, $HI]" >&2
 
-  # ── Bisect: bracketed max-search, granularity=64 ──
+  # ── Phase 2: golden-section max-search, granularity=64 ──
+  # Each step reuses one interior point → at most 1 NEW saturation per iteration.
+  # Points already measured (in $PTS) are reused, never re-saturated.
+  local A B2 A_MEAS B2_MEAS
+  # helper: return stored tps if $1 already in $PTS, else "" (means "measure it")
+  lookup_tps() {
+    awk -v b="$1" '$1==b{print $2; exit}' "$PTS" 2>/dev/null
+  }
+
   while [ $((HI - LO)) -gt 64 ]; do
-    local MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
-    [ "$MID" -le "$LO" ] && MID=$((LO + 64))
-    [ "$MID" -ge "$HI" ] && MID=$((HI - 64))
-    [ "$MID" -le "$LO" ] && break; [ "$MID" -ge "$HI" ] && break
+    # Round interior points to 64-multiples, clamped strictly inside (LO, HI).
+    B2=$((HI - (HI - LO) * 382 / 1000)); B2=$((B2 / 64 * 64))
+    A=$((LO + (HI - LO) * 382 / 1000)); A=$((A / 64 * 64))
+    [ "$A" -le "$LO" ] && A=$((LO + 64))
+    [ "$B2" -ge "$HI" ] && B2=$((HI - 64))
+    [ "$B2" -le "$A" ] && B2=$((A + 64))
 
-    log "  Bisect: testing batch=$MID (lo=$LO, hi=$HI, gap=$((HI-LO)))..." >&2
-    set_batch "$MID" >&2; restart >&2
-    saturation_test "$CTX" >&2
-    local B_RC=$?
-    if [ "$B_RC" -eq 2 ]; then log "  STALL — aborting bisect" >&2; break; fi
-    if [ "$B_RC" -eq 1 ]; then
-      log "  OOM at batch=$MID — narrowing downward" >&2
-      HI=$MID; continue
+    # If both interior points are already measured and the bracket can't admit a
+    # new 64-granularity point, we've reached the limit of resolution — stop.
+    A_MEAS=$(lookup_tps "$A")
+    B2_MEAS=$(lookup_tps "$B2")
+    if [ -n "$A_MEAS" ] && [ -n "$B2_MEAS" ]; then
+      log "  No new 64-granularity point between $LO and $HI — stopping golden-section" >&2
+      break
     fi
-    local TPS=${SAT_PREFILL_TPS:-0}
-    log "  batch=$MID: prefill=${TPS} t/s" >&2
-    if [ "$B_RC" -eq 0 ] 2>/dev/null && python3 -c "exit(0 if $TPS > $BEST_TPS else 1)" 2>/dev/null; then
-      BEST_TPS=$TPS; BEST_BATCH=$MID
-      LO=$MID  # advance toward the higher-t/s side
+
+    # Measure whichever interior point(s) are not yet in $PTS.
+    if [ -z "$A_MEAS" ]; then
+      log "  Golden: testing A=$A (lo=$LO, hi=$HI)..." >&2
+      A_MEAS=$(test_rung "$A")
+      [ "$A_MEAS" = "STALL" ] && { log "  STALL — aborting sweep" >&2; break; }
     else
-      HI=$MID  # decline, narrow downward
+      log "  Golden: reuse A=$A (${A_MEAS} t/s, already measured)" >&2
     fi
+    if [ -z "$B2_MEAS" ]; then
+      log "  Golden: testing B2=$B2 (lo=$LO, hi=$HI)..." >&2
+      B2_MEAS=$(test_rung "$B2")
+      [ "$B2_MEAS" = "STALL" ] && { log "  STALL — aborting sweep" >&2; break; }
+    else
+      log "  Golden: reuse B2=$B2 (${B2_MEAS} t/s, already measured)" >&2
+    fi
+
+    # OOM interior points count as -inf (never a max).
+    A_MEAS=$(python3 -c "print('$A_MEAS')" 2>/dev/null); [ "$A_MEAS" = "OOM" ] && A_MEAS=-1
+    B2_MEAS=$(python3 -c "print('$B2_MEAS')" 2>/dev/null); [ "$B2_MEAS" = "OOM" ] && B2_MEAS=-1
+
+    # Update overall best from these two candidates (never count -inf/OOM).
+    if [ "$A_MEAS" != "-1" ] 2>/dev/null && python3 -c "exit(0 if $A_MEAS > $BEST_TPS else 1)" 2>/dev/null; then
+      BEST_TPS=$A_MEAS; BEST_BATCH=$A
+    fi
+    if [ "$B2_MEAS" != "-1" ] 2>/dev/null && python3 -c "exit(0 if $B2_MEAS > $BEST_TPS else 1)" 2>/dev/null; then
+      BEST_TPS=$B2_MEAS; BEST_BATCH=$B2
+    fi
+
+    # Narrow toward the higher-t/s side (golden-section rule).
+    if python3 -c "exit(0 if $A_MEAS > $B2_MEAS else 1)" 2>/dev/null; then
+      HI=$B2
+    else
+      LO=$A
+    fi
+    [ $((HI - LO)) -le 64 ] && break
   done
 
-  log "  Bisect done — best batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+  log "  Golden-section done — winner: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
   set_batch "$BEST_BATCH"
   echo "$BEST_BATCH|$BEST_TPS"
 }
