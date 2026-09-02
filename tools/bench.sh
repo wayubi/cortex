@@ -888,7 +888,7 @@ cpu_saturation_sweep() {
   # If we never crossed the peak (monotonic rise to ctx/OOM), best is at the top.
   if [ "$STOP" -eq 0 ]; then
     log "  No descent seen — peak is at the tested edge. Best: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
-    set_batch "$BEST_BATCH"
+    set_batch "$BEST_BATCH" >&2
     echo "$BEST_BATCH|$BEST_TPS"
     return 0
   fi
@@ -1015,11 +1015,10 @@ for b, t in data[:3]: print(b, t)
 ")
 
   if [ "$CONFIRM_FOUND" -eq 1 ]; then
-    set_batch "$CONFIRM_BATCH"
     echo "$CONFIRM_BATCH|$CONFIRM_TPS"
   else
     log "  All top candidates failed confirm — keeping fastest (best-effort): batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
-    set_batch "$BEST_BATCH"
+    set_batch "$BEST_BATCH" >&2
     echo "$BEST_BATCH|$BEST_TPS"
   fi
 }
