@@ -815,18 +815,13 @@ with open('/tmp/pp_timed.json','w') as f: json.dump(payload, f)
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
 
-  # Parse STREAMING "prompt processing" lines from LOG_MARK forward.
-  # Lines 3-7 skip cold-load ramp; average their cumulative t/s.
+  # Parse the "prompt eval time" summary line from LOG_MARK forward.
+  # This line is always emitted (unlike streaming "prompt processing" lines).
+  # Format: "prompt eval time = X ms / N tokens (... Z tokens per second)"
   local PPMATCH
   PPMATCH=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
-    | grep "prompt processing" \
-    | sed -n '3,7p' \
-    | grep -oE '[0-9]+\.?[0-9]* tokens per second' \
-    | awk '{print $1}' | python3 -c "
-import sys
-vals = [float(l) for l in sys.stdin if l.strip()]
-print('%.1f' % (sum(vals)/len(vals)) if vals else '0')
-")
+    | grep "prompt eval time" | tail -1 \
+    | grep -oE '[0-9]+\.?[0-9]* tokens per second' | awk '{print $1}')
   if [ -n "$PPMATCH" ] && [ "$PPMATCH" != "0" ]; then
     log "  prefill-probe: ${PPMATCH} t/s (${PROBE_CHARS} chars)" >&2
     echo "$PPMATCH"
