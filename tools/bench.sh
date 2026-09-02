@@ -1116,11 +1116,11 @@ cmd_bisect() {
     exit 0
   fi
 
-  # ── GPU-FIT CLASSIFICATION (256 low-GPU check) ──
-  # Determine early if the model can run GPU-resident at all. If not (CPU-only),
-  # the bisect finds the batch ceiling using tiny probe only — full-context
-  # saturation is unachievable and the residency gate doesn't apply.
+  # ── GPU-FIT CLASSIFICATION (256 low-GPU check) — DISABLED BY DEFAULT ──
+  # gpt-oss doesn't need the CPU-only path; re-enable if a future model requires it.
+  local DISABLE_CPU_ONLY_CHECK=1
   local IS_CPU_ONLY=0
+  if [ "$DISABLE_CPU_ONLY_CHECK" -eq 0 ]; then
   log ""; log "=== GPU-FIT CHECK (batch=256) ==="
   set_batch 256; restart
   local R_FIT
@@ -1177,6 +1177,7 @@ cmd_bisect() {
       fi
     fi
   fi
+  fi  # end DISABLE_CPU_ONLY_CHECK
 
   # ── PHASE 1: CEILING SEARCH ──
   # Shared ceiling_probe definition (tiny probe + saturation gate).
