@@ -790,22 +790,18 @@ residency_descend() {
 # Warm-up: fires an untimed probe first to clear the cold-load, then times the second.
 # Echoes prefill_t_s to stdout. Logs progress to stderr.
 prefill_probe() {
-  local PROBE_CHARS=32000  # ~10K tokens at ~3 chars/token — a few seconds of prefill
-  # Warm-up (untimed): clears cold-load, model loads for the timed probe
+  local PROBE_CHARS=32000  # ~10K tokens at ~3 chars/token — enough to trigger streaming prefill lines
+  # Single full-length probe: model loads during this request AND produces streaming
+  # prefill lines. Lines 3-7 skip the cold-load ramp → steady-state t/s.
   python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
 n = $PROBE_CHARS
 prompt = (filler * ((n // len(filler)) + 1))[:n]
 payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
-with open('/tmp/pp_warm.json','w') as f: json.dump(payload, f)
+with open('/tmp/pp_timed.json','w') as f: json.dump(payload, f)
 "
-  fire_request /tmp/pp_warm.json /tmp/pp_warm_out.json "pp-warmup" "$(adaptive_timeout 1)"
-  if [ $FIRE_PID -gt 0 ]; then wait $FIRE_PID 2>/dev/null || true; fi
-
-  # Timed probe: model is warm, same prompt
-  local T0=$(date +%s%N)
-  fire_request /tmp/pp_warm.json /tmp/pp_prefill.json "prefill-probe" "$(adaptive_timeout 1)"
+  fire_request /tmp/pp_timed.json /tmp/pp_out.json "prefill-probe" "$(adaptive_timeout 1)"
   local RC=$?
   if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
   local WATCH=0
@@ -816,13 +812,11 @@ with open('/tmp/pp_warm.json','w') as f: json.dump(payload, f)
     sleep 2
   done
   wait $FIRE_PID 2>/dev/null || true
-  local T1=$(date +%s%N)
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
 
   # Parse STREAMING "prompt processing" lines from LOG_MARK forward.
-  # Each line: "... prompt processing, n_tokens = N, ... t = X.XX s / NNN.NN tokens per second"
-  # Take lines 3-7 (skip first 2 warm-up ramp lines), average the t/s values.
+  # Lines 3-7 skip cold-load ramp; average their cumulative t/s.
   local PPMATCH
   PPMATCH=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
     | grep "prompt processing" \
@@ -842,10 +836,10 @@ print('%.1f' % (sum(vals)/len(vals)) if vals else '0')
 }
 
 # ── CPU-compute saturation sweep (find fastest prefill batch) ──
-# Doubling ladder from 256, each rung measured via full saturation_test (99% ctx prefill).
-# Peaks, then golden-section refinement to 64 granularity finds the true fastest batch
-# (which may sit between doubling rungs). Outputs "BATCH|TPS" to stdout (clean capture).
-# Progress → stderr. All measured (batch, tps) are kept in /tmp for bracket reconstruction.
+# Doubling ladder from 256, each rung measured via short prefill_probe.
+# Golden-section refinement to 64 granularity finds the true fastest batch
+# (which may sit between doubling rung siblings). Outputs "BATCH|TPS" to stdout.
+# Then confirms winner via full saturation_test (99% ctx). Progress → stderr.
 cpu_saturation_sweep() {
   local CTX=$1
   local PTS=/tmp/cpu_sweep_points.txt
