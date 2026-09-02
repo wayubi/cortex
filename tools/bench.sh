@@ -770,6 +770,190 @@ residency_descend() {
   echo "$LO"
 }
 
+# ── Prefill t/s probe (pure prefill measurement) ───────────
+# Fixed ~16K-char prompt (~5K tokens) + max_tokens=1. Measures prefill throughput
+# at the current batch WITHOUT a long decode tail. Must be called after set_batch+restart.
+# Echoes prefill_t_s to stdout (0 on failure). Progress → stderr.
+prefill_probe() {
+  local PREFILL_CHARS=16000
+  python3 -c "
+import json
+filler = 'The history of computing is long and complex. '
+n = $PREFILL_CHARS
+prompt = (filler * ((n // len(filler)) + 1))[:n]
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
+with open('/tmp/prefill_probe_payload.json','w') as f: json.dump(payload, f)
+"
+  # Warm-up: first request triggers cold-load (untimed). Discard result.
+  fire_request /tmp/prefill_probe_payload.json /tmp/prefill_probe_warm.json "prefill-warmup" "$(adaptive_timeout 1)"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
+  while kill -0 $FIRE_PID 2>/dev/null; do
+    if [ "$(oom_count_since_mark)" -gt 0 ]; then kill $FIRE_PID 2>/dev/null; break; fi
+    sleep 2
+  done
+  wait $FIRE_PID 2>/dev/null || true
+  local OOM=$(oom_count_since_mark)
+  if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
+
+  # Timed: second request — model already warm, measures pure prefill.
+  local T0=$(date +%s%N)
+  fire_request /tmp/prefill_probe_payload.json /tmp/prefill_probe_response.json "prefill-probe" 120
+  RC=$?
+  if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
+  local WATCH=0
+  while kill -0 $FIRE_PID 2>/dev/null; do
+    if [ "$(oom_count_since_mark)" -gt 0 ]; then
+      kill $FIRE_PID 2>/dev/null; break
+    fi
+    WATCH=$((WATCH + 1))
+    [ $((WATCH % 10)) -eq 0 ] && log "    prefill-probe: still running (${WATCH}x2s)" >&2
+    sleep 2
+  done
+  wait $FIRE_PID 2>/dev/null || true
+  local T1=$(date +%s%N)
+  OOM=$(oom_count_since_mark)
+  if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
+  local PT
+  PT=$(python3 -c "
+import json
+d = json.load(open('/tmp/prefill_probe_response.json'))
+if 'usage' in d: print(d['usage'].get('prompt_tokens', 0) or 0)
+elif 'choices' in d: print(d.get('usage', {}).get('prompt_tokens', 0) or 0)
+else: print(0)
+" 2>/dev/null || echo 0)
+  if [ "$PT" -gt 0 ] 2>/dev/null; then
+    python3 -c "print('%.1f' % ($PT / (($T1 - $T0) / 1e9)))" 2>/dev/null || echo "0"
+  else
+    echo "0"
+  fi
+}
+
+# ── CPU-compute prefill sweep (find fastest prefill batch) ──
+# Coarse doubling ladder from 256 → peak detection → fine +64-rounded refine →
+# top-3 noise re-runs. Echoes the winning batch (stdout). Progress → stderr.
+# No arbitrary cap: ladder stops on 2 consecutive rung declines (peak crossed).
+cpu_prefill_sweep() {
+  local CTX=$1 CEILING=$2
+  local PREFILL_T_FILE=/tmp/cpu_sweep_tps.txt
+  : > "$PREFILL_T_FILE"
+
+  log ""; log "=== CPU PREFILL SWEEP (ctx=$CTX, ceiling=$CEILING) ==="
+
+  # ── Coarse ladder: doubling from 256 ──
+  log "  Coarse ladder (doubling from 256)..."
+  local B=256 PREV_TPS=0 DECLINES=0 COARSE_BEST=256 COARSE_BEST_TPS=0
+  while [ "$B" -le "$CEILING" ]; do
+    set_batch "$B" >&2; restart >&2
+    local TPS=$(prefill_probe)
+    log "    batch=$B: prefill=${TPS} t/s" >&2
+    echo "$B $TPS" >> "$PREFILL_T_FILE"
+    if [ "$(echo "$TPS > $COARSE_BEST_TPS" | bc -l 2>/dev/null)" = "1" ]; then
+      COARSE_BEST=$B; COARSE_BEST_TPS=$TPS
+    fi
+    if [ "$B" -gt 256 ] && [ "$(echo "$TPS < $PREV_TPS" | bc -l 2>/dev/null)" = "1" ]; then
+      DECLINES=$((DECLINES + 1))
+      if [ "$DECLINES" -ge 2 ]; then
+        log "    2 consecutive declines — peak detected" >&2
+        break
+      fi
+    else
+      DECLINES=0
+    fi
+    PREV_TPS=$TPS
+    B=$((B * 2))
+  done
+  log "  Coarse best: batch=$COARSE_BEST (${COARSE_BEST_TPS} t/s)" >&2
+
+  # ── Fine refine: adaptive step in bracket around coarse best ──
+  local C_PREV C_NEXT
+  C_PREV=$(python3 -c "
+vals = []
+with open('$PREFILL_T_FILE') as f:
+    for line in f: vals.append(int(line.split()[0]))
+vals.sort()
+idx = vals.index($COARSE_BEST) if $COARSE_BEST in vals else 0
+print(vals[idx-1] if idx > 0 else max(256, $COARSE_BEST // 2))
+" 2>/dev/null || echo 256)
+  C_NEXT=$(python3 -c "
+vals = []
+with open('$PREFILL_T_FILE') as f:
+    for line in f: vals.append(int(line.split()[0]))
+vals.sort()
+idx = vals.index($COARSE_BEST) if $COARSE_BEST in vals else len(vals)-1
+print(vals[idx+1] if idx < len(vals)-1 else min($CEILING, $COARSE_BEST * 2))
+" 2>/dev/null || echo $((COARSE_BEST * 2)))
+
+  local WINDOW=$((C_NEXT - C_PREV))
+  local STEP
+  STEP=$(python3 -c "print(max(128, ((($WINDOW + 7) // 8 + 127) // 128) * 128))")
+  log "  Fine refine: window [$C_PREV, $C_NEXT], step=$STEP" >&2
+
+  python3 -c "
+c_prev=$C_PREV; c_next=$C_NEXT; step=$STEP
+candidates = list(range(c_prev, c_next + 1, step))
+if c_next not in candidates: candidates.append(c_next)
+tested = set()
+with open('$PREFILL_T_FILE') as f:
+    for line in f: tested.add(int(line.split()[0]))
+for c in candidates:
+    if c not in tested: print(c)
+" > /tmp/cpu_sweep_fine.txt 2>/dev/null
+
+  while IFS= read -r B; do
+    [ -z "$B" ] && continue
+    set_batch "$B" >&2; restart >&2
+    TPS=$(prefill_probe)
+    log "    batch=$B: prefill=${TPS} t/s" >&2
+    echo "$B $TPS" >> "$PREFILL_T_FILE"
+  done < /tmp/cpu_sweep_fine.txt
+
+  # ── Select top-3 for noise re-runs ──
+  local TOP3
+  TOP3=$(python3 -c "
+data = []
+with open('$PREFILL_T_FILE') as f:
+    for line in f: data.append((int(line.split()[0]), float(line.split()[1])))
+data.sort(key=lambda x: -x[1])
+for b, _ in data[:3]: print(b)
+" 2>/dev/null)
+
+  # ── Noise: top-3 × 3 runs total (1 baseline from sweep + 2 re-runs) ──
+  log "  Noise re-runs: top-3 × 3 runs..." >&2
+  local NOISE_FILE=/tmp/cpu_sweep_noise.txt
+  : > "$NOISE_FILE"
+  for B in $TOP3; do
+    python3 -c "
+with open('$PREFILL_T_FILE') as f:
+    for line in f:
+        b, t = line.split()
+        if int(b) == $B: print(f'{b} {t}')
+" >> "$NOISE_FILE"
+    for r in 2 3; do
+      set_batch "$B" >&2; restart >&2
+      TPS=$(prefill_probe)
+      log "    batch=$B: prefill=${TPS} t/s (run $r)" >&2
+      echo "$B $TPS" >> "$NOISE_FILE"
+    done
+  done
+
+  # ── Winner: highest mean prefill t/s ──
+  local WINNER
+  WINNER=$(python3 -c "
+from collections import defaultdict
+data = defaultdict(list)
+with open('$NOISE_FILE') as f:
+    for line in f:
+        b, t = line.split()
+        data[int(b)].append(float(t))
+best_b = max(data, key=lambda b: sum(data[b]) / len(data[b]))
+print(best_b)
+" 2>/dev/null)
+
+  log "  Winner: batch=$WINNER (best mean prefill t/s)" >&2
+  echo "$WINNER"
+}
+
 # ── MTP capability detection (try-it-and-see) ──────────────
 # Snapshots the model's section to a temp file, sets MTP config, restarts, probes.
 # MTP supported = probe succeeds AND log shows MTP engagement.
@@ -1421,16 +1605,10 @@ cmd_bisect() {
     exit 1
   fi
 
-  # ── RESIDENCY GATE: decide if Phase 4 is worth running ──
-  # A fast residency probe on the ceiling answers "GPU-resident or CPU-spilled?",
-  # and a 256 low-GPU check answers "is 100% GPU even possible for this model?".
-  #   ceiling GPU-resident + ceiling == ctx → ctx is the value, no sweep.
-  #   ceiling GPU-resident + ceiling < ctx → Phase 4 finds fastest below (unchanged).
-  #   ceiling spilled + 256 spilled (CPU-compute, e.g. gpt-oss) → 100% GPU impossible,
-  #        take the ceiling, skip Phase 4 entirely.
-  #   ceiling spilled + 256 GPU + ceiling == ctx (e.g. 9B @16384 spills, 2048 GPU) →
-  #        descend to the largest GPU-resident batch, no Phase 4.
-  #   ceiling spilled + 256 GPU + ceiling < ctx → Phase 4 residency filter finds it.
+  # ── RESIDENCY GATE + SELECTION ──
+  # GPU-resident models: use the boundary (largest GPU-resident = max prefill, fast decode).
+  # CPU-compute models: prefill sweep finds the fastest batch (prefill varies with batch,
+  # decode is batch-invariant). No Phase 4 combined-throughput sweep needed.
   log ""; log "=== RESIDENCY CHECK (batch=$VALIDATED) ==="
   local R_VERDICT R256 DESC
   R_VERDICT=$(residency_probe)
@@ -1440,18 +1618,18 @@ cmd_bisect() {
   fi
   if [ "$R_VERDICT" = "GPU" ]; then
     if [ "$VALIDATED" -eq "$CTX" ]; then
-      log "  batch is GPU-resident (100% GPU) — value is ctx, skipping Phase 4"
+      log "  batch is GPU-resident (100% GPU) — value is ctx"
       set_batch "$VALIDATED"
       log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (ctx, GPU-resident) ***"
       log ""; log "=== RESULT ==="
       log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-      log "  candidates=0 saturation-confirm=$PASS/1"
-      log "  residency: ctx passes + GPU-resident — no sweep needed"
+      log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
+      log "  residency: ctx passes + GPU-resident — boundary is optimum"
       log ""; log "  Next: run bench.sh bench $MODEL"
       log "=== DONE ==="
       exit 0
     fi
-    log "  ceiling is GPU-resident — running Phase 4 to find fastest below"
+    log "  ceiling is GPU-resident — boundary is optimum (prefill monotonic, decode constant)"
   else
     log "  batch spilled to CPU — checking if 100% GPU is possible at batch 256..."
     set_batch 256; restart
@@ -1461,13 +1639,32 @@ cmd_bisect() {
       exit 1
     fi
     if [ "$R256" = "CPU" ]; then
-      log "  256 also spilled — CPU-compute model, 100% GPU impossible. Value is ceiling $VALIDATED"
-      set_batch "$VALIDATED"
+      log "  256 also spilled — CPU-compute model: running prefill sweep"
+      local WIN
+      WIN=$(cpu_prefill_sweep "$CTX" "$VALIDATED")
+      set_batch "$WIN"; restart
+      log "  Confirming saturation at winner batch=$WIN..."
+      saturation_test "$CTX"
+      local SW_RC=$?
+      if [ "$SW_RC" -eq 0 ]; then
+        VALIDATED=$WIN
+        set_batch "$VALIDATED"
+        log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (CPU-compute, fastest prefill) ***"
+        log ""; log "=== RESULT ==="
+        log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
+        log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
+        log "  prefill-sweep: fastest batch by prefill t/s (CPU-compute)"
+        log ""; log "  Next: run bench.sh bench $MODEL"
+        log "=== DONE ==="
+        exit 0
+      fi
+      log "  saturation failed at sweep winner — falling back to ceiling $VALIDATED"
+      set_batch "$VALIDATED"; restart
       log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (CPU-compute ceiling) ***"
       log ""; log "=== RESULT ==="
       log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-      log "  candidates=0 saturation-confirm=$PASS/1"
-      log "  residency: CPU-compute model (spills even at 256) — no sweep needed"
+      log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
+      log "  prefill-sweep winner failed saturation — CPU-compute ceiling used"
       log ""; log "  Next: run bench.sh bench $MODEL"
       log "=== DONE ==="
       exit 0
@@ -1485,192 +1682,30 @@ cmd_bisect() {
       log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (largest GPU-resident) ***"
       log ""; log "=== RESULT ==="
       log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-      log "  candidates=0 saturation-confirm=$PASS/1"
+      log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
       log "  residency: ctx spilled, descended to largest 100%-GPU batch"
       log ""; log "  Next: run bench.sh bench $MODEL"
       log "=== DONE ==="
       exit 0
     fi
-    log "  ceiling spilled but 100% GPU possible — running Phase 4 to find largest GPU-resident"
+    log "  ceiling spilled but 100% GPU possible — descending to largest GPU-resident batch"
+    DESC=$(residency_descend "$VALIDATED")
+    local DESC_RC=$?
+    if [ "$DESC_RC" -eq 2 ]; then
+      log "  residency descend: STALL — model can't cold-load (network/HF fetch)"
+      exit 1
+    fi
+    VALIDATED=$DESC
+    log "  Largest GPU-resident batch: $VALIDATED"
   fi
 
-  # ── PHASE 4: PERFORMANCE SWEEP (find fastest batch below the ceiling) ──
-  log ""; log "=== PHASE 4: PERFORMANCE SWEEP (ceiling=$VALIDATED) ==="
-  # Candidate batches: ceiling, /2, /4, /8, /16, floor 2048
-  local CAND_LIST
-  CAND_LIST=$(python3 -c "
-ceiling=$VALIDATED
-vals = set()
-for d in (1, 2, 4, 8, 16):
-    v = (ceiling // d) // 64 * 64
-    if v >= 2048: vals.add(v)
-vals.add(2048)
-print(' '.join(str(v) for v in sorted(vals)))
-")
-  local BEST_BATCH=$VALIDATED BEST_SCORE=0
-  declare -A SWEEP_RESULTS
-  declare -A FINALIST_SCORES
-  local SCORE_OF=""
-  for B in $CAND_LIST; do
-    log ""; log "  Bench candidate batch=$B..."
-    set_batch "$B"; restart
-    SCORE_OF=$(measure_speed "$CTX")
-    local PRE=$(echo "$SCORE_OF" | cut -d'|' -f1)
-    local DEC=$(echo "$SCORE_OF" | cut -d'|' -f2)
-    local AVG_CPU=$(echo "$SCORE_OF" | cut -d'|' -f3)
-    # GPU-residency filter: a candidate that pegs all cores to CPU (avg CPU > 200%)
-    # is inherently slower (documented rationale) — exclude it from winning.
-    # 100-200% is noise and stays eligible.
-    if [ -n "$AVG_CPU" ] && [ "$(echo "$AVG_CPU > 200" | bc -l)" = "1" ]; then
-      log "  batch=$B: SPILL to CPU (avg ${AVG_CPU}%) — EXCLUDED"
-      SWEEP_RESULTS[$B]="SPILL"
-      continue
-    fi
-    # combined throughput: total tokens / total time over a representative workload
-    # (75%-ctx prompt + 4000-token decode), self-weighted by phase duration
-    local SCORE
-    SCORE=$(python3 -c "
-p=$PRE; d=$DEC; pt=$((CTX * 3 / 4)); dt=4000
-if p <= 0 or d <= 0:
-    print('0')
-else:
-    print('%.1f' % ((pt + dt) / (pt/p + dt/d)))
-")
-    SWEEP_RESULTS[$B]="$PRE|$DEC|$SCORE|$AVG_CPU"
-    log "  batch=$B: prefill=${PRE} t/s, decode=${DEC} t/s, cpu=${AVG_CPU}% → score=$SCORE"
-    if [ "$(echo "$SCORE > $BEST_SCORE" | bc -l)" = "1" ]; then
-      BEST_SCORE=$SCORE; BEST_BATCH=$B
-    fi
-  done
-
-  # ── Flat-field gate: if every GPU-resident candidate scores within the
-  # noise floor (spread ≤ 3% of max), the sweep is selecting noise — batch
-  # has no meaningful throughput effect at this ctx (small-ctx workloads are
-  # decode-dominated; decode does not move with batch). Skip the finalists
-  # and take the LARGEST GPU-resident candidate (the ceiling) for headroom.
-  local MAX_SCORE MIN_SCORE
-  MAX_SCORE=$(for B in $CAND_LIST; do
-    V="${SWEEP_RESULTS[$B]}"; [ "$V" = "SPILL" ] && continue
-    echo "$V" | cut -d'|' -f3
-  done | python3 -c "
-import sys
-scores = [float(l) for l in sys.stdin if l.strip()]
-print('%.1f' % max(scores)) if scores else print('0')
-")
-  MIN_SCORE=$(for B in $CAND_LIST; do
-    V="${SWEEP_RESULTS[$B]}"; [ "$V" = "SPILL" ] && continue
-    echo "$V" | cut -d'|' -f3
-  done | python3 -c "
-import sys
-scores = [float(l) for l in sys.stdin if l.strip()]
-print('%.1f' % min(scores)) if scores else print('0')
-")
-  if [ "$(echo "$MAX_SCORE > 0" | bc -l)" = "1" ] && [ "$(echo "($MAX_SCORE - $MIN_SCORE) / $MAX_SCORE <= 0.03" | bc -l)" = "1" ]; then
-    # largest GPU-resident candidate (CAND_LIST is ascending → scan from the end)
-    local LARGEST_RESIDENT=""
-    for B in $(echo "$CAND_LIST" | tr ' ' '\n' | sort -rn); do
-      V="${SWEEP_RESULTS[$B]}"; [ "$V" = "SPILL" ] && continue
-      LARGEST_RESIDENT=$B; break
-    done
-    if [ -n "$LARGEST_RESIDENT" ]; then
-      VALIDATED=$LARGEST_RESIDENT
-      V="${SWEEP_RESULTS[$VALIDATED]}"
-      BEST_SCORE=$(echo "$V" | cut -d'|' -f3)
-      log ""; log "  Flat field: scores tied within 3% (max=${MAX_SCORE}, min=${MIN_SCORE}, spread=$(python3 -c "print('%.1f' % (($MAX_SCORE - $MIN_SCORE) / $MAX_SCORE * 100))")%)"
-      log "  → skipping finalists, taking largest GPU-resident batch=$VALIDATED (headroom at zero throughput cost)"
-      set_batch "$VALIDATED"
-      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (score=$BEST_SCORE, flat field — noise floor) ***"
-      log ""; log "=== RESULT ==="
-      log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-      log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
-      log "  flat-field: scores tied (noise floor) — largest GPU-resident batch kept"
-      log ""; log "  Next: run bench.sh bench $MODEL"
-      log "=== DONE ==="
-      exit 0
-    fi
-  fi
-
-  # ── Re-verify top-2 finalists with 3x repeats (average score) ──
-  log ""; log "  Finalists: re-verifying top candidates 3x..."
-  # Rank candidates by sweep score, skipping SPILL entries (feed "batch score" via stdin)
-  local TOP2
-  TOP2=$(for B in $CAND_LIST; do
-    V="${SWEEP_RESULTS[$B]}"
-    [ "$V" = "SPILL" ] && continue
-    SC=$(echo "$V" | cut -d'|' -f3)
-    echo "$B $SC"
-  done | python3 -c "
-import sys
-results = {}
-for line in sys.stdin:
-    line = line.strip()
-    if not line: continue
-    b, score = line.split()
-    results[b] = float(score)
-order = sorted(results, key=results.get, reverse=True)
-print(' '.join(order[:2]))
-")
-  for B in $TOP2; do
-    local SUM_SCORE=0 RUNS=0 SPILL_COUNT=0
-    for r in 1 2 3; do
-      log "    Finalist batch=$B run $r..."
-      set_batch "$B"; restart
-      SCORE_OF=$(measure_speed "$CTX")
-      local PRE=$(echo "$SCORE_OF" | cut -d'|' -f1)
-      local DEC=$(echo "$SCORE_OF" | cut -d'|' -f2)
-      local AVG_CPU=$(echo "$SCORE_OF" | cut -d'|' -f3)
-      # reject a finalist if a repeat run pegs all cores to CPU (avg CPU > 200%)
-      if [ -n "$AVG_CPU" ] && [ "$(echo "$AVG_CPU > 200" | bc -l)" = "1" ]; then
-        log "      run $r: SPILL (avg ${AVG_CPU}%) — penalizing"
-        SPILL_COUNT=$((SPILL_COUNT + 1))
-        continue
-      fi
-      # reject a finalist if a repeat run stalled (PRE=0, DEC=0 — no score)
-      if [ "$PRE" = "0" ] && [ "$DEC" = "0" ]; then
-        log "      run $r: STALL (no score — network stall) — excluded"
-        continue
-      fi
-      SUM_SCORE=$(python3 -c "
-p=$PRE; d=$DEC; pt=$((CTX * 3 / 4)); dt=4000
-s = (pt + dt) / (pt/p + dt/d) if p > 0 and d > 0 else 0
-print('%.1f' % ($SUM_SCORE + s))
-")
-      RUNS=$((RUNS + 1))
-    done
-    if [ "$RUNS" -eq 0 ]; then
-      log "    Finalist batch=$B: all runs spilled — EXCLUDED"
-      continue
-    fi
-    local AVG
-    AVG=$(python3 -c "print('%.1f' % ($SUM_SCORE / $RUNS))")
-    log "    Finalist batch=$B avg score=$AVG ($RUNS clean runs, $SPILL_COUNT spilled)"
-    FINALIST_SCORES[$B]="$AVG"
-  done
-
-  # Winner = the finalist with the highest AVERAGED re-run score (direct
-  # comparison — not vs the single-run sweep score). On an equal average, the
-  # LARGER batch wins (headroom at zero throughput cost). Fall back to the
-  # sweep best only if every finalist spilled.
-  VALIDATED=$BEST_BATCH
-  if [ ${#FINALIST_SCORES[@]} -gt 0 ]; then
-    BEST_SCORE=0
-    for B in $TOP2; do
-      AVG="${FINALIST_SCORES[$B]:-}"
-      [ -z "$AVG" ] && continue
-      if [ "$(echo "$AVG > $BEST_SCORE" | bc -l)" = "1" ]; then
-        BEST_SCORE=$AVG; VALIDATED=$B
-      elif [ "$(echo "$AVG == $BEST_SCORE" | bc -l)" = "1" ] && [ "$B" -gt "$VALIDATED" ]; then
-        VALIDATED=$B
-      fi
-    done
-  fi
   set_batch "$VALIDATED"
-  log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (score=$BEST_SCORE) ***"
+  log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (boundary) ***"
 
   log ""; log "=== RESULT ==="
   log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
   log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
-  log "  perf-sweep: fastest batch below ceiling (combined prefill+decode score)"
+  log "  boundary: largest GPU-resident batch (prefill monotonic + decode constant)"
   log ""; log "  Next: run bench.sh bench $MODEL"
   log "=== DONE ==="
 }
