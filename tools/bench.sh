@@ -410,6 +410,7 @@ saturation_test() {
   local ATTEMPT=1
   local MAX_ATTEMPTS=15
   SAT_PREFILL_TPS=""                                           # global: captured prefill t/s (caller reads)
+  local PREFILL_TPS_RAW=""
   log "  Saturation: prefill target ~${TARGET} tokens (99% ctx), overshoot start ~${SAT_SIZE} chars"
 
   # ---- Phase 1: cheap sizing (max_tokens=1) — discover ratio, land near 99% ctx ----
@@ -449,6 +450,23 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 
     local OOM=$(oom_count_since_mark)
     if [ "$OOM" -gt 0 ]; then log "  Saturation: OOM"; return 1; fi
+
+    # Capture prefill t/s from Phase 1 sizing: the line with the MOST tokens
+    # in the log window = the ~99% prefill (the real throughput measurement).
+    PREFILL_TPS_RAW=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+      | grep "prompt eval time" | python3 -c "
+import sys, re
+best_tok = 0; best_tps = 0
+for line in sys.stdin:
+    m = re.search(r'prompt eval time = .+? / (\d+) tokens .+? (\d+[\d.]*) tokens per second', line)
+    if m:
+        tok = int(m.group(1)); tps = float(m.group(2))
+        if tok > best_tok: best_tok = tok; best_tps = tps
+print('%.1f' % best_tps if best_tok > 0 else '')
+" 2>/dev/null)
+    if [ -n "$PREFILL_TPS_RAW" ]; then
+      SAT_PREFILL_TPS="$PREFILL_TPS_RAW"
+    fi
 
     local PT CT
     read -r PT CT < <(python3 -c "
@@ -504,19 +522,6 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then log "  Saturation: OOM"; return 1; fi
-
-  # Capture prefill t/s from the Phase 2 prompt eval time line (last such line
-  # in the log window = the real 99% saturation prefill, not sizing attempts).
-  # NOTE: anchor on "prompt eval time" to avoid grabbing the decode eval line
-  # (which also ends in "tokens per second" but appears AFTER prefill).
-  local PREFILL_TPS_RAW
-  PREFILL_TPS_RAW=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
-    | grep "prompt eval time" | tail -1 \
-    | grep -oE "[0-9.]+ tokens per second" | awk '{print $1}')
-  if [ -n "$PREFILL_TPS_RAW" ]; then
-    SAT_PREFILL_TPS="$PREFILL_TPS_RAW"
-    log "  Saturation: prefill t/s=${SAT_PREFILL_TPS}"
-  fi
 
   local PT CT
   read -r PT CT < <(python3 -c "
