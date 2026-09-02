@@ -6,7 +6,7 @@
 #   ./tools/bench.sh                            # interactive: pick models, full suite, confirm
 #   ./tools/bench.sh all <models...>            # non-interactive full suite per model
 #   ./tools/bench.sh mtpcheck <models...>       # MTP capability check only (writes spec-type)
-#   ./tools/bench.sh bisect <model> [test-batch|resume <lo> <hi>|resume <batch>]
+#   ./tools/bench.sh bisect <model> [test-batch]
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
 #   ./tools/bench.sh bench <models...>          # full benchmark JSON record
 #
@@ -1252,25 +1252,12 @@ cmd_mtp() {
   log "=== DONE ==="
 }
 
-# ── SUBCOMMAND: bisect (batch ceiling + Phase 4 sweep) ──────
-# Args: MODEL, then optional TEST_BATCH | resume <lo> <hi> | resume <batch>
+# ── SUBCOMMAND: bisect (batch ceiling + prefill sweep) ──────
+# Args: MODEL, then optional TEST_BATCH
 cmd_bisect() {
-  local TEST_BATCH=0 RESUME=0 RESUME_LO=0 RESUME_HI=0 RESUME_BATCH=0
-  if [ $# -ge 2 ]; then
-    if [ "$2" = "resume" ]; then
-      if [[ "${3:-}" =~ ^[0-9]+$ ]] && [[ "${4:-}" =~ ^[0-9]+$ ]]; then
-        RESUME=1; RESUME_LO=$3; RESUME_HI=$4
-        if ! [ "$RESUME_LO" -gt 0 ] 2>/dev/null || ! [ "$RESUME_HI" -gt "$RESUME_LO" ] 2>/dev/null; then
-          echo "Usage: bench.sh bisect <model> resume <lo> <hi>"; exit 1
-        fi
-      elif [[ "${3:-}" =~ ^[0-9]+$ ]]; then
-        RESUME_BATCH=1; TEST_BATCH=$3
-      else
-        echo "Usage: bench.sh bisect <model> resume <lo> <hi> | resume <batch>"; exit 1
-      fi
-    elif [[ "$2" =~ ^[0-9]+$ ]]; then
-      TEST_BATCH=$2
-    fi
+  local TEST_BATCH=0
+  if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+    TEST_BATCH=$2
   fi
 
   local CTX=$(read_ctx)
@@ -1294,11 +1281,7 @@ cmd_bisect() {
   log "Model: $MODEL | ctx: $CTX | test-batch: $TEST_BATCH"
 
   if [ "$TEST_BATCH" -gt 0 ] 2>/dev/null; then
-    if [ "$RESUME_BATCH" -eq 1 ]; then
-      log ""; log "=== RESUMING VALIDATION OF BATCH $TEST_BATCH ==="
-    else
-      log ""; log "=== TESTING BATCH $TEST_BATCH ==="
-    fi
+    log ""; log "=== TESTING BATCH $TEST_BATCH ==="
     set_batch "$TEST_BATCH"; restart
     log ""; log "=== PHASE 1: TINY PROBE ==="
     tiny_probe
@@ -1320,68 +1303,54 @@ cmd_bisect() {
     exit 0
   fi
 
-  # ── GPU-FIT CLASSIFICATION (256 low-GPU check) — DISABLED BY DEFAULT ──
-  # gpt-oss doesn't need the CPU-only path; re-enable if a future model requires it.
-  local DISABLE_CPU_ONLY_CHECK=1
-  local IS_CPU_ONLY=0
-  if [ "$DISABLE_CPU_ONLY_CHECK" -eq 0 ]; then
-  log ""; log "=== GPU-FIT CHECK (batch=256) ==="
+  # ── EARLY RESIDENCY GATE (batch=256): route CPU-compute straight to prefill sweep ──
+  log ""; log "=== EARLY RESIDENCY GATE (batch=256) ==="
   set_batch 256; restart
   local R_FIT
   R_FIT=$(residency_probe)
   if [ "$R_FIT" = "STALL" ]; then
-    log "  GPU-fit check: STALL — model can't cold-load (network/HF fetch)"
+    log "  Early gate: STALL — model can't cold-load (network/HF fetch)"
     exit 1
   fi
   if [ "$R_FIT" = "CPU" ]; then
-    IS_CPU_ONLY=1
-    log "  GPU-fit check: CPU — model spills to CPU even at batch 256"
-    log "  → CPU-only bisect mode: floor check at 256, then ceiling search"
-  else
-    log "  GPU-fit check: ${R_FIT} — proceeding with GPU saturation-gated bisect"
-  fi
-
-  # ── CPU-ONLY FLOOR CHECK (256 batch saturation) ──
-  # Quick gate: can a CPU-only model saturate full context at batch 256 on this
-  # GPU? If not, apply override-tensor=exps=CPU to free VRAM and retry.
-  local USE_STANDARD_FLOW=0
-  if [ "$IS_CPU_ONLY" -eq 1 ]; then
-    local FLOOR_RC
-    log ""; log "=== CPU-ONLY FLOOR CHECK (batch=256 saturation) ==="
+    log "  CPU-compute at batch 256 — skipping ceiling search, running prefill sweep"
+    local WIN
+    WIN=$(cpu_prefill_sweep "$CTX" "$CTX")
+    set_batch "$WIN"; restart
+    log "  Confirming saturation at winner batch=$WIN..."
+    saturation_test "$CTX"; local SW_RC=$?
+    if [ "$SW_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
+    if [ "$SW_RC" -eq 0 ]; then
+      local VALIDATED=$WIN PASS=1 CANDIDATES=0
+      set_batch "$VALIDATED"
+      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$WIN (CPU-compute, fastest prefill) ***"
+      log ""; log "=== RESULT ==="
+      log "  batch=$WIN ubatch=$WIN ctx=$CTX"
+      log "  candidates=0 saturation-confirm=$PASS/1"
+      log "  prefill-sweep: CPU-compute detected early, skipped ceiling search"
+      log ""; log "  Next: run bench.sh bench $MODEL"
+      log "=== DONE ==="
+      exit 0
+    fi
+    log "  sweep winner $WIN failed saturation — falling back to batch 256"
     set_batch 256; restart
-    saturation_test "$CTX"
-    FLOOR_RC=$?
-    if [ "$FLOOR_RC" -eq 2 ]; then
-      log "  STALL during floor-check saturation (network/HF fetch)"
-      exit 1
+    saturation_test "$CTX"; SW_RC=$?
+    if [ "$SW_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
+    if [ "$SW_RC" -eq 0 ]; then
+      local VALIDATED=256 PASS=1 CANDIDATES=0
+      log ""; log "  *** CPU-COMPUTE CEILING: batch=256 (full-context validated) ***"
+      log ""; log "=== RESULT ==="
+      log "  batch=256 ubatch=256 ctx=$CTX"
+      log "  candidates=0 saturation-confirm=$PASS/1"
+      log "  prefill-sweep failed, batch 256 is the floor"
+      log ""; log "  Next: run bench.sh bench $MODEL"
+      log "=== DONE ==="
+      exit 0
     fi
-    if [ "$FLOOR_RC" -eq 1 ]; then
-      FLOOR_OOM=$(oom_count_since_mark)
-      if [ "$FLOOR_OOM" -gt 0 ]; then
-        log "  256 batch CANNOT saturate full context (OOM) — applying override-tensor=exps=CPU to free VRAM"
-        set_key override-tensor exps=CPU
-        log "  Retrying floor check after override-tensor applied"
-        restart
-        saturation_test "$CTX"
-        local RETRY_RC=$?
-        if [ "$RETRY_RC" -eq 2 ]; then
-          log "  STALL during retry (network/HF fetch)"
-          exit 1
-        fi
-        if [ "$RETRY_RC" -eq 1 ]; then
-          log "  256 batch STILL cannot saturate full context even with override-tensor=exps=CPU"
-          log "  → ctx-size is too large for this GPU even with experts offloaded; consider lower ctx-size"
-          exit 1
-        fi
-        USE_STANDARD_FLOW=1
-      else
-        log "  256 batch CANNOT saturate full context (no OOM — model ran but prefill sizing failed)"
-        log "  → override-tensor=exps=CPU won't help; the model needs a lower ctx-size"
-        exit 1
-      fi
-    fi
+    log "  ERROR: no batch passes saturation on this CPU-compute model"
+    exit 1
   fi
-  fi  # end DISABLE_CPU_ONLY_CHECK
+  log "  GPU/AMBIGUOUS at batch 256 — proceeding with ceiling search"
 
   # ── PHASE 1: CEILING SEARCH ──
   # Shared ceiling_probe definition (tiny probe + saturation gate).
@@ -1422,85 +1391,53 @@ cmd_bisect() {
 
   local LO HI VALIDATED PASS CANDIDATES
 
-  if [ "$IS_CPU_ONLY" -eq 1 ] && [ "$USE_STANDARD_FLOW" -eq 0 ]; then
-    # ── CPU-ONLY, no override: 256 is the confirmed floor, double-up from 256 ──
-    LO=256
-    log ""; log "=== CPU-ONLY CEILING SEARCH (double-up from 256) ==="
-    if ceiling_probe "$CTX"; then
-      LO=$CTX; HI=$((CTX + 64)); VALIDATED=$CTX
-      log "  Bracket: lo=$LO (PASS), hi=$HI (assumed OOM above)"
-    else
-      HI=$CTX
-      local RUNG=256
-      while [ $((RUNG * 2)) -lt "$HI" ]; do
-        RUNG=$((RUNG * 2))
-        if ceiling_probe "$RUNG"; then
-          LO=$RUNG
-        else
-          HI=$RUNG
-          break
-        fi
-      done
-      if [ "$LO" -eq 256 ] && [ "$HI" -eq "$CTX" ]; then
-        log "  No batch above 256 saturates — 256 is the ceiling"
-      fi
-      log "  Bracket: lo=$LO (PASS), hi=$HI (OOM bound)"
-    fi
-    CANDIDATES=0
+  # ── PHASE 1: CEILING SEARCH ──
+  # ctx first, then 2048+doubling ladder.
+  log ""; log "=== PHASE 1: CEILING SEARCH (ctx=$CTX, ladder 2048→up) ==="
+  LO=0; HI=0; VALIDATED=0
 
-  elif [ "$RESUME" -eq 1 ]; then
-    LO=$RESUME_LO; HI=$RESUME_HI
-    log ""; log "=== RESUMING BISECT (lo=$LO, hi=$HI, gap=$((HI-LO))) — skipping coarse sweep ==="
-
+  # Probe 1: ctx itself
+  if ceiling_probe "$CTX"; then
+    LO=$CTX; HI=$((CTX + 64)); VALIDATED=$CTX
+    log "  Bracket: lo=$LO (PASS), hi=$HI (assumed OOM above)"
   else
-    # ── STANDARD: GPU or CPU-only-with-override ──
-    # ctx first, then 2048+doubling ladder.
-    log ""; log "=== PHASE 1: CEILING SEARCH (ctx=$CTX, ladder 2048→up) ==="
-    LO=0; HI=0; VALIDATED=0
-
-    # Probe 1: ctx itself
-    if ceiling_probe "$CTX"; then
-      LO=$CTX; HI=$((CTX + 64)); VALIDATED=$CTX
-      log "  Bracket: lo=$LO (PASS), hi=$HI (assumed OOM above)"
-    else
-      HI=$CTX
-      if [ "$CTX" -gt 2048 ]; then
-        # Jump to the realistic region and ladder UP by doubling
-        if ceiling_probe 2048; then
-          LO=2048
-          RUNG=2048
-          while [ $((RUNG * 2)) -lt "$HI" ]; do
-            RUNG=$((RUNG * 2))
-            if ceiling_probe "$RUNG"; then
-              LO=$RUNG
-            else
-              HI=$RUNG
-              break
-            fi
-          done
-        else
-          # 2048 OOMs — halve DOWN from 2048
-          HI=2048
-          B=1024
-          while [ "$B" -ge 64 ]; do
-            if ceiling_probe "$B"; then LO=$B; break
-            else HI=$B; B=$((B / 2 / 64 * 64)); fi
-          done
-        fi
+    HI=$CTX
+    if [ "$CTX" -gt 2048 ]; then
+      # Jump to the realistic region and ladder UP by doubling
+      if ceiling_probe 2048; then
+        LO=2048
+        RUNG=2048
+        while [ $((RUNG * 2)) -lt "$HI" ]; do
+          RUNG=$((RUNG * 2))
+          if ceiling_probe "$RUNG"; then
+            LO=$RUNG
+          else
+            HI=$RUNG
+            break
+          fi
+        done
       else
-        # ctx <= 2048 and failed — halve down from ctx
-        B=$((CTX / 2 / 64 * 64))
+        # 2048 OOMs — halve DOWN from 2048
+        HI=2048
+        B=1024
         while [ "$B" -ge 64 ]; do
           if ceiling_probe "$B"; then LO=$B; break
           else HI=$B; B=$((B / 2 / 64 * 64)); fi
         done
       fi
-      if [ "$LO" -eq 0 ]; then
-        log "  ERROR: no PASS found at any batch down to 64. Lower ctx or free VRAM (override-tensor=exps=CPU)."
-        exit 1
-      fi
-      log "  Bracket: lo=$LO (PASS), hi=$HI (OOM bound)"
+    else
+      # ctx <= 2048 and failed — halve down from ctx
+      B=$((CTX / 2 / 64 * 64))
+      while [ "$B" -ge 64 ]; do
+        if ceiling_probe "$B"; then LO=$B; break
+        else HI=$B; B=$((B / 2 / 64 * 64)); fi
+      done
     fi
+    if [ "$LO" -eq 0 ]; then
+      log "  ERROR: no PASS found at any batch down to 64. Lower ctx or free VRAM (override-tensor=exps=CPU)."
+      exit 1
+    fi
+    log "  Bracket: lo=$LO (PASS), hi=$HI (OOM bound)"
   fi
 
   # ── PHASE 2: REFINE BISECT (PASS = tiny probe AND saturation, until gap <= 64) ──
@@ -1543,16 +1480,6 @@ cmd_bisect() {
     fi
   done
   VALIDATED=$LO
-  if [ "$IS_CPU_ONLY" -eq 1 ]; then
-    log "  Refined lo=$LO — max batch passing saturation (CPU-only, GPU residency skipped)"
-    set_batch "$VALIDATED"
-    log ""
-    log "  *** CPU-ONLY CEILING: batch=$VALIDATED (spills to CPU, full-context saturation validated) ***"
-    log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-    log "  candidates=$CANDIDATES (CPU-only mode — GPU residency sweep skipped)"
-    log ""; log "=== DONE ==="
-    exit 0
-  fi
   log "  Refined lo=$LO — max batch passing tiny probe AND saturation"
 
   # ── FINAL CONFIRM (winner already passed saturation in the gated bisect;
@@ -2382,7 +2309,7 @@ case "$CMD" in
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
-    echo "       bench.sh bisect <model> [test-batch|resume <lo> <hi>|resume <batch>]"
+    echo "       bench.sh bisect <model> [test-batch]"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
     exit 1
