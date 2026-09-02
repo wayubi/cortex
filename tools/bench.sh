@@ -403,7 +403,7 @@ except: print(0)
 
 saturation_test() {
   local CTX=$1
-  local MAX_TOK=$(python3 -c "print(int($CTX * 0.2))")
+  local MAX_TOK=$(python3 -c "print(int($CTX * 0.5))")
   local TARGET_TOK=$(python3 -c "print(int($CTX * 0.85))")
   local SAT_SIZE=0
   local ATTEMPT=1
@@ -476,8 +476,8 @@ else:
     print('FAIL')
 " 2>/dev/null)
     if [ "$PT" = "FAIL" ] || [ -z "$PT" ]; then
-      log "  Saturation: FAIL (no valid response)"
-      return 1
+      log "  Saturation: no valid response (model error / 500 / peg-native format)"
+      return 3
     fi
 
     # Scale the prefill if it fell short of 85% target
@@ -504,7 +504,7 @@ else:
   done
 
   log "  Saturation: FAIL — could not reach compaction in $ATTEMPT attempts"
-  return 1
+  return 4
 }
 
 long_decode_check() {
@@ -1191,10 +1191,11 @@ cmd_bisect() {
       log "  Aborting bisect: model can't cold-load. Re-run when huggingface.co is reachable."
       exit 1
     fi
+    local S_RC=0
     if [ "$T_RC" -eq 0 ]; then
       log "  Probe PASS at $B — saturation-validating..."
       saturation_test "$CTX"
-      local S_RC=$?
+      S_RC=$?
       if [ "$S_RC" -eq 2 ]; then
         log "  STALL during saturation at $B (network/HF fetch)"
         exit 1
@@ -1204,7 +1205,13 @@ cmd_bisect() {
         return 0
       fi
     fi
-    log "  OOM at $B"
+    if [ "$S_RC" -eq 3 ]; then
+      log "  FORMAT ERROR at $B (500 / peg-native format failure)"
+    elif [ "$S_RC" -eq 4 ]; then
+      log "  SIZING FAILURE at $B (could not reach compaction in $ATTEMPT attempts)"
+    else
+      log "  OOM at $B"
+    fi
     return 1
   }
 
@@ -1319,8 +1326,12 @@ cmd_bisect() {
       fi
       if [ "$S_RC" -eq 0 ]; then
         log "  PASS (probe + saturation)"; LO=$MID
+      elif [ "$S_RC" -eq 3 ]; then
+        log "  FORMAT ERROR (500 / peg-native format failure)"; HI=$MID
+      elif [ "$S_RC" -eq 4 ]; then
+        log "  SIZING FAILURE (could not reach compaction)"; HI=$MID
       else
-        log "  FAIL (saturation)"; HI=$MID
+        log "  OOM"; HI=$MID
       fi
     else
       log "  OOM (probe)"; HI=$MID
