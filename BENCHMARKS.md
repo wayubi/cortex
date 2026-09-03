@@ -63,12 +63,12 @@ Decode measured via 6000-token long-decode (real prompt) and 4000-token essay be
 | `glm-4.7-23b-a3b-flash-reap-q4-128k-think` | 128k | 4096 | — | none | 23.3 | 23.3 | 517 | — |
 | `glm-4.7-23b-a3b-flash-reap-q4-198k` | 198k | 4096 | — | none | 19.7 | 19.7 | 510 | — |
 | `glm-4.7-23b-a3b-flash-reap-q4-198k-think` | 198k | 4096 | — | none | 18.1 | 18.1 | 509 | — |
-| `gpt-oss-20b-a4b-q4-low-64k` | 64k | 4096 | — | none | 30.9 | 30.9 | 2018 | — |
-| `gpt-oss-20b-a4b-q4-mid-64k` | 64k | 4096 | — | none | 29.9 | 29.9 | 2001 | — |
-| `gpt-oss-20b-a4b-q4-high-64k` | 64k | 4096 | — | none | 30.4 | 30.4 | 2034 | — |
-| `gpt-oss-20b-a4b-q4-low-128k` | 128k | 4096 | — | none | 28.5 | 28.5 | 1948 | — |
-| `gpt-oss-20b-a4b-q4-mid-128k` | 128k | 4096 | — | none | 29.0 | 29.0 | 1971 | — |
-| `gpt-oss-20b-a4b-q4-high-128k` | 128k | 4096 | — | none | 29.3 | 29.3 | 1976 | — |
+| `gpt-oss-20b-a4b-q4-64k-think-low` | 64k | 4096 | — | none | 30.9 | 30.9 | 2018 | — |
+| `gpt-oss-20b-a4b-q4-64k-think-medium` | 64k | 4096 | — | none | 29.9 | 29.9 | 2001 | — |
+| `gpt-oss-20b-a4b-q4-64k-think-high` | 64k | 4096 | — | none | 30.4 | 30.4 | 2034 | — |
+| `gpt-oss-20b-a4b-q4-128k-think-low` | 128k | 4096 | — | none | 28.5 | 28.5 | 1948 | — |
+| `gpt-oss-20b-a4b-q4-128k-think-medium` | 128k | 4096 | — | none | 29.0 | 29.0 | 1971 | — |
+| `gpt-oss-20b-a4b-q4-128k-think-high` | 128k | 4096 | — | none | 29.3 | 29.3 | 1976 | — |
 
 ## Performance ranking (4k/8k/16k qwen-3.6-35b-a3b variants)
 
