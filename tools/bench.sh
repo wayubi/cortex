@@ -283,8 +283,8 @@ oom_count_since_mark() { oom_since_mark | wc -l | tr -d ' '; }
 # The router logs "proxy_reques: proxying request to model <model> on port <N>"
 # ONLY after the model finishes loading and the request is being served.
 # A hung cold-load (e.g. HF network fetch stalled) never emits this line.
-# SERVED_GRACE = max seconds to wait for the line (generous for healthy big-model
-# loads; a true stall never produces it). Configurable via env.
+# SERVED_GRACE = max seconds to wait for the proxy_reques line. Base 60s + 40s per
+# 64k ctx (covers large-ctx cold-loads under contention). Set ctx-aware in each command.
 SERVED_GRACE=${SERVED_GRACE:-60}
 
 # Wait for the router log to show our request being served (proxy_reques line).
@@ -327,7 +327,7 @@ FIRE_PID=""
 fire_request() {
   local PAYLOAD=$1 OUT=$2 LABEL=$3 TIMEOUT=${4:-600}
   local ATTEMPT PID
-  for ATTEMPT in 1 2; do
+  for ATTEMPT in 1 2 3; do
     logmark
     curl -s --max-time "$TIMEOUT" -X POST http://localhost:8080/v1/chat/completions \
       -H 'Content-Type: application/json' -d @"$PAYLOAD" > "$OUT" 2>&1 &
@@ -1250,6 +1250,7 @@ cmd_mtp() {
     exit 1
   fi
   local CTX=$(read_ctx)
+  SERVED_GRACE=$((60 + CTX / 65536 * 40))
   log ""; log "Model: $MODEL | ctx: $CTX"
 
   # ── Phase B: n_max sweep {1,2,3,4,5} at p_min=0.7 ──
@@ -1330,6 +1331,7 @@ cmd_bisect() {
   fi
 
   local CTX=$(read_ctx)
+  SERVED_GRACE=$((60 + CTX / 65536 * 40))
   [ -z "$CTX" ] && { log "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
 
   # Snapshot the model's original batch so a failed run can restore it
@@ -1734,6 +1736,7 @@ except: print('')
 
   # Read ctx-size (scoped to the model's own section)
   local CTX=$(read_ctx)
+  SERVED_GRACE=$((60 + CTX / 65536 * 40))
   [ -z "$CTX" ] && { log "ERROR: ctx-size not found"; exit 1; }
 
   # Read batch-size (scoped to the model's own section)
