@@ -2666,10 +2666,17 @@ run_full_suite() {
     # ── Inheritance gate ──
     if maybe_inherit "$NAME"; then
       PARENT_NAME=$(family_of "$NAME")
-      lshow "  $NAME: inheriting from $PARENT_NAME (JSON copied, no bench)"
-      for s in mtpcheck bisect mtp bench; do
-        VERDICTS["$NAME|$s"]="SKIPPED (inherited from $PARENT_NAME)"
-      done
+      if [ "${RESET_DONE[$NAME]:-0}" -eq 1 ]; then
+        lshow "  $NAME: already reset-benched in pre-pass"
+        for s in mtpcheck bisect mtp bench; do
+          VERDICTS["$NAME|$s"]="OK (reset)"
+        done
+      else
+        lshow "  $NAME: inheriting from $PARENT_NAME (JSON copied, no bench)"
+        for s in mtpcheck bisect mtp bench; do
+          VERDICTS["$NAME|$s"]="SKIPPED (inherited from $PARENT_NAME)"
+        done
+      fi
       continue
     fi
 
