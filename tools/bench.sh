@@ -251,6 +251,167 @@ print('  section restored')
 "
 }
 
+# ── Parent/inheritance helpers ───────────────────────────────
+# Find the parent model name (first models.ini section for given model's hf+ctx).
+family_of() {
+  local MODEL=$1
+  python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+sections = re.split(r'(?m)^\[', c)
+my_hf = my_ctx = None
+for s in sections[1:]:
+    name = s.split(']')[0].strip()
+    if name == '*' or not name: continue
+    if name == '$MODEL':
+        hf = re.search(r'hf\s*=\s*(\S+)', s)
+        ctx = re.search(r'ctx-size\s*=\s*(\S+)', s)
+        if hf: my_hf = hf.group(1)
+        if ctx: my_ctx = ctx.group(1)
+        break
+if my_hf is None: print('$MODEL'); exit()
+for s in sections[1:]:
+    name = s.split(']')[0].strip()
+    if name == '*' or not name: continue
+    hf = re.search(r'hf\s*=\s*(\S+)', s)
+    ctx = re.search(r'ctx-size\s*=\s*(\S+)', s)
+    if hf and ctx and hf.group(1) == my_hf and ctx.group(1) == my_ctx:
+        print(name); break
+"
+}
+
+# Check if a model's JSON stats file exists.
+has_json() { [ -f "$MODELS_DIR/$1.json" ]; }
+
+# Like set_batch but writes batch/ubatch to a specific section name.
+set_batch_for() {
+  local SECTION=$1 BATCH=$2
+  python3 -c "
+import re, sys
+section='$SECTION'; batch=$BATCH; ini='$INI'
+with open(ini) as f: content = f.read()
+m = re.search(r'(\['+re.escape(section)+r'\])(.*?)(?=\n\[|\Z)', content, re.DOTALL)
+if not m: print('ERROR'); sys.exit(1)
+sec = m.group(2)
+target = None
+for line in sec.split('\n'):
+    if '=' in line and not line.strip().startswith(('#', ';')):
+        if not re.match(r'\s*(batch|ubatch)-size\s*=', line):
+            target = max(target, line.index('=')) if target is not None else line.index('=')
+if target is None: target = 17
+new_lines = []; found = False
+for line in sec.split('\n'):
+    if re.match(r'\s*batch-size\s*=', line) and 'ubatch' not in line:
+        pad = target - len('batch-size')
+        new_lines.append('batch-size' + ' ' * pad + '= ' + str(batch))
+        found = True
+    elif re.match(r'\s*ubatch-size\s*=', line):
+        pad = target - len('ubatch-size')
+        new_lines.append('ubatch-size' + ' ' * pad + '= ' + str(batch))
+    else: new_lines.append(line)
+if not found:
+    pad_b = target - len('batch-size'); pad_u = target - len('ubatch-size')
+    insert_at = 1
+    for idx, line in enumerate(new_lines):
+        if '=' in line and not line.strip().startswith(('#', ';')):
+            insert_at = idx + 1; break
+    new_lines.insert(insert_at, 'batch-size' + ' ' * pad_b + '= ' + str(batch))
+    new_lines.insert(insert_at + 1, 'ubatch-size' + ' ' * pad_u + '= ' + str(batch))
+with open(ini, 'w') as f:
+    f.write(content[:m.start(2)] + '\n'.join(new_lines) + content[m.end(2):])
+"
+}
+
+# Copy parent JSON to child: overwrite model, apply child's sampling config, mark propagated.
+inherit_json() {
+  local PARENT=$1 CHILD=$2
+  python3 -c "
+import json, re, datetime
+with open('$INI') as f: ini = f.read()
+
+# Load parent JSON — benchmark data comes from here
+with open('$MODELS_DIR/$PARENT.json') as f: data = json.load(f)
+
+# Rebuild config from child's own models.ini (same schema as real bench)
+def get_section(name):
+    m = re.search(r'(\['+re.escape(name)+r'\])(.*?)(?=\n\[|\Z)', ini, re.DOTALL)
+    return m.group(2) if m else ''
+
+def kv(sec, key, default=None):
+    m = re.search(r'^\s*'+re.escape(key)+r'\s*=\s*(\S+)', sec, re.MULTILINE)
+    return m.group(1) if m else default
+
+sec = get_section('$CHILD')
+star = get_section('*')
+hf = kv(sec, 'hf')
+data['config'] = {
+    'temp': kv(sec, 'temp', kv(star, 'temp')),
+    'top_k': kv(sec, 'top-k', kv(star, 'top-k')),
+    'top_p': kv(sec, 'top-p', kv(star, 'top-p')),
+    'min_p': kv(sec, 'min-p', kv(star, 'min-p')),
+    'repeat_penalty': kv(sec, 'repeat-penalty', kv(star, 'repeat-penalty')),
+    'threads': kv(sec, 'threads', kv(star, 'threads')),
+    'threads_batch': kv(sec, 'threads-batch', kv(star, 'threads-batch')),
+    'cache_type_k': kv(sec, 'cache-type-k', kv(star, 'cache-type-k')),
+    'cache_type_v': kv(sec, 'cache-type-v', kv(star, 'cache-type-v')),
+    'ngl': kv(sec, 'ngl', kv(star, 'ngl')),
+    'hf': hf,
+    'quant': hf.split(':')[-1] if hf and ':' in hf else None,
+    'reasoning': kv(sec, 'reasoning', 'off'),
+    'ctx': str(data['ctx']), 'batch': str(data['batch']),
+}
+
+data['model'] = '$CHILD'
+data['bench_date'] = data.get('bench_date', datetime.datetime.now().isoformat())
+data['propagated'] = True
+data['propagated_from'] = '$PARENT'
+data['propagated_date'] = datetime.datetime.now().isoformat()
+
+with open('$MODELS_DIR/$CHILD.json', 'w') as f: json.dump(data, f, indent=2)
+"
+
+  # Write parent's batch/ubatch to child's models.ini section
+  local PARENT_BATCH
+  PARENT_BATCH=$(python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'(\['+re.escape('$PARENT')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
+sec = m.group(2) if m else ''
+b = re.search(r'batch-size\s*=\s*(\S+)', sec)
+print(b.group(1) if b else '')
+")
+  [ -n "$PARENT_BATCH" ] && set_batch_for "$CHILD" "$PARENT_BATCH"
+}
+
+# Determine whether a model should inherit or be bench-marked fresh.
+# Returns 0 = handled (inherit/skip, JSON written), 1 = run real bench flow.
+maybe_inherit() {
+  local MODEL=$1
+  local PARENT
+  PARENT=$(family_of "$MODEL")
+
+  # No-inherit: always run real bench
+  [ "$INHERIT_MODE" -eq 0 ] && return 1
+
+  # If this model IS the parent
+  if [ "$MODEL" = "$PARENT" ]; then
+    # Already reset-benched in pre-pass: use fresh JSON (skip)
+    [ "${RESET_DONE[$MODEL]:-0}" -eq 1 ] && return 0
+    [ "$RESET_PARENT" -eq 1 ] && return 1          # force re-bench
+    has_json "$MODEL" && return 0                    # already source — skip
+    return 1                                         # not yet benched → bench it
+  fi
+
+  # Sibling: inherit from parent if parent has JSON
+  if has_json "$PARENT"; then
+    inherit_json "$PARENT" "$MODEL"
+    return 0   # handled — skip
+  fi
+
+  # No parent JSON → behave as not-inherit
+  return 1
+}
+
 # ── Shared infra: restart + log-marked OOM detection ───────
 restart() {
   log "  Restarting llama-cpp..."
@@ -2156,12 +2317,54 @@ PYEOF
 run_full_suite() {
   declare -A VERDICTS
   local i NAME s
+
+  # ── Pre-pass: reset parents before siblings inherit ──
+  if [ "$RESET_PARENT" -eq 1 ]; then
+    log ""
+    log "=== RESET-PARENT: benching parent models first ==="
+    declare -A RESET_SEEN
+    for i in $MODEL_IDXS; do
+      NAME=$(model_name "$i")
+      PARENT_NAME=$(family_of "$NAME")
+      [ -z "$PARENT_NAME" ] && continue
+      [ "${RESET_SEEN[$PARENT_NAME]:-0}" -eq 1 ] && continue
+      RESET_SEEN["$PARENT_NAME"]=1
+      MODEL=$PARENT_NAME
+      lshow ""
+      lshow "=============== RESET PARENT: $PARENT_NAME ==============="
+      log "  $(date +%H:%M:%S) starting bisect for $PARENT_NAME"
+      if ( cmd_bisect ); then
+        log "  $(date +%H:%M:%S) bisect OK for $PARENT_NAME"
+      else
+        log "  $(date +%H:%M:%S) bisect FAILED for $PARENT_NAME"
+      fi
+      log "  $(date +%H:%M:%S) starting bench for $PARENT_NAME"
+      if ( cmd_bench ); then
+        log "  $(date +%H:%M:%S) bench OK for $PARENT_NAME"
+        RESET_DONE["$PARENT_NAME"]=1
+      else
+        log "  $(date +%H:%M:%S) bench FAILED for $PARENT_NAME"
+      fi
+    done
+  fi
+
+  # ── Main per-model flow ──
   for i in $MODEL_IDXS; do
     NAME=$(model_name "$i")
     MODEL=$NAME
     lshow ""
     lshow "=============== MODEL: $NAME ==============="
     local IS_MTP=0 BISECT_FAILED=0
+
+    # ── Inheritance gate ──
+    if maybe_inherit "$NAME"; then
+      PARENT_NAME=$(family_of "$NAME")
+      lshow "  $NAME: inheriting from $PARENT_NAME (JSON copied, no bench)"
+      for s in mtpcheck bisect mtp bench; do
+        VERDICTS["$NAME|$s"]="SKIPPED (inherited from $PARENT_NAME)"
+      done
+      continue
+    fi
 
     # step 1: mtpcheck
     lshow "  $(date +%H:%M:%S) starting mtpcheck for $NAME"
@@ -2242,6 +2445,21 @@ if [ "$N_MODELS" -eq 0 ]; then
   exit 1
 fi
 
+# ── Inheritance flags (global, apply to whole selection) ──
+declare -A RESET_DONE
+INHERIT_MODE=1
+RESET_PARENT=0
+MAIN_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-inherit)  INHERIT_MODE=0 ;;
+    --reset-parent) RESET_PARENT=1 ;;
+    *)             MAIN_ARGS+=("$arg") ;;
+  esac
+done
+# Replace "$@" with filtered args for downstream parsing
+set -- "${MAIN_ARGS[@]+"${MAIN_ARGS[@]}"}"
+
 if [ "$#" -eq 0 ]; then
   # ── Interactive: pick models → full suite → confirm ──
   echo ""
@@ -2268,6 +2486,22 @@ if [ "$#" -eq 0 ]; then
   echo ""
   echo "Selected:"
   for i in $MODEL_IDXS; do echo "  $i) $(model_name "$i")"; done
+
+  # ── Interactive inheritance prompts ──
+  echo ""
+  read -r -p "Inherit values from family parent? [Y/n]: " INHERIT_INPUT
+  case "${INHERIT_INPUT:-Y}" in
+    [nN][oO]) INHERIT_MODE=0; log "  Inherit mode: OFF (each model bench-marked independently)" ;;
+    *)        INHERIT_MODE=1; log "  Inherit mode: ON (siblings inherit from parent's JSON)" ;;
+  esac
+
+  if [ "$INHERIT_MODE" -eq 1 ]; then
+    read -r -p "Reset parent first? (re-bench parent to create fresh source) [y/N]: " RESET_INPUT
+    case "${RESET_INPUT:-N}" in
+      [yY][eE][sS]) RESET_PARENT=1; log "  Reset parent: YES (parent will be re-benched first)" ;;
+      *)            RESET_PARENT=0 ;;
+    esac
+  fi
 
   lshow "=== MASTER PLAN ==="
   lshow "  models: $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)"
@@ -2315,8 +2549,32 @@ case "$CMD" in
     done
     ;;
   bench)
+    # Pre-pass: if RESET_PARENT, bench each selected model's parent first
+    if [ "$RESET_PARENT" -eq 1 ]; then
+      for m in "$@"; do
+        PARENT=$(family_of "$m")
+        [ "${RESET_DONE[$PARENT]:-0}" -eq 1 ] && continue
+        MODEL=$PARENT
+        log "  Resetting parent $PARENT for $m..."
+        if ( cmd_bisect ); then
+          log "  bisect OK for $PARENT"
+          if ( cmd_bench ); then
+            log "  bench OK for $PARENT"
+            RESET_DONE["$PARENT"]=1
+          else
+            log "  bench FAILED for $PARENT"
+          fi
+        else
+          log "  bisect FAILED for $PARENT"
+        fi
+      done
+    fi
     for m in "$@"; do
       MODEL=$m
+      if maybe_inherit "$m"; then
+        log "  $m: inheriting from $(family_of "$m")"
+        continue
+      fi
       ( cmd_bench ) || { echo "  $m: bench FAILED"; continue; }
     done
     ;;
