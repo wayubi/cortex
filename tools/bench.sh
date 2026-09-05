@@ -761,9 +761,13 @@ else: print('  Long-decode: FAIL'); exit(1)
 " 2>/dev/null; return $?
 }
 
-# Measure prefill + decode speed at the CURRENT batch (75%-ctx prefill probe,
-# then a full 4000-token decode window). Echoes "prefill_t_s|decode_t_s|cpu".
-measure_speed() {
+# ── Decode-guarded prefill+decode probe ─────────────────────
+# Measures both prefill and decode speed at the CURRENT batch.
+# Prefill: 75%-ctx prompt, max_tokens=1 → prompt_per_second.
+# Decode:  short-prompt 4000-token window → predicted_per_second, plus CPU% polling.
+# Echoes "prefill_t_s|decode_t_s|avg_cpu" to stdout (all logs → stderr).
+# Returns "0|0|0" on STALL/OOM (caller must reject the rung).
+decode_guarded_probe() {
   local CTX=$1
   measure_ratio >&2 || true   # progress → stderr; stdout reserved for the result
   local PREFILL_CHARS=0
@@ -833,7 +837,7 @@ print(f'{p:.1f}|{d:.1f}|${AVG_CPU:-0}')
 "
 }
 
-# Fast GPU/CPU residency classification. Unlike measure_speed, this only needs a
+# Fast GPU/CPU residency classification. Unlike decode_guarded_probe, this only needs a
 # BINARY verdict (GPU vs CPU-spill), so it skips the prefill probe and kills the
 # decode curl as soon as the signal is provable — no full 4000-token wait.
 #
@@ -1211,6 +1215,267 @@ with open('$PTS') as f:
     for line in f: data.append((int(line.split()[0]), float(line.split()[1])))
 data.sort(key=lambda x: -x[1])
 for b, t in data[:3]: print(b, t)
+")
+
+  if [ "$CONFIRM_FOUND" -eq 1 ]; then
+    echo "$CONFIRM_BATCH|$CONFIRM_TPS"
+  else
+    log "  All top candidates failed confirm — keeping fastest (best-effort): batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+    set_batch "$BEST_BATCH" >&2
+    echo "$BEST_BATCH|$BEST_TPS"
+  fi
+}
+
+# ── GPU saturation sweep (decode-guarded fastest prefill) ──
+# Doubling ladder from 256 → $CEILING, each rung measured via decode_guarded_probe
+# (prefill + 4000-token decode + CPU% in one shot). Golden-section refinement to 64
+# granularity finds the true fastest prefill batch, but ONLY among candidates whose
+# decode t/s ≥ 90% of the best decode seen (the decode gate). Prevents picking a
+# high-prefill batch whose decode collapsed from CPU/draft spill.
+# Outputs "BATCH|PREFILL_TPS" to stdout. Confirms winner via saturation_test.
+gpu_saturation_sweep() {
+  local CTX=$1 CEILING=$2
+  local PTS=/tmp/gpu_sweep_points.txt   # batch prefill decode
+  : > "$PTS"
+
+  # Decode gate: reject rungs where decode < 0.9 × max_decode_seen.
+  local DECODE_GATE_FACTOR=0.9
+
+  test_rung() {
+    local TB=$1
+    set_batch "$TB" >&2; restart >&2
+    local RESULT
+    RESULT=$(decode_guarded_probe "$CTX")
+    local PFC DEC CPU
+    PFC=$(echo "$RESULT" | cut -d'|' -f1)
+    DEC=$(echo "$RESULT" | cut -d'|' -f2)
+    CPU=$(echo "$RESULT" | cut -d'|' -f3)
+    if [ "$PFC" = "0" ] && [ "$DEC" = "0" ]; then
+      # Distinguish OOM from STALL via oom_count_since_mark
+      local RC_OOM
+      RC_OOM=$(oom_count_since_mark)
+      if [ "$RC_OOM" -gt 0 ]; then
+        log "  batch=$TB: OOM" >&2
+        echo "OOM"
+      else
+        log "  batch=$TB: STALL" >&2
+        echo "STALL"
+      fi
+      return 0
+    fi
+    log "  batch=$TB: prefill=${PFC} t/s decode=${DEC} t/s cpu=${CPU}%" >&2
+    echo "$TB $PFC $DEC" >> "$PTS"
+    echo "$PFC"
+  }
+
+  log "=== GPU SATURATION SWEEP (ctx=$CTX, ceiling=$CEILING, decode gate=${DECODE_GATE_FACTOR}×) ===" >&2
+
+  # ── Ceiling below ladder floor: use ceiling directly (already OOM-validated upstream) ──
+  if [ "$CEILING" -lt 256 ]; then
+    log "  Ceiling $CEILING < 256 — probing ceiling directly (already OOM-validated upstream)" >&2
+    set_batch "$CEILING" >&2; restart >&2
+    local G_PRE
+    G_PRE=$(decode_guarded_probe "$CTX" | cut -d'|' -f1)
+    echo "$CEILING|${G_PRE:-0}"
+    return 0
+  fi
+
+  # ── Phase 1: doubling ladder ──
+  log "  Ladder: doubling from 256..." >&2
+  local B=256 BEST_TPS=0 BEST_BATCH=256 DESC=0 STOP=0
+  local MAX_DECODE=0
+  while [ "$B" -le "$CEILING" ]; do
+    log "  Testing batch=$B..." >&2
+    local TPS
+    TPS=$(test_rung "$B")
+    if [ "$TPS" = "STALL" ]; then log "  STALL — aborting sweep" >&2; break; fi
+    if [ "$TPS" = "OOM" ]; then
+      log "  OOM at batch=$B — can't use this level" >&2
+      break
+    fi
+    # Track max decode across all measured rungs
+    local THIS_DEC
+    THIS_DEC=$(awk -v b="$B" '$1==b{print $3; exit}' "$PTS" 2>/dev/null)
+    [ -n "$THIS_DEC" ] && python3 -c "exit(0 if $THIS_DEC > $MAX_DECODE else 1)" 2>/dev/null && MAX_DECODE=$THIS_DEC
+    if python3 -c "exit(0 if $TPS > $BEST_TPS else 1)" 2>/dev/null; then
+      BEST_TPS=$TPS; BEST_BATCH=$B
+    fi
+    if [ "$B" -gt "$BEST_BATCH" ] 2>/dev/null \
+       && python3 -c "exit(0 if $TPS < $BEST_TPS else 1)" 2>/dev/null; then
+      DESC=$((DESC + 1))
+      if [ "$DESC" -ge 2 ]; then
+        log "  Descending side confirmed past peak batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+        STOP=1; break
+      fi
+    else
+      DESC=0
+    fi
+    B=$((B * 2))
+  done
+
+  if [ "$STOP" -eq 0 ]; then
+    log "  No descent seen — peak at tested edge. Best: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+  fi
+
+  # ── Decode gate: compute threshold and mark degraded rungs ──
+  local DECODE_THRESHOLD
+  DECODE_THRESHOLD=$(python3 -c "print($MAX_DECODE * $DECODE_GATE_FACTOR)" 2>/dev/null || echo 0)
+  log "  Max decode=${MAX_DECODE} t/s, gate threshold=${DECODE_THRESHOLD} t/s" >&2
+
+  python3 -c "
+import sys
+pts = []
+with open('$PTS') as f:
+    for line in f:
+        parts = line.split()
+        pts.append((int(parts[0]), float(parts[1]), float(parts[2])))
+pts.sort()
+for b, p, d in pts:
+    tag = 'HEALTHY' if d >= $DECODE_THRESHOLD else 'DECODE-DROPPED'
+    print(f'    batch={b}  prefill={p:.1f}  decode={d:.1f}  [{tag}]', file=sys.stderr)
+" >&2
+
+  # ── Phase 2: golden-section max-search on prefill (pure prefill optimization).
+  # Decode gate is applied AFTER this phase (post-hoc): the fallback selects the
+  # best decode-healthy point from ALL measured rungs, not just golden-section points. ──
+  # Reconstruct bracket: LO = largest rung below the peak, HI = smallest rung above.
+  local LO HI
+  read -r LO HI < <(python3 -c "
+pts = []
+with open('$PTS') as f:
+    for line in f:
+        parts = line.split()
+        pts.append((int(parts[0]), float(parts[1]), float(parts[2])))
+pts.sort()
+peak = $BEST_BATCH
+lo = hi = None
+for b, p, d in pts:
+    if b < peak: lo = b
+    elif b == peak: continue
+    elif b > peak and hi is None: hi = b
+if lo is None: lo = 256
+if hi is None: hi = min($CEILING, peak * 2)
+print(lo, hi)
+" 2>/dev/null || echo "256 $CEILING")
+  [ -z "$LO" ] && LO=256
+  [ -z "$HI" ] && HI=$CEILING
+  log "  Peak=$BEST_BATCH (${BEST_TPS} t/s) → golden-section bracket [$LO, $HI]" >&2
+
+  # Golden-section: each iteration measures ONE new interior point.
+  local A B2 A_MEAS B2_MEAS
+  lookup_tps() {
+    awk -v b="$1" '$1==b{print $2; exit}' "$PTS" 2>/dev/null
+  }
+  lookup_decode() {
+    awk -v b="$1" '$1==b{print $3; exit}' "$PTS" 2>/dev/null
+  }
+
+  while [ $((HI - LO)) -gt 64 ]; do
+    B2=$((HI - (HI - LO) * 382 / 1000)); B2=$((B2 / 64 * 64))
+    A=$((LO + (HI - LO) * 382 / 1000)); A=$((A / 64 * 64))
+    [ "$A" -le "$LO" ] && A=$((LO + 64))
+    [ "$B2" -ge "$HI" ] && B2=$((HI - 64))
+    [ "$B2" -le "$A" ] && B2=$((A + 64))
+
+    A_MEAS=$(lookup_tps "$A")
+    B2_MEAS=$(lookup_tps "$B2")
+    if [ -n "$A_MEAS" ] && [ -n "$B2_MEAS" ]; then
+      log "  No new 64-granularity point between $LO and $HI — stopping golden-section" >&2
+      break
+    fi
+
+    if [ -z "$A_MEAS" ]; then
+      log "  Golden: testing A=$A (lo=$LO, hi=$HI)..." >&2
+      A_MEAS=$(test_rung "$A")
+      [ "$A_MEAS" = "STALL" ] && { log "  STALL — aborting sweep" >&2; break; }
+    else
+      log "  Golden: reuse A=$A (${A_MEAS} t/s, already measured)" >&2
+    fi
+    if [ -z "$B2_MEAS" ]; then
+      log "  Golden: testing B2=$B2 (lo=$LO, hi=$HI)..." >&2
+      B2_MEAS=$(test_rung "$B2")
+      [ "$B2_MEAS" = "STALL" ] && { log "  STALL — aborting sweep" >&2; break; }
+    else
+      log "  Golden: reuse B2=$B2 (${B2_MEAS} t/s, already measured)" >&2
+    fi
+
+    A_MEAS=$(python3 -c "print('$A_MEAS')" 2>/dev/null); [ "$A_MEAS" = "OOM" ] && A_MEAS=-1
+    B2_MEAS=$(python3 -c "print('$B2_MEAS')" 2>/dev/null); [ "$B2_MEAS" = "OOM" ] && B2_MEAS=-1
+
+    if [ "$A_MEAS" != "-1" ] 2>/dev/null && python3 -c "exit(0 if $A_MEAS > $BEST_TPS else 1)" 2>/dev/null; then
+      BEST_TPS=$A_MEAS; BEST_BATCH=$A
+    fi
+    if [ "$B2_MEAS" != "-1" ] 2>/dev/null && python3 -c "exit(0 if $B2_MEAS > $BEST_TPS else 1)" 2>/dev/null; then
+      BEST_TPS=$B2_MEAS; BEST_BATCH=$B2
+    fi
+
+    if python3 -c "exit(0 if $A_MEAS > $B2_MEAS else 1)" 2>/dev/null; then
+      HI=$B2
+    else
+      LO=$A
+    fi
+    [ $((HI - LO)) -le 64 ] && break
+  done
+
+  # ── Decode gate: exclude best if decode-degraded ──
+  local BEST_DEC
+  BEST_DEC=$(lookup_decode "$BEST_BATCH")
+  if [ -n "$BEST_DEC" ] && python3 -c "exit(0 if $BEST_DEC < $DECODE_THRESHOLD else 1)" 2>/dev/null; then
+    log "  Best batch=$BEST_BATCH (${BEST_TPS} t/s) has decode ${BEST_DEC} t/s < gate ${DECODE_THRESHOLD} — DECODE-DROPPED" >&2
+    # Find the fastest decode-healthy alternative
+    BEST_TPS=0; BEST_BATCH=0
+    while IFS=' ' read -r B P D; do
+      if python3 -c "exit(0 if $D >= $DECODE_THRESHOLD and $P > $BEST_TPS else 1)" 2>/dev/null; then
+        BEST_TPS=$P; BEST_BATCH=$B
+      fi
+    done < "$PTS"
+    if [ "$BEST_BATCH" -gt 0 ]; then
+      log "  Decode-healthy fallback: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
+    else
+      log "  ERROR: no decode-healthy candidate found — using ceiling" >&2
+      BEST_BATCH=$CEILING; BEST_TPS=0
+    fi
+  fi
+
+  log "  Short-probe sweep done. Top-ranked candidates (decode-gated):" >&2
+  python3 -c "
+import sys
+pts = []
+with open('$PTS') as f:
+    for line in f:
+        parts = line.split()
+        pts.append((int(parts[0]), float(parts[1]), float(parts[2])))
+pts.sort(key=lambda x: -x[1])
+for b, p, d in pts[:5]:
+    tag = 'HEALTHY' if d >= $DECODE_THRESHOLD else 'DROPPED'
+    print(f'    batch={b}  prefill={p:.1f}  decode={d:.1f}  [{tag}]', file=sys.stderr)
+" >&2
+
+  # ── Confirm: run saturation_test on top-ranked decode-healthy candidates ──
+  local CONFIRM_BATCH CONFIRM_TPS CONFIRM_FOUND=0
+  while read CONFIRM_BATCH CONFIRM_TPS; do
+    log "  Confirm: saturation_test at batch=$CONFIRM_BATCH..." >&2
+    set_batch "$CONFIRM_BATCH" >&2; restart >&2
+    saturation_test "$CTX" >&2
+    local C_RC=$?
+    if [ "$C_RC" -eq 0 ]; then
+      log "  Confirm PASS at batch=$CONFIRM_BATCH (${CONFIRM_TPS} t/s)" >&2
+      CONFIRM_FOUND=1; break
+    elif [ "$C_RC" -eq 2 ]; then
+      log "  STALL during confirm — aborting" >&2; break
+    else
+      log "  Confirm FAIL at batch=$CONFIRM_BATCH" >&2
+    fi
+  done < <(python3 -c "
+pts = []
+with open('$PTS') as f:
+    for line in f:
+        parts = line.split()
+        pts.append((int(parts[0]), float(parts[1]), float(parts[2])))
+pts.sort(key=lambda x: -x[1])
+for b, p, d in pts[:3]:
+    if d >= $DECODE_THRESHOLD:
+        print(b, p)
 ")
 
   if [ "$CONFIRM_FOUND" -eq 1 ]; then
@@ -1799,9 +2064,9 @@ cmd_bisect() {
   fi
 
   # ── RESIDENCY GATE + SELECTION ──
-  # GPU-resident models: use the boundary (largest GPU-resident = max prefill, fast decode).
-  # CPU-compute models: prefill sweep finds the fastest batch (prefill varies with batch,
-  # decode is batch-invariant). No Phase 4 combined-throughput sweep needed.
+  # GPU-resident models: sweep 256→ceiling via gpu_saturation_sweep, which measures
+  # decode per rung and picks fastest prefill among decode-healthy candidates.
+  # CPU-spilled models: descend to largest GPU-resident ceiling, then sweep.
   log ""; log "=== RESIDENCY CHECK (batch=$VALIDATED) ==="
   local R_VERDICT DESC
   R_VERDICT=$(residency_probe)
@@ -1810,41 +2075,10 @@ cmd_bisect() {
     exit 1
   fi
   if [ "$R_VERDICT" = "GPU" ]; then
-    if [ "$VALIDATED" -eq "$CTX" ]; then
-      log "  batch is GPU-resident (100% GPU) — value is ctx"
-      set_batch "$VALIDATED"
-      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (ctx, GPU-resident) ***"
-      log ""; log "=== RESULT ==="
-      log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-      log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
-      log "  residency: ctx passes + GPU-resident — boundary is optimum"
-      log ""; log "  Next: run bench.sh bench $MODEL"
-      log "=== DONE ==="
-      exit 0
-    fi
-    log "  ceiling is GPU-resident — boundary is optimum (prefill monotonic, decode constant)"
+    log "  ceiling is GPU-resident — running decode-guarded prefill sweep (256→$VALIDATED)"
   else
     # Early gate confirmed GPU-capable at 256; ceiling spilled — descend to largest GPU-resident.
-    if [ "$VALIDATED" -eq "$CTX" ]; then
-      log "  ctx fits but spills — descending to largest GPU-resident batch"
-      DESC=$(residency_descend "$CTX")
-      local DESC_RC=$?
-      if [ "$DESC_RC" -eq 2 ]; then
-        log "  residency descend: STALL — model can't cold-load (network/HF fetch)"
-        exit 1
-      fi
-      VALIDATED=$DESC
-      set_batch "$VALIDATED"
-      log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (largest GPU-resident) ***"
-      log ""; log "=== RESULT ==="
-      log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
-      log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
-      log "  residency: ctx spilled, descended to largest 100%-GPU batch"
-      log ""; log "  Next: run bench.sh bench $MODEL"
-      log "=== DONE ==="
-      exit 0
-    fi
-    log "  ceiling spilled but 100% GPU possible — descending to largest GPU-resident batch"
+    log "  ceiling spilled — descending to largest GPU-resident batch"
     DESC=$(residency_descend "$VALIDATED")
     local DESC_RC=$?
     if [ "$DESC_RC" -eq 2 ]; then
@@ -1852,16 +2086,24 @@ cmd_bisect() {
       exit 1
     fi
     VALIDATED=$DESC
-    log "  Largest GPU-resident batch: $VALIDATED"
+    log "  Largest GPU-resident batch: $VALIDATED — running decode-guarded prefill sweep (256→$VALIDATED)"
   fi
 
-  set_batch "$VALIDATED"
-  log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$VALIDATED (boundary) ***"
+  # ── GPU SATURATION SWEEP: decode-guarded fastest prefill ──
+  local SWEEP_OUT
+  SWEEP_OUT=$(gpu_saturation_sweep "$CTX" "$VALIDATED")
+  local WIN WIN_TPS
+  WIN=$(echo "$SWEEP_OUT" | cut -d'|' -f1)
+  WIN_TPS=$(echo "$SWEEP_OUT" | cut -d'|' -f2)
+  [ -z "$WIN" ] && WIN="$SWEEP_OUT"  # fallback
+  set_batch "$WIN"
+
+  log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$WIN (${WIN_TPS} t/s, decode-guarded prefill) ***"
 
   log ""; log "=== RESULT ==="
-  log "  batch=$VALIDATED ubatch=$VALIDATED ctx=$CTX"
+  log "  batch=$WIN ubatch=$WIN ctx=$CTX"
   log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
-  log "  boundary: largest GPU-resident batch (prefill monotonic + decode constant)"
+  log "  decode-guarded prefill sweep: fastest prefill among decode-healthy batches (decode ≥ 90% best)"
   log ""; log "  Next: run bench.sh bench $MODEL"
   log "=== DONE ==="
 }
@@ -2544,15 +2786,15 @@ if [ "$#" -eq 0 ]; then
   echo ""
   read -r -p "Inherit values from family parent? [Y/n]: " INHERIT_INPUT
   case "${INHERIT_INPUT:-Y}" in
-    [nN][oO]) INHERIT_MODE=0; log "  Inherit mode: OFF (each model bench-marked independently)" ;;
-    *)        INHERIT_MODE=1; log "  Inherit mode: ON (siblings inherit from parent's JSON)" ;;
+    [nN]|[nN][oO]) INHERIT_MODE=0; log "  Inherit mode: OFF (each model bench-marked independently)" ;;
+    *)              INHERIT_MODE=1; log "  Inherit mode: ON (siblings inherit from parent's JSON)" ;;
   esac
 
   if [ "$INHERIT_MODE" -eq 1 ]; then
     read -r -p "Reset parent first? (re-bench parent to create fresh source) [y/N]: " RESET_INPUT
     case "${RESET_INPUT:-N}" in
-      [yY][eE][sS]) RESET_PARENT=1; log "  Reset parent: YES (parent will be re-benched first)" ;;
-      *)            RESET_PARENT=0 ;;
+      [yY]|[yY][eE][sS]) RESET_PARENT=1; log "  Reset parent: YES (parent will be re-benched first)" ;;
+      *)                  RESET_PARENT=0 ;;
     esac
   fi
 
