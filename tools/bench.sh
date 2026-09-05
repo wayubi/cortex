@@ -767,8 +767,10 @@ else: print('  Long-decode: FAIL'); exit(1)
 # Decode:  short-prompt 4000-token window → predicted_per_second, plus CPU% polling.
 # Echoes "prefill_t_s|decode_t_s|avg_cpu" to stdout (all logs → stderr).
 # Returns "0|0|0" on STALL/OOM (caller must reject the rung).
+# Optional $2="prefill": skip decode entirely, return "prefill|0|0" (fast search probe).
 decode_guarded_probe() {
   local CTX=$1
+  local MODE=${2:-full}
   measure_ratio >&2 || true   # progress → stderr; stdout reserved for the result
   local PREFILL_CHARS=0
   if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
@@ -790,6 +792,24 @@ with open('/tmp/perf_prefill_payload.json','w') as f: json.dump(payload, f)
   local RC=$?
   if [ "$RC" -eq 2 ]; then echo "0|0|0"; return 0; fi
   wait "$FIRE_PID" 2>/dev/null || true
+
+  local PFC
+  PFC=$(python3 -c "
+import json
+try:
+    d = json.load(open('/tmp/perf_prefill.json'))
+    if 'choices' in d:
+        p = d.get('timings', {}).get('prompt_per_second', 0)
+        print(f'{p:.1f}')
+except: pass
+print('0')
+" 2>/dev/null | tail -1)
+
+  # Prefill-only mode: skip decode, return immediately
+  if [ "$MODE" = "prefill" ]; then
+    echo "${PFC}|0|0"
+    return 0
+  fi
 
   # Decode probe (short prompt, full 4000-token window) — poll CPU during it
   # for GPU-residency classification
@@ -1227,31 +1247,30 @@ for b, t in data[:3]: print(b, t)
 }
 
 # ── GPU saturation sweep (decode-guarded fastest prefill) ──
-# Doubling ladder from 256 → $CEILING, each rung measured via decode_guarded_probe
-# (prefill + 4000-token decode + CPU% in one shot). Golden-section refinement to 64
-# granularity finds the true fastest prefill batch, but ONLY among candidates whose
-# decode t/s ≥ 90% of the best decode seen (the decode gate). Prevents picking a
-# high-prefill batch whose decode collapsed from CPU/draft spill.
+# Doubling ladder from 256 → $CEILING, each rung measured via prefill_only_probe
+# (75%-ctx prefill, max_tokens=1 — fast, no decode). Golden-section refinement to 64
+# granularity finds the true fastest prefill batch. Then a SHORTLIST decode gate runs
+# the full 4000-token decode on the top-5 prefill candidates only, rejecting any whose
+# decode t/s < 90% of the best decode seen (catches CPU/draft spill on the actual
+# winners). This keeps the same gate semantics while cutting full-decode probes from
+# ~13-16 per model to ~5 (the shortlist).
 # Outputs "BATCH|PREFILL_TPS" to stdout. Confirms winner via saturation_test.
 gpu_saturation_sweep() {
   local CTX=$1 CEILING=$2
-  local PTS=/tmp/gpu_sweep_points.txt   # batch prefill decode
+  local PTS=/tmp/gpu_sweep_points.txt   # batch prefill (2 cols — search is prefill-only)
   : > "$PTS"
-
-  # Decode gate: reject rungs where decode < 0.9 × max_decode_seen.
   local DECODE_GATE_FACTOR=0.9
+  local SHORTLIST_SIZE=5
 
+  # ── test_rung: prefill-only probe (fast, no decode) ──
   test_rung() {
     local TB=$1
     set_batch "$TB" >&2; restart >&2
     local RESULT
-    RESULT=$(decode_guarded_probe "$CTX")
-    local PFC DEC CPU
+    RESULT=$(decode_guarded_probe "$CTX" prefill)
+    local PFC
     PFC=$(echo "$RESULT" | cut -d'|' -f1)
-    DEC=$(echo "$RESULT" | cut -d'|' -f2)
-    CPU=$(echo "$RESULT" | cut -d'|' -f3)
-    if [ "$PFC" = "0" ] && [ "$DEC" = "0" ]; then
-      # Distinguish OOM from STALL via oom_count_since_mark
+    if [ "$PFC" = "0" ]; then
       local RC_OOM
       RC_OOM=$(oom_count_since_mark)
       if [ "$RC_OOM" -gt 0 ]; then
@@ -1263,12 +1282,12 @@ gpu_saturation_sweep() {
       fi
       return 0
     fi
-    log "  batch=$TB: prefill=${PFC} t/s decode=${DEC} t/s cpu=${CPU}%" >&2
-    echo "$TB $PFC $DEC" >> "$PTS"
+    log "  batch=$TB: prefill=${PFC} t/s (search probe)" >&2
+    echo "$TB $PFC" >> "$PTS"
     echo "$PFC"
   }
 
-  log "=== GPU SATURATION SWEEP (ctx=$CTX, ceiling=$CEILING, decode gate=${DECODE_GATE_FACTOR}×) ===" >&2
+  log "=== GPU SATURATION SWEEP (ctx=$CTX, ceiling=$CEILING, decode gate=${DECODE_GATE_FACTOR}×, shortlist=$SHORTLIST_SIZE) ===" >&2
 
   # ── Ceiling below ladder floor: use ceiling directly (already OOM-validated upstream) ──
   if [ "$CEILING" -lt 256 ]; then
@@ -1280,23 +1299,15 @@ gpu_saturation_sweep() {
     return 0
   fi
 
-  # ── Phase 1: doubling ladder ──
+  # ── Phase 1: doubling ladder (prefill-only, fast) ──
   log "  Ladder: doubling from 256..." >&2
   local B=256 BEST_TPS=0 BEST_BATCH=256 DESC=0 STOP=0
-  local MAX_DECODE=0
   while [ "$B" -le "$CEILING" ]; do
     log "  Testing batch=$B..." >&2
     local TPS
     TPS=$(test_rung "$B")
     if [ "$TPS" = "STALL" ]; then log "  STALL — aborting sweep" >&2; break; fi
-    if [ "$TPS" = "OOM" ]; then
-      log "  OOM at batch=$B — can't use this level" >&2
-      break
-    fi
-    # Track max decode across all measured rungs
-    local THIS_DEC
-    THIS_DEC=$(awk -v b="$B" '$1==b{print $3; exit}' "$PTS" 2>/dev/null)
-    [ -n "$THIS_DEC" ] && python3 -c "exit(0 if $THIS_DEC > $MAX_DECODE else 1)" 2>/dev/null && MAX_DECODE=$THIS_DEC
+    if [ "$TPS" = "OOM" ]; then log "  OOM at batch=$B — can't use this level" >&2; break; fi
     if python3 -c "exit(0 if $TPS > $BEST_TPS else 1)" 2>/dev/null; then
       BEST_TPS=$TPS; BEST_BATCH=$B
     fi
@@ -1317,39 +1328,18 @@ gpu_saturation_sweep() {
     log "  No descent seen — peak at tested edge. Best: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
   fi
 
-  # ── Decode gate: compute threshold and mark degraded rungs ──
-  local DECODE_THRESHOLD
-  DECODE_THRESHOLD=$(python3 -c "print($MAX_DECODE * $DECODE_GATE_FACTOR)" 2>/dev/null || echo 0)
-  log "  Max decode=${MAX_DECODE} t/s, gate threshold=${DECODE_THRESHOLD} t/s" >&2
-
-  python3 -c "
-import sys
-pts = []
-with open('$PTS') as f:
-    for line in f:
-        parts = line.split()
-        pts.append((int(parts[0]), float(parts[1]), float(parts[2])))
-pts.sort()
-for b, p, d in pts:
-    tag = 'HEALTHY' if d >= $DECODE_THRESHOLD else 'DECODE-DROPPED'
-    print(f'    batch={b}  prefill={p:.1f}  decode={d:.1f}  [{tag}]', file=sys.stderr)
-" >&2
-
-  # ── Phase 2: golden-section max-search on prefill (pure prefill optimization).
-  # Decode gate is applied AFTER this phase (post-hoc): the fallback selects the
-  # best decode-healthy point from ALL measured rungs, not just golden-section points. ──
-  # Reconstruct bracket: LO = largest rung below the peak, HI = smallest rung above.
+  # ── Phase 2: golden-section max-search on prefill (pure prefill optimization) ──
   local LO HI
   read -r LO HI < <(python3 -c "
 pts = []
 with open('$PTS') as f:
     for line in f:
-        parts = line.split()
-        pts.append((int(parts[0]), float(parts[1]), float(parts[2])))
+        b, p = line.split()[:2]
+        pts.append((int(b), float(p)))
 pts.sort()
 peak = $BEST_BATCH
 lo = hi = None
-for b, p, d in pts:
+for b, p in pts:
     if b < peak: lo = b
     elif b == peak: continue
     elif b > peak and hi is None: hi = b
@@ -1361,13 +1351,9 @@ print(lo, hi)
   [ -z "$HI" ] && HI=$CEILING
   log "  Peak=$BEST_BATCH (${BEST_TPS} t/s) → golden-section bracket [$LO, $HI]" >&2
 
-  # Golden-section: each iteration measures ONE new interior point.
   local A B2 A_MEAS B2_MEAS
   lookup_tps() {
     awk -v b="$1" '$1==b{print $2; exit}' "$PTS" 2>/dev/null
-  }
-  lookup_decode() {
-    awk -v b="$1" '$1==b{print $3; exit}' "$PTS" 2>/dev/null
   }
 
   while [ $((HI - LO)) -gt 64 ]; do
@@ -1417,73 +1403,98 @@ print(lo, hi)
     [ $((HI - LO)) -le 64 ] && break
   done
 
-  # ── Decode gate: exclude best if decode-degraded ──
-  local BEST_DEC
-  BEST_DEC=$(lookup_decode "$BEST_BATCH")
-  if [ -n "$BEST_DEC" ] && python3 -c "exit(0 if $BEST_DEC < $DECODE_THRESHOLD else 1)" 2>/dev/null; then
-    log "  Best batch=$BEST_BATCH (${BEST_TPS} t/s) has decode ${BEST_DEC} t/s < gate ${DECODE_THRESHOLD} — DECODE-DROPPED" >&2
-    # Find the fastest decode-healthy alternative
-    BEST_TPS=0; BEST_BATCH=0
-    while IFS=' ' read -r B P D; do
-      if python3 -c "exit(0 if $D >= $DECODE_THRESHOLD and $P > $BEST_TPS else 1)" 2>/dev/null; then
-        BEST_TPS=$P; BEST_BATCH=$B
-      fi
-    done < "$PTS"
-    if [ "$BEST_BATCH" -gt 0 ]; then
-      log "  Decode-healthy fallback: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
-    else
-      log "  ERROR: no decode-healthy candidate found — using ceiling" >&2
-      BEST_BATCH=$CEILING; BEST_TPS=0
-    fi
-  fi
+  log "  Prefill search done. Best prefill: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
 
-  log "  Short-probe sweep done. Top-ranked candidates (decode-gated):" >&2
+  # ── Shortlist decode gate: run full decode on top-N prefill candidates ──
+  local SHORTLIST_PREFILL=$(mktemp)   # top-N by prefill (batch prefill)
   python3 -c "
-import sys
 pts = []
 with open('$PTS') as f:
     for line in f:
-        parts = line.split()
-        pts.append((int(parts[0]), float(parts[1]), float(parts[2])))
+        b, p = line.split()[:2]
+        pts.append((int(b), float(p)))
 pts.sort(key=lambda x: -x[1])
-for b, p, d in pts[:5]:
-    tag = 'HEALTHY' if d >= $DECODE_THRESHOLD else 'DROPPED'
-    print(f'    batch={b}  prefill={p:.1f}  decode={d:.1f}  [{tag}]', file=sys.stderr)
-" >&2
+for b, p in pts[:$SHORTLIST_SIZE]:
+    print(f'{b} {p}')
+" > "$SHORTLIST_PREFILL" 2>/dev/null
 
-  # ── Confirm: run saturation_test on top-ranked decode-healthy candidates ──
-  local CONFIRM_BATCH CONFIRM_TPS CONFIRM_FOUND=0
-  while read CONFIRM_BATCH CONFIRM_TPS; do
-    log "  Confirm: saturation_test at batch=$CONFIRM_BATCH..." >&2
+  log "  Running decode gate on top-${SHORTLIST_SIZE} prefill candidates..." >&2
+  local MAX_DECODE=0 DECODE_THRESHOLD
+  local SHORTLIST_RAW=$(mktemp)   # batch prefill decode (all decoded entries, prefill-desc)
+
+  # Single pass: decode each shortlist candidate, collect raw values, track MAX_DECODE
+  while IFS=' ' read -r SB SP; do
+    [ -z "$SB" ] && continue
+    set_batch "$SB" >&2; restart >&2
+    local D_RESULT
+    D_RESULT=$(decode_guarded_probe "$CTX")
+    local D_PFC D_DEC
+    D_PFC=$(echo "$D_RESULT" | cut -d'|' -f1)
+    D_DEC=$(echo "$D_RESULT" | cut -d'|' -f2)
+    if [ "$D_PFC" = "0" ] && [ "$D_DEC" = "0" ]; then
+      log "  batch=$SB: decode probe STALL/OOM — DECODE-DROPPED" >&2
+      echo "$SB $SP 0 STALL" >> "$SHORTLIST_RAW"
+      continue
+    fi
+    echo "$SB $D_PFC $D_DEC HEALTHY" >> "$SHORTLIST_RAW"
+    log "  batch=$SB: prefill=${D_PFC} t/s decode=${D_DEC} t/s" >&2
+    if python3 -c "exit(0 if $D_DEC > $MAX_DECODE else 1)" 2>/dev/null; then
+      MAX_DECODE=$D_DEC
+    fi
+  done < "$SHORTLIST_PREFILL"
+  rm -f "$SHORTLIST_PREFILL"
+
+  # Compute threshold
+  DECODE_THRESHOLD=$(python3 -c "print($MAX_DECODE * $DECODE_GATE_FACTOR)" 2>/dev/null || echo 0)
+  log "  Max decode (shortlist)=${MAX_DECODE} t/s, gate threshold=${DECODE_THRESHOLD} t/s" >&2
+
+  # Apply decode gate: reclassify HEALTHY → DECODE-DROPPED if below threshold, display all
+  local SHORTLIST_HEALTHY=$(mktemp)  # batch prefill (healthy candidates only, prefill-desc)
+  while IFS=' ' read -r SB SP SD SR; do
+    [ -z "$SB" ] && continue
+    local TAG="$SR"
+    if [ "$SR" = "HEALTHY" ]; then
+      if python3 -c "exit(0 if $SD < $DECODE_THRESHOLD else 1)" 2>/dev/null; then
+        TAG="DECODE-DROPPED"
+      fi
+    fi
+    log "    batch=$SB  prefill=${SP} t/s  decode=${SD} t/s  [$TAG]" >&2
+    if [ "$TAG" = "HEALTHY" ]; then
+      echo "$SB $SP" >> "$SHORTLIST_HEALTHY"
+    fi
+  done < "$SHORTLIST_RAW"
+  rm -f "$SHORTLIST_RAW"
+
+  # ── Confirm: saturation-test decode-healthy candidates (top-3 prefill), fallback to CEILING ──
+  log "" >&2
+  local CONFIRM_BATCH CONFIRM_PFC CONFIRM_FOUND=0 CONFIRM_COUNT=0 CONFIRM_MAX=3
+
+  while IFS=' ' read -r CONFIRM_BATCH CONFIRM_PFC; do
+    [ -z "$CONFIRM_BATCH" ] && continue
+    CONFIRM_COUNT=$((CONFIRM_COUNT + 1))
+    [ "$CONFIRM_COUNT" -gt "$CONFIRM_MAX" ] && break
+    log "  Confirm $CONFIRM_COUNT/$CONFIRM_MAX: saturation_test at batch=$CONFIRM_BATCH (${CONFIRM_PFC} t/s)..." >&2
     set_batch "$CONFIRM_BATCH" >&2; restart >&2
     saturation_test "$CTX" >&2
     local C_RC=$?
     if [ "$C_RC" -eq 0 ]; then
-      log "  Confirm PASS at batch=$CONFIRM_BATCH (${CONFIRM_TPS} t/s)" >&2
+      log "  Confirm PASS at batch=$CONFIRM_BATCH (${CONFIRM_PFC} t/s)" >&2
       CONFIRM_FOUND=1; break
     elif [ "$C_RC" -eq 2 ]; then
-      log "  STALL during confirm — aborting" >&2; break
+      log "  STALL during confirm — falling back to CEILING (pre-validated batch=$CEILING)" >&2
+      break
     else
-      log "  Confirm FAIL at batch=$CONFIRM_BATCH" >&2
+      log "  Confirm FAIL at batch=$CONFIRM_BATCH — trying next candidate..." >&2
     fi
-  done < <(python3 -c "
-pts = []
-with open('$PTS') as f:
-    for line in f:
-        parts = line.split()
-        pts.append((int(parts[0]), float(parts[1]), float(parts[2])))
-pts.sort(key=lambda x: -x[1])
-for b, p, d in pts[:3]:
-    if d >= $DECODE_THRESHOLD:
-        print(b, p)
-")
+  done < "$SHORTLIST_HEALTHY"
+
+  rm -f "$SHORTLIST_HEALTHY"
 
   if [ "$CONFIRM_FOUND" -eq 1 ]; then
-    echo "$CONFIRM_BATCH|$CONFIRM_TPS"
+    echo "$CONFIRM_BATCH|$CONFIRM_PFC"
   else
-    log "  All top candidates failed confirm — keeping fastest (best-effort): batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
-    set_batch "$BEST_BATCH" >&2
-    echo "$BEST_BATCH|$BEST_TPS"
+    log "  All decode-healthy candidates failed saturation — using CEILING (pre-validated batch=$CEILING)" >&2
+    echo "$CEILING|0"
   fi
 }
 
