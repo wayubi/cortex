@@ -569,12 +569,7 @@ with open('/tmp/probe_payload.json','w') as f: json.dump(payload, f)
 # Cached after the first successful measurement — reused across all phases/candidates.
 CHARS_PER_TOK=0
 measure_ratio() {
-  local RATIO_CACHE="/tmp/chars_per_tok_${MODEL}.cache"
-  # skip the probe if we have a cached ratio (persisted to file for cross-subshell reuse)
-  if [ -s "$RATIO_CACHE" ]; then
-    CHARS_PER_TOK=$(cat "$RATIO_CACHE")
-    return 0
-  fi
+  # skip the probe if we already have a cached ratio
   if python3 -c "exit(0 if float($CHARS_PER_TOK) > 0 else 1)" 2>/dev/null; then
     return 0
   fi
@@ -597,7 +592,6 @@ except: print(0)
 " 2>/dev/null || echo 0)
   if [ "$TOK" -gt 0 ] 2>/dev/null; then
     CHARS_PER_TOK=$(python3 -c "print('%.1f' % ($MEASURE_CHARS / $TOK))" 2>/dev/null || echo 0)
-    echo "$CHARS_PER_TOK" > "$RATIO_CACHE"
     log "  Measured ratio: $MEASURE_CHARS chars = $TOK tokens → ${CHARS_PER_TOK} chars/tok"
     return 0
   fi
