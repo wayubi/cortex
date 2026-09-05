@@ -452,12 +452,21 @@ SERVED_GRACE=${SERVED_GRACE:-60}
 # Takes the curl PID — if the curl has already exited (request completed, whether
 # 200 or 500), return 0 immediately so the caller can parse the response. Only
 # return 1 (hung) if the curl is STILL running and no proxy line appeared.
+# If a load-crash marker (GGML_ASSERT, cudaMalloc, "failed to load") appears in the
+# log before proxy_reques, kill curl and return 0 so the caller catches the OOM via
+# oom_count_since_mark (rather than treating it as a retryable network stall).
 # All logs → stderr (caller may capture stdout via $()).
 wait_served() {
   local PID=$1
   local i
   for i in $(seq 1 $((SERVED_GRACE / 2))); do
     if ! kill -0 "$PID" 2>/dev/null; then return 0; fi
+    # Check for model load-crash / OOM markers (intermittent crashes kill the
+    # child server before SERVED_GRACE; we must catch them here, not after).
+    if docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -qiE "$OMG_GREP"; then
+      kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null || true
+      return 0
+    fi
     if docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
          | grep -q "proxy_reques: proxying request to model $MODEL"; then
       return 0
@@ -477,6 +486,35 @@ t = $MAX_TOK / 4 * 3
 t = max(600, min(7200, int(t)))
 print(t)
 "
+}
+
+# Bracketed halve-down + bisect (O(log)) to find the largest batch below $CEIL
+# that survives full saturation. Result is written to global $BHD_RESULT.
+# Returns 0 = success, 2 = STALL (caller must handle).
+# Note: called directly (not via $() command substitution) so that exit/return
+# propagates correctly under both standalone and suite (if-condition) dispatch.
+bracketed_halve_down() {
+  local CEIL=$1 CTX_VAL=$2
+  local HI=$CEIL LO=0
+  local BATCH=$((CEIL / 2))
+  while [ "$BATCH" -ge 64 ]; do
+    set_batch "$BATCH"; restart
+    saturation_test "$CTX_VAL"
+    local BR_RC=$?
+    if [ "$BR_RC" -eq 2 ]; then log "  STALL — aborting"; return 2; fi
+    if [ "$BR_RC" -eq 0 ]; then LO=$BATCH; break
+    else HI=$BATCH; BATCH=$((BATCH / 2)); fi
+  done
+  while [ $((HI - LO)) -gt 64 ]; do
+    MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
+    [ "$MID" -le "$LO" ] && MID=$((LO + 64))
+    set_batch "$MID"; restart
+    saturation_test "$CTX_VAL"
+    local BR_RC=$?
+    if [ "$BR_RC" -eq 2 ]; then log "  STALL — aborting"; return 2; fi
+    if [ "$BR_RC" -eq 0 ]; then LO=$MID; else HI=$MID; fi
+  done
+  BHD_RESULT=$LO
 }
 
 # Fire a chat-completions POST from $1 (payload @file) to $2 (out), watching for
@@ -1710,31 +1748,46 @@ cmd_bisect() {
     PASS=1
     log "  *** VALIDATED batch=$VALIDATED ***"
   else
-    # Bracketed halve-down + bisect (O(log) — replaces the -64 grind)
     log "  Final confirm FAIL — bracketed halve-down search"
-    HI=$VALIDATED; LO=0
-    local BATCH=$((VALIDATED / 2))
-    while [ "$BATCH" -ge 64 ]; do
-      set_batch "$BATCH"; restart
-      saturation_test "$CTX"
-      local BR_RC=$?
-      if [ "$BR_RC" -eq 2 ]; then log "  STALL in bracketed search — aborting"; exit 1; fi
-      if [ "$BR_RC" -eq 0 ]; then LO=$BATCH; break
-      else HI=$BATCH; BATCH=$((BATCH / 2)); fi
-    done
-    while [ $((HI - LO)) -gt 64 ]; do
-      MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
-      [ "$MID" -le "$LO" ] && MID=$((LO + 64))
-      set_batch "$MID"; restart
-      saturation_test "$CTX"
-      local BR_RC=$?
-      if [ "$BR_RC" -eq 2 ]; then log "  STALL in bracketed search — aborting"; exit 1; fi
-      if [ "$BR_RC" -eq 0 ]; then LO=$MID; else HI=$MID; fi
-    done
-    VALIDATED=$LO
+    bracketed_halve_down "$VALIDATED" "$CTX" || exit 1
+    VALIDATED=$BHD_RESULT
     PASS=1
     log "  *** Saturation-validated batch=$VALIDATED (bracketed search) ***"
   fi
+
+  # ── RE-CONFIRM: multi-cycle cold-load validation ──
+  # The bisect's single-pass saturation can miss intermittent load crashes.
+  # Re-check with N cold-loads; if any crash, step the batch down.
+  # Wraps in a while loop so stepped-down values are re-submitted.
+  log ""
+  while true; do
+    log "=== RE-CONFIRM: testing batch=$VALIDATED × 3 ==="
+    local RC_PASS=0 RC_CYCLES=0
+    for RC_CYCLES in 1 2 3; do
+      set_batch "$VALIDATED"; restart
+      tiny_probe
+      local RC_T=$?
+      local RC_O=$(oom_count_since_mark)
+      if [ "$RC_T" -ne 0 ] || [ "$RC_O" -gt 0 ]; then
+        log "  Re-confirm $RC_CYCLES: FAIL (OOM or probe failure at batch=$VALIDATED)"
+        break
+      fi
+      RC_PASS=$((RC_PASS + 1))
+      log "  Re-confirm $RC_CYCLES: PASS"
+    done
+    if [ "$RC_PASS" -eq 3 ]; then
+      log "  Re-confirm PASSED (3/3 cycles) — batch $VALIDATED is reliable"
+      break
+    fi
+    log "  Re-confirm FAILED ($RC_PASS/3 cycles passed) — stepping down"
+    bracketed_halve_down "$VALIDATED" "$CTX" || exit 1
+    VALIDATED=$BHD_RESULT
+    if [ "$VALIDATED" -le 64 ]; then
+      log "  ERROR: no reliable batch found above 64 — aborting"
+      exit 1
+    fi
+    log "  Stepped down to batch=$VALIDATED — re-confirming..."
+  done
 
   log ""; log "=== LONG-DECODE CHECK ==="
   set_batch "$VALIDATED"; restart
