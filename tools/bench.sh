@@ -796,13 +796,14 @@ with open('/tmp/perf_prefill_payload.json','w') as f: json.dump(payload, f)
   local PFC
   PFC=$(python3 -c "
 import json
+val = 0
 try:
     d = json.load(open('/tmp/perf_prefill.json'))
     if 'choices' in d:
-        p = d.get('timings', {}).get('prompt_per_second', 0)
-        print(f'{p:.1f}')
-except: pass
-print('0')
+        val = d.get('timings', {}).get('prompt_per_second', 0) or 0
+except Exception:
+    pass
+print(f'{val:.1f}')
 " 2>/dev/null | tail -1)
 
   # Prefill-only mode: skip decode, return immediately
