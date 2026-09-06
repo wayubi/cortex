@@ -177,6 +177,24 @@ Each finding was checked against the current `tools/bench.sh` (2926 lines). Conf
 | 2.3 `SAT_PREFILL_TPS` unused | **CONFIRMED** | `:611` set, `:735` logged; no caller reads it |
 | 2.6 `smpbo` | **INTENTIONAL** | Commit `18415cf` deliberately added; semantics opaque but not a bug |
 
+## Sentinel contracts (A2/A3 agreement)
+
+The A2 and A3 fixes must agree on what `prefill_probe` returns and how `test_rung` classifies it. This section documents the contract to prevent future drift.
+
+**`prefill_probe` return contract:**
+- Returns a **numeric t/s string** on success.
+- Returns bare **`"0"`** on any failure (OOM, network-stall, context-overflow, parse-fail).
+- **Never returns a sentinel string** (`"STALL"`, `"OOM"`, etc.) — all classification is external.
+
+**`cpu_saturation_sweep` `test_rung` classification:**
+- If `TPS = "0"`: check `oom_count_since_mark` → OOM if `>0`, else STALL.
+- Only append to `$PTS` on genuine numeric success.
+- Literal `"STALL"` and `"OOM"` echoed by `test_rung` are internal to the sweep (not returned by `prefill_probe`).
+
+**Why this matters:** `"STALL"` already has a specific meaning elsewhere (`fire_request` RC=2, cold-load network hang). Reusing it for context-overflow (a config mismatch) would conflate two distinct failure modes. The shrink-and-retry approach in A3 avoids this entirely.
+
+---
+
 ## Batch A — Critical correctness (1.1–1.5)
 
 ### A1. `bracketed_halve_down`: detect "no pass at all" (`:496-518`)
@@ -199,11 +217,18 @@ Make `cpu_saturation_sweep`'s `test_rung` classify failures the same way `gpu_sa
 
 This makes the ladder's `STALL`/`OOM` branches (`:1089-1093`) live instead of dead.
 
-### A3. `prefill_probe`: honor passed ctx (`:1016-1055`)
+**A3 contract dependency:** A2's classification depends on `prefill_probe` remaining dumb (returns number or `"0"` only). A3's revised design preserves this — `prefill_probe` handles context-overflow by shrink-and-retry internally, never emitting a sentinel string. A2's `test_rung` check `if [ "$TPS" = "0" ]` + external `oom_count_since_mark` classification is unaffected.
 
-1. Read `$1` (CTX).
-2. `PROBE_CHARS = min(32000, ctx*0.5*chars_per_tok)` using measured ratio. **Floor: `ctx/4`** (ensures streaming lines fire for sub-10K models).
-3. Detect "exceeds the available context" rejection in the response → return `"STALL"` sentinel instead of silent `0`.
+### A3. `prefill_probe`: honor passed ctx + shrink-and-retry (`:1016-1055`)
+
+**Return contract:** `prefill_probe` remains **dumb** — it returns a numeric t/s or bare `"0"`, never a sentinel string. All classification (OOM / network-stall / context-overflow) is handled externally by `cpu_saturation_sweep`'s `test_rung` (A2). This avoids the A2/A3 contract conflict and preserves the existing `"STALL"` literal's meaning (cold-load network hang from `fire_request` RC=2).
+
+Implementation:
+1. Read `$1` (CTX). Size `PROBE_CHARS = min(32000, ctx*0.5*chars_per_tok)` using measured ratio. **Floor: `ctx/4`** (ensures streaming lines fire for sub-10K models).
+2. Wrap the `fire_request` + parse in a retry loop (max 15 attempts, mirroring `saturation_test:616-648`). On overflow: grep `"exceeds the available context"` in `/tmp/pp_out.json`, shrink `PROBE_CHARS *= 0.9`, log, `continue`. On OOM: `echo "0"; return`. On successful parse: `echo TPS; return`. Exhausted attempts: `echo "0"`.
+3. `test_rung` in A2 remains unchanged — it still checks `if [ "$TPS" = "0" ]` and re-classifies via `oom_count_since_mark`.
+
+This mirrors `saturation_test`'s existing overshoot-handling pattern (`:642-648`) without introducing any new sentinel values or altering the function's return contract.
 
 ### A4. Clamp decode `max_tokens` by ctx in 4 functions
 
@@ -285,6 +310,17 @@ Makes the intended behavior explicit. Avoids relying on `2>/dev/null` to suppres
 ### C4. `smpbo` — keep as-is
 
 Confirmed deliberately added in commit `18415cf` ("error grep patterns"). Add one-line comment noting origin and purpose.
+
+### C5. B2 RESULT block downstream compatibility
+
+Before adding the new `saturation_prefill` log line to `cmd_bisect`'s RESULT block, verify no downstream tooling (verdict-table parser, log-scraping scripts, any `grep`-based extraction) depends on the exact current shape of that block. A quick check: grep for any scripts/tools that parse RESULT lines in `tools/` or `md/`.
+
+### Validation hardening (before merging Batch A)
+
+A3/A4 are sizing changes that only surface at runtime against real models. `bash -n` and manual control-flow review cannot catch a formula off-by-one. **Required smoke test before merging Batch A:**
+- Run `bisect` (or the affected probes — `prefill_probe`, `decode_guarded_probe`, `residency_probe`) against **one real small-ctx model** (e.g. `ctx-size=4096`) and **one large-ctx model** (e.g. `ctx-size=131072`).
+- Confirm: no "exceeds context" rejection at small ctx (shrink-and-retry works), no regression at large ctx.
+- This is a mandatory gate, not an afterthought.
 
 ---
 
