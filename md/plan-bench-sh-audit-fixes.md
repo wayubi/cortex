@@ -151,3 +151,173 @@ None of the above should be done at the expense of the actual pass/fail correctn
 3. Do the §5 duplication refactor (unify the three bisection implementations, merge the two saturation sweeps) — this both resolves remaining risk from §1.2/1.1-style divergence and shrinks the codebase significantly.
 4. Layer in the §6 performance improvements (adaptive mtp tuning search, fast-path for known-good batches, shorter probe timeouts) once the correctness/refactor work is done, so speed gains are measured against a known-correct baseline.
 5. Sweep up §3/§4/§7 items (fragility notes, dead code, cosmetic fixes) opportunistically while touching the relevant functions above.
+
+---
+
+# Implementation Plan (review agent, 2026-09-05)
+
+## Decisions (confirmed by user)
+
+- **B2** `SAT_PREFILL_TPS`: wire into bisect RESULT (keep + surface).
+- **B3** `cmd_bench PROMPT_TOKENS`: remove param (keep 75%-ctx default).
+- **A3** `prefill_probe` floor: `ctx/4`.
+
+## Verification summary
+
+Each finding was checked against the current `tools/bench.sh` (2926 lines). Confirmed claims:
+
+| Finding | Status | Evidence |
+|---|---|---|
+| 1.1 `bracketed_halve_down` stale `BHD_RESULT` | **CONFIRMED** | `LO=0` init; second loop never runs when `HI-LO≤64`; guard at `:2062` exists but `:2031` does not |
+| 1.2 CPU sweep `test_rung` OOM/STALL dead | **CONFIRMED** | `:1070-1078` always returns numeric string; `:1089-1093` checks never match; `0` pollutes `$PTS` |
+| 1.3 `prefill_probe` ignores `$1` | **CONFIRMED** | `:1017` hardcodes `PROBE_CHARS=32000`, never references `$1` |
+| 1.4 Fixed `max_tokens` (4000/6000) | **CONFIRMED** | `long_decode_check:743`, `decode_guarded_probe:819`, `residency_probe:877`, `run_decode_test:1626` all hardcode; only `cmd_bench:2333` clamps |
+| 1.5 `detect_mtp` missing `SERVED_GRACE` | **CONFIRMED** | `:1506` never sets it; only `cmd_mtp:1729`, `cmd_bisect:1810`, `cmd_bench:2208` do |
+| 2.1 `cmd_mtp` "last passing" winner | **CONFIRMED** | `:1750-1752`, `:1778-1780` overwrite unconditionally on pass, no SPEED tracking |
+| 2.3 `SAT_PREFILL_TPS` unused | **CONFIRMED** | `:611` set, `:735` logged; no caller reads it |
+| 2.6 `smpbo` | **INTENTIONAL** | Commit `18415cf` deliberately added; semantics opaque but not a bug |
+
+## Batch A — Critical correctness (1.1–1.5)
+
+### A1. `bracketed_halve_down`: detect "no pass at all" (`:496-518`)
+
+Add `FOUND=0` flag. On any successful saturation, set `FOUND=1`. After both loops: if `FOUND=0`, clear `BHD_RESULT=""` and `return 3`.
+
+Update callers:
+- `:2031` (final-confirm fallback) — currently unguarded. Check for `return 3` → log "ERROR: no reliable batch found in halve-down" → `exit 1`.
+- `:2062` (re-confirm step-down) — already guards `VALIDATED -le 64`; add `return 3` handling → same abort.
+
+Closes the stale-global / `set_batch ""` / `set_batch 0` crash risk.
+
+### A2. CPU sweep `test_rung`: classify OOM/STALL (`:1070-1078`, `:1085-1110`)
+
+Make `cpu_saturation_sweep`'s `test_rung` classify failures the same way `gpu_saturation_sweep`'s does:
+
+1. After `prefill_probe` returns `"$TPS"`: if `TPS` is `"0"`, check `oom_count_since_mark` → if `>0`, echo `"OOM"`; else echo `"STALL"`.
+2. Only append to `$PTS` and return numeric `TPS` on genuine success (not `"0"`/`"OOM"`/`"STALL"`).
+3. Update golden-section `"OOM"→-1` handling (`:1188-1190`) — `test_rung` now returns literal `"OOM"` when appropriate, so the existing `-1` coercion works.
+
+This makes the ladder's `STALL`/`OOM` branches (`:1089-1093`) live instead of dead.
+
+### A3. `prefill_probe`: honor passed ctx (`:1016-1055`)
+
+1. Read `$1` (CTX).
+2. `PROBE_CHARS = min(32000, ctx*0.5*chars_per_tok)` using measured ratio. **Floor: `ctx/4`** (ensures streaming lines fire for sub-10K models).
+3. Detect "exceeds the available context" rejection in the response → return `"STALL"` sentinel instead of silent `0`.
+
+### A4. Clamp decode `max_tokens` by ctx in 4 functions
+
+Apply the same clamp pattern as `cmd_bench:2333`:
+
+| Function | Current hardcoded max_tokens | New formula |
+|---|---|---|
+| `long_decode_check` (`:743`) | `6000` | `min(6000, ctx - prompt)` |
+| `decode_guarded_probe` decode (`:819`) | `4000` | `min(4000, ctx - 150)` |
+| `residency_probe` (`:877`) | `4000` | `min(4000, ctx - 150)` |
+| `run_decode_test` (`:1626`) | `4000` | `min(4000, ctx - prompt)` |
+
+Verify `$CTX` is in scope at each call site. Add a floor of `256` so degenerate cases don't produce negative `max_tokens`.
+
+### A5. `detect_mtp`: scale `SERVED_GRACE` (`:1506`)
+
+Add near top of `detect_mtp`:
+```bash
+local CTX=$(read_ctx)
+SERVED_GRACE=$((60 + CTX / 65536 * 40))
+```
+Matches `cmd_mtp:1729`, `cmd_bisect:1810`, `cmd_bench:2208`.
+
+---
+
+## Batch B — Correctness / reliability
+
+### B1. `cmd_mtp`: winner = argmax(SPEED) (`:1750-1752`, `:1778-1780`)
+
+Replace the unconditional overwrite with argmax logic. Track `WIN_SPEED` per sweep (n_max and p_min). On each filter-passing candidate, select if `SPEED > WIN_SPEED` (not just "is passing"). Both sweeps end with the fastest among filter-passing, not the last.
+
+### B2. `SAT_PREFILL_TPS`: wire into bisect RESULT (`:611`, `:735`)
+
+Surface the saturation-test's prefill t/s in `cmd_bisect`'s RESULT block. For the GPU path (`:2016` FINAL CONFIRM) and CPU path (`:1872` banner), emit the real full-context prefill from the saturation run (not the short-probe number). This addresses the earlier-identified "real prefill measured elsewhere" gap.
+
+Add a log line to the RESULT block:
+```
+  saturation_prefill=${SAT_PREFILL_TPS} t/s (real full-context, measured during saturation)
+```
+
+### B3. `cmd_bench` PROMPT_TOKENS: remove param
+
+Drop `local PROMPT_TOKENS=${2:-0}` (`:2126`). The 75%-of-ctx default (`:2286-2288`) is the only meaningful behavior; the param is unreachable from any CLI path.
+
+### B4. `maybe_inherit` misleading log
+
+When `MODEL == PARENT` (family head) and has JSON, return a distinguishable status (or check at call sites). Log "already benched (family head), skipping" instead of "inheriting from X" when no inheritance actually occurs. Update call sites at `:2707` and `:2910`.
+
+---
+
+## Batch C — Defensive & cosmetic
+
+### C1. Numeric-guard quality checks (`:1750`, `:1778`)
+
+Replace:
+```bash
+[ "${QUALITY:-0}" -lt 2 ] 2>/dev/null
+```
+with:
+```bash
+[[ "$QUALITY" =~ ^[0-9]+$ ]] && (( QUALITY < 2 ))
+```
+
+Makes the intended behavior explicit. Avoids relying on `2>/dev/null` to suppress bash's stderr on non-integer `-lt`.
+
+### C2. Dead code cleanup
+
+- `prefill_probe $1` — resolved by A3 (parameter now used).
+- `SAT_PREFILL_TPS` — resolved by B2 (now surfaced).
+- `PROMPT_TOKENS` — resolved by B3 (removed).
+- `run_decode_test` poll loop `seq 1 80` → use `$POLL_MAX_SAMPLES` global.
+
+### C3. Cosmetic
+
+- Verdict header mtpcheck `%-9s` → `%-8s` (`:2774`) to match row-builder.
+- `fire_request` retry wording (`:539`): "restarting + retry $ATTEMPT" → "retrying as attempt $((ATTEMPT+1))".
+- Document `decode_guarded_probe`'s intentional CPU warmup-sample skip (`:839`) — matches pattern in `run_decode_test`/`cmd_bench`.
+
+### C4. `smpbo` — keep as-is
+
+Confirmed deliberately added in commit `18415cf` ("error grep patterns"). Add one-line comment noting origin and purpose.
+
+---
+
+## Deferred — Batch D (DRY refactor) and Batch E (performance)
+
+**Batch D** (deferred, separate effort + validation):
+- Unify 3 bisection implementations into generic `find_pass_fail_boundary`.
+- Merge CPU/GPU saturation sweeps (parameterize `test_rung` + final-confirm).
+- `set_batch` → wrap `set_batch_for "$MODEL"`.
+
+**Batch E** (deferred until correctness lands):
+- Adaptive/golden-section for `cmd_mtp` n_max/p_min tuning (~10→5-6 restarts).
+- Trust-but-verify fast path for known-good batches.
+- Shorter timeouts for `tiny_probe`/`measure_ratio`.
+- `tiny_probe` gate inside `bracketed_halve_down`.
+- Configurable re-confirm cycle count (env var).
+
+---
+
+## Execution order & validation
+
+1. **A1–A5** (criticals) — most urgent, highest value.
+2. **B1–B4 + C1** (cheap correctness).
+3. **C2–C4** (cleanup/cosmetic) opportunistically.
+4. **Commit A–C** as one reviewed change set.
+5. **D and E** as separate, explicitly-validated later efforts.
+
+Validate with `bash -n tools/bench.sh` + per-function control-flow re-check. A2/A4 alter probe sizing → small-ctx models may need re-bench if configs change.
+
+---
+
+## Notes on scope
+
+- No re-bench of existing results required (mostly code-path hardening).
+- The glm-4.7 bench (log `1655`) is still running. On-disk edits don't affect its loaded process; avoid committing until the run finishes writing models.ini.
+- This plan should be reviewed before implementation begins. Sections D and E are explicitly out of scope for this effort.
