@@ -2,10 +2,10 @@
 
 ## Architecture
 
-- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp. Both backends run alongside openresty (no profiles).
+- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp, `:5002` → nllb (HF translation). All three backends run alongside openresty (no profiles).
 - `coordinator.lua` runs in the access phase. It tracks both the active backend AND the last requested model name. On every POST request (inference), it extracts the `model` field from the request body. If either the backend OR the model differs from the current state, the coordinator unloads all models from the current backend via its API, then updates state. This prevents llama.cpp's leaky self-unload (which leaves residual VRAM) because all unloads are triggered externally by the coordinator.
 - **Only POST requests (inference) can trigger unload or state changes.** GET/HEAD/OPTIONS probes pass through without any action — this prevents Open WebUI polling from bouncing the state or reading bodies unnecessarily.
-- Unload flow: `POST /api/generate` with `keep_alive: 0` (ollama), or `POST /models/unload` (llama-cpp). Both backends are queried first (ollama: `/api/ps`, llama-cpp: `/v1/models`) to find exactly which model(s) are loaded.
+- Unload flow: `POST /api/generate` with `keep_alive: 0` (ollama), `POST /models/unload` (llama-cpp), or `GET /v1/models` + `POST /v1/models/unload` (nllb). All three backends are queried first to find exactly which model(s) are loaded. When switching away from nllb, a `/shutdown` is also sent.
 - The shared `backend_state` dict stores two keys: `"backend"` (which backend last handled inference) and `"model"` (which model name was last requested). Both are used to decide whether an unload is needed.
 - Before unloading on cross-backend switches, coordinator drains active POST requests on the current backend (polls `request_counts` up to 30s at 500ms intervals). Same-backend model changes skip drain (only one backend involved).
 - Active requests are counted at access phase and decremented via `log_by_lua_block` in each nginx server block.
@@ -14,6 +14,7 @@
 
 The compose service is `llama-cpp` (hyphen), but the Lua internal key is `llama_cpp` (underscore). Use the `HOST` lookup table in `coordinator.lua` to map:
 - `HOST["llama_cpp"]` → `"llama-cpp"` (DNS hostname)
+- `HOST["nllb"]` → `"nllb"` (DNS hostname)
 
 If adding a new backend, update:
 - `HOST` table (DNS hostname for TCP calls)
@@ -25,33 +26,35 @@ If adding a new backend, update:
 
 - `docker compose up -d` — start the entire stack
 - `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
+- `docker compose build nllb` — rebuild nllb translation service after changes
 - `docker compose --profile build build llama-build` — rebuild llama.cpp image from source
 - The internal network is `cortex_network` (compose-managed bridge). External `enhasa_network` must exist before `up`.
 
 ## File layout
 
 ```
-cortex/
+ cortex/
 ├── compose.yml
 ├── README.md
 ├── LICENSE
-├── BENCHMARKS.md          # all batch/MTP/quality bench results (configs, t/s, acceptance)
-├── full-metrics.md        # full table of all models.ini entries with all benchmark columns
+├── full-metrics.md        # full table of all models.ini entries (regenerate via tools/gen_metrics.sh)
 ├── CPU_POLLING.md         # correct bench methodology (CPU/GPU placement verification)
-├── tools/                 # ALL scripts go here (bench, sweep, quality, generation)
-│   ├── bench.sh               # unified pipeline: mtpcheck → bisect → mtp → bench
-│   ├── bench_variant.sh       # benchmark with file-based payload (large prompts)
-│   ├── bench_variant_file.sh  # same, for large prompts
-│   ├── gen_metrics.sh         # regenerate full-metrics.md from models/*.json
-│   ├── mtp_sweep.sh           # legacy MTP n_max sweep
-│   ├── mtp_pmin_sweep.sh      # legacy MTP p_min sweep
-│   └── lfm_batch_sweep.sh     # legacy batch sweep
+├── tools/                 # ALL scripts go here (bench, metrics)
+│   ├── bench.sh               # unified pipeline: mtpcheck → bisect → mtp → bench (canonical)
+│   └── gen_metrics.sh         # regenerate full-metrics.md from llama-cpp/models/*.json
 ├── llama-cpp/
 │   ├── models.ini          # llama.cpp models preset file
+│   ├── models/             # per-model benchmark JSONs (written by bench.sh)
 │   └── Dockerfile          # CUDA build from source
+├── nllb/
+│   ├── Dockerfile
+│   ├── entrypoint.sh
+│   └── server.py           # HF translation (NLLB) FastAPI service
+├── md/                     # internal planning docs
+├── .opencode/              # opencode config
 └── openresty/
     ├── Dockerfile           # FROM openresty/openresty:bookworm-fat, sed patches error_log
-    ├── nginx.conf           # lua_shared_dict directives, 2 server blocks
+    ├── nginx.conf           # lua_shared_dict directives, 3 server blocks (11434/5002/8080)
     └── coordinator.lua      # VRAM coordinator — API-based model unload
 ```
 
@@ -63,7 +66,7 @@ cortex/
 2. **If not set, it inherits 4096 from `[*]` — this is WRONG** and must be bisected first
 3. **Run batch bisect** (procedure below) before any benchmark
 4. **Run placement check** (step 8) after batch bisect to verify compute on GPU
-5. **THEN benchmark** with optimal batch using `./tools/bench_variant.sh` or `./tools/bench_variant_file.sh`
+5. **THEN run the full bench:** `./tools/bench.sh bench <model>`
 
 **Coder variants are independent models and are benched separately.** No values are copied between entries — run bisect + bench on each coder variant like any other model.
 
@@ -87,7 +90,7 @@ Procedure (per candidate value):
    - **No floor** — if the down-sweep never passes, keep going until it does.
 7. **PASS** on the tiny probe → confirm with 2 more requests (expect `http=200`). This is only a **quick filter** — it does NOT prove the value is good (see Phase 2).
 8. **Placement check — is the compute actually on GPU?** `-fit` never budgets the **MTP draft's** memory (`failed to measure the memory of the extra model, fitting without it`), so on tight models the draft silently lands on CPU even when the main model fits — a batch can pass every OOM test yet decode slowly with heavy CPU. Verify placement on any quick-filter PASS:
-   - Use `./tools/bench_variant.sh <model> <label> <prompt-tokens>` — it defaults to 4000 tokens and 160s CPU polling.
+   - Use `./tools/bench.sh bench <model>` — runs the prefill+decode bench with placement polling.
    - **On GPU:** avg CPU < 100% and decode t/s at the model's expected speed.
    - **Draft on CPU:** avg CPU > 200% and decode t/s drops sharply (observed Gemma 12B Q6: 59.8 t/s on GPU vs 36 t/s with the draft on CPU).
    - If the draft is on CPU → **step the batch down** (this is a separate, usually lower ceiling than the OOM max). First shrink the draft's footprint with `spec-draft-type-k/v = q4_0` (draft KV cache, default f16), then re-bisect. Do NOT use `spec-draft-ngl` to force it — that drops main-model layers to CPU instead (worse).
@@ -165,7 +168,7 @@ So the Qwen-era habit of targeting ~0.9 acceptance was just the natural operatin
 - Two `lua_shared_dict` directives in `nginx.conf`: `backend_state` and `request_counts`. Both live in the conf.d file which is included inside the `http {}` block — valid by default in the `bookworm-fat` image config.
 - ollama unload uses `keep_alive: 0` on a generate request. This evicts the model and KV cache immediately. Without this flag, ollama keeps the model resident per its configured `OLLAMA_KEEP_ALIVE`.
 - llama-cpp unload uses `POST /models/unload` with the model ID. Only models with `status.value == "loaded"` are targeted (queried from `/v1/models`).
-- `coordinator.lua` logs every request, switch decision, and unload result via `ngx.log`. View with `docker logs -f cortex-openresty-1 | grep -E "request:|skip:|switch:|drain|state:|ollama:|llama-cpp:"`. The `error_log /proc/self/fd/2 info;` directive is patched into the main nginx.conf via `sed` in the Dockerfile — INFO-level messages appear in `docker logs`.
+- `coordinator.lua` logs every request, switch decision, and unload result via `ngx.log`. View with `docker logs -f cortex-openresty-1 | grep -E "request:|skip:|switch:|drain|state:|ollama:|llama-cpp:|nllb:"`. The `error_log /proc/self/fd/2 info;` directive is patched into the main nginx.conf via `sed` in the Dockerfile — INFO-level messages appear in `docker logs`.
 - The drain loop calls `ngx.sleep(0.5)` in the access phase, blocking the nginx worker for up to 30s during a switch. Switches are rare, so this is acceptable — but do not increase the timeout without understanding the concurrency impact.
 - `get_model()` reads the request body via `ngx.req.read_body()` in the access phase. This does not consume the body — nginx still forwards it to the upstream. If body parsing fails (malformed JSON, no `model` field), `get_model()` returns nil and the coordinator proceeds conservatively (unloads on backend mismatch, skips on same-backend model change).
 - `models-max` must NOT be set on llama.cpp. If the router limits concurrent children, it auto-unloads models when the limit is exceeded, which races against the coordinator's explicit `/models/unload` and leaves residual VRAM (orphan child process). The coordinator is the sole source of truth for unloads — remove `models-max` entirely to disable router-initiated teardown.
