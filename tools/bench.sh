@@ -1869,11 +1869,12 @@ cmd_bisect() {
     [ -z "$WIN" ] && WIN="$SWEEP_OUT"  # fallback if no pipe present
     set_batch "$WIN"
     local VALIDATED=$WIN PASS=1 CANDIDATES=0
-    log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$WIN (${WIN_TPS} t/s, CPU-compute, fastest prefill) ***"
+    log ""; log "  *** CPU-compute batch=$WIN chosen: fastest by short-probe prefill (${WIN_TPS} t/s), saturation-safe at 99% ctx ***"
     log ""; log "=== RESULT ==="
     log "  batch=$WIN ubatch=$WIN ctx=$CTX"
     log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
-    log "  saturation sweep: CPU-compute detected early, fastest prefill by saturation at 99% ctx"
+    log "  CPU-compute early-detected. Batch ranked by short-probe prefill (${WIN_TPS} t/s);"
+    log "  saturation_test confirmed no-OOM at 99% ctx (real full-context prefill is measured in the bench step, not here)."
     log ""; log "  Next: run bench.sh bench $MODEL"
     log "=== DONE ==="
     exit 0
