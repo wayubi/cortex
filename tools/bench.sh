@@ -697,6 +697,10 @@ else:
   done
 
   # ---- Phase 2: real saturation (max_tokens=50% ctx) — ~99% prefill + ~1% decode ----
+  # Decode-rate floor: if decode stays below 2 t/s for 3 consecutive 2s samples (~6s),
+  # reject the batch. Catches pathological full-context decode collapse (e.g. REAP 198k).
+  local DECODE_FLOOR=2  # t/s absolute minimum for usable decode
+  local DECODE_FLOOR_SAMPLES=3  # consecutive samples below floor to trigger rejection
   python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
@@ -709,12 +713,28 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
   local RC=$?
   if [ "$RC" -eq 2 ]; then return 2; fi
 
-  local WATCH=0
+  local WATCH=0 SLOW=0 REJECT=0
   while kill -0 $FIRE_PID 2>/dev/null; do
     if [ "$(oom_count_since_mark)" -gt 0 ]; then
       log "  Saturation: OOM detected — killing curl"
       kill $FIRE_PID 2>/dev/null
       break
+    fi
+    # Decode-rate floor: parse latest tg from n_gen streaming lines (decode-only)
+    local TG
+    TG=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+         | grep "n_gen = " | tail -1 | grep -oE "tg = [0-9.]+" | awk '{print $3}')
+    if [ -n "$TG" ] 2>/dev/null; then
+      if python3 -c "exit(0 if $TG < $DECODE_FLOOR else 1)" 2>/dev/null; then
+        SLOW=$((SLOW + 1))
+        if [ "$SLOW" -ge "$DECODE_FLOOR_SAMPLES" ]; then
+          log "  Saturation: decode too slow at full context (${TG} t/s < ${DECODE_FLOOR} floor) — rejecting batch"
+          kill $FIRE_PID 2>/dev/null
+          REJECT=1; break
+        fi
+      else
+        SLOW=0
+      fi
     fi
     WATCH=$((WATCH + 1))
     [ $((WATCH % 30)) -eq 0 ] && log "    ...watchdog ${WATCH}x2s (request still running)"
@@ -724,6 +744,7 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then log "  Saturation: OOM"; return 1; fi
+  if [ "$REJECT" -eq 1 ]; then log "  Saturation: decode too slow — batch rejected"; return 5; fi
 
   local PT CT
   read -r PT CT < <(python3 -c "
