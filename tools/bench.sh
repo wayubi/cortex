@@ -2620,6 +2620,53 @@ PYEOF
   log "=== DONE: $MODEL ==="
 }
 
+# ── Reset one parent via the full 4-step flow (shared by both pre-passes) ──
+# Runs each cmd in a subshell to contain its exit(); sets global RESET_DONE on bench success.
+reset_parent_full() {
+  local P=$1
+  MODEL=$P
+  log ""
+  lshow "=============== RESET PARENT: $P ==============="
+
+  # step 1: mtpcheck (detect_mtp uses exit 1 → must be subshelled)
+  log "  $(date +%H:%M:%S) starting mtpcheck for $P"
+  local IS_MTP=0
+  if ( cmd_mtpcheck ); then
+    IS_MTP=1
+    log "  $(date +%H:%M:%S) mtpcheck OK for $P (MTP-capable)"
+  else
+    log "  $(date +%H:%M:%S) mtpcheck: NOT MTP for $P"
+  fi
+
+  # step 2: bisect (runs against true MTP state set by mtpcheck)
+  log "  $(date +%H:%M:%S) starting bisect for $P"
+  if ( cmd_bisect ); then
+    log "  $(date +%H:%M:%S) bisect OK for $P"
+  else
+    log "  $(date +%H:%M:%S) bisect FAILED for $P — skipping mtp+bench"
+    return 1
+  fi
+
+  # step 3: mtp tuning (only if MTP-capable and bisect succeeded)
+  if [ "$IS_MTP" -eq 1 ]; then
+    log "  $(date +%H:%M:%S) starting mtp for $P"
+    if ( cmd_mtp ); then
+      log "  $(date +%H:%M:%S) mtp OK for $P"
+    else
+      log "  $(date +%H:%M:%S) mtp FAILED for $P"
+    fi
+  fi
+
+  # step 4: bench
+  log "  $(date +%H:%M:%S) starting bench for $P"
+  if ( cmd_bench ); then
+    log "  $(date +%H:%M:%S) bench OK for $P"
+    RESET_DONE["$P"]=1
+  else
+    log "  $(date +%H:%M:%S) bench FAILED for $P"
+  fi
+}
+
 # ── Full-suite orchestrator (mtpcheck → bisect → mtp → bench) ──
 run_full_suite() {
   declare -A VERDICTS
@@ -2636,22 +2683,7 @@ run_full_suite() {
       [ -z "$PARENT_NAME" ] && continue
       [ "${RESET_SEEN[$PARENT_NAME]:-0}" -eq 1 ] && continue
       RESET_SEEN["$PARENT_NAME"]=1
-      MODEL=$PARENT_NAME
-      lshow ""
-      lshow "=============== RESET PARENT: $PARENT_NAME ==============="
-      log "  $(date +%H:%M:%S) starting bisect for $PARENT_NAME"
-      if ( cmd_bisect ); then
-        log "  $(date +%H:%M:%S) bisect OK for $PARENT_NAME"
-      else
-        log "  $(date +%H:%M:%S) bisect FAILED for $PARENT_NAME"
-      fi
-      log "  $(date +%H:%M:%S) starting bench for $PARENT_NAME"
-      if ( cmd_bench ); then
-        log "  $(date +%H:%M:%S) bench OK for $PARENT_NAME"
-        RESET_DONE["$PARENT_NAME"]=1
-      else
-        log "  $(date +%H:%M:%S) bench FAILED for $PARENT_NAME"
-      fi
+      reset_parent_full "$PARENT_NAME"
     done
   fi
 
@@ -2868,19 +2900,7 @@ case "$CMD" in
       for m in "$@"; do
         PARENT=$(family_of "$m")
         [ "${RESET_DONE[$PARENT]:-0}" -eq 1 ] && continue
-        MODEL=$PARENT
-        log "  Resetting parent $PARENT for $m..."
-        if ( cmd_bisect ); then
-          log "  bisect OK for $PARENT"
-          if ( cmd_bench ); then
-            log "  bench OK for $PARENT"
-            RESET_DONE["$PARENT"]=1
-          else
-            log "  bench FAILED for $PARENT"
-          fi
-        else
-          log "  bisect FAILED for $PARENT"
-        fi
+        reset_parent_full "$PARENT"
       done
     fi
     for m in "$@"; do
