@@ -618,7 +618,10 @@ saturation_test() {
   local PREFILL_TPS_RAW=""
   log "  Saturation: prefill target ~${TARGET} tokens (99% ctx), overshoot start ~${SAT_SIZE} chars"
 
-  # ---- Phase 1: cheap sizing (max_tokens=1) — discover ratio, land near 99% ctx ----
+  # ---- Phase 1: sizing (max_tokens=1) — discover ratio, land near 99% ctx ----
+  # Timeout must cover prefill of the overshoot prompt (~ctx tokens), not max_tokens=1.
+  # Pre-fill of ctx tokens at ~60 t/s worst-case with 4x margin; floor 1200s, cap 14400s.
+  local SAT_TIMEOUT=$(python3 -c "print(max(1200, min(14400, int($CTX / 60 * 4))))")
   while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
     python3 -c "
 import json
@@ -628,7 +631,7 @@ prompt = (filler * ((SAT_SIZE // len(filler)) + 1))[:SAT_SIZE]
 payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':$MEASURE_TOK,'ignore_eos':True}
 with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 "
-    fire_request /tmp/sat_payload.json /tmp/sat_response.json "sat-size" "$(adaptive_timeout $MEASURE_TOK)"
+    fire_request /tmp/sat_payload.json /tmp/sat_response.json "sat-size" "$SAT_TIMEOUT"
     local RC=$?
     if [ "$RC" -eq 2 ]; then return 2; fi
 
