@@ -2422,8 +2422,11 @@ with open('/tmp/bench_prefill_payload.json','w') as f: json.dump(payload, f)
 print(f'  Prefill payload: {len(prompt)} chars, ~{$PROMPT_TOKENS} tokens (max_tokens=1)')
 "
 
-  log "  Phase A: prefill request ($PROMPT_TOKENS tokens)..."
-  fire_request /tmp/bench_prefill_payload.json /tmp/bench_prefill.json "bench-prefill"
+  # Prefill-aware timeout: covers prefilling PROMPT_TOKENS tokens at ~60 t/s worst-case
+  # with 4x margin; matches the SAT_TIMEOUT pattern used in saturation_test.
+  local BENCH_PREFILL_TIMEOUT=$(python3 -c "print(max(1200, min(14400, int($PROMPT_TOKENS / 60 * 4))))")
+  log "  Phase A: prefill request ($PROMPT_TOKENS tokens, timeout ${BENCH_PREFILL_TIMEOUT}s)..."
+  fire_request /tmp/bench_prefill_payload.json /tmp/bench_prefill.json "bench-prefill" "$BENCH_PREFILL_TIMEOUT"
   local RC=$?
   if [ "$RC" -eq 2 ]; then log "  STALL on prefill — aborting bench"; return 1; fi
   wait "$FIRE_PID" 2>/dev/null || true
