@@ -26,6 +26,7 @@ LOG_DIR="$ROOT/logs"
 mkdir -p "$LOG_DIR" "$MODELS_DIR"
 LOG_FILE="$LOG_DIR/bench_$(date +%Y%m%d-%H%M).log"
 DOCKER_LOG="cortex-llama-cpp-1"
+# smpbo and nbytes_shared added in commit 18415cf — grep pattern for server crash/error markers
 OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error: out of memory|cuMemCreate|GGML_ASSERT|nbytes_shared|smpbo"
 ESSAY="Write a detailed 1000-word essay explaining transformers and MoE"
 POLL_MIN_SAMPLES=3
@@ -490,19 +491,19 @@ print(t)
 
 # Bracketed halve-down + bisect (O(log)) to find the largest batch below $CEIL
 # that survives full saturation. Result is written to global $BHD_RESULT.
-# Returns 0 = success, 2 = STALL (caller must handle).
+# Returns 0 = success, 2 = STALL, 3 = no passing batch found (caller must handle).
 # Note: called directly (not via $() command substitution) so that exit/return
 # propagates correctly under both standalone and suite (if-condition) dispatch.
 bracketed_halve_down() {
   local CEIL=$1 CTX_VAL=$2
-  local HI=$CEIL LO=0
+  local HI=$CEIL LO=0 FOUND=0
   local BATCH=$((CEIL / 2))
   while [ "$BATCH" -ge 64 ]; do
     set_batch "$BATCH"; restart
     saturation_test "$CTX_VAL"
     local BR_RC=$?
     if [ "$BR_RC" -eq 2 ]; then log "  STALL — aborting"; return 2; fi
-    if [ "$BR_RC" -eq 0 ]; then LO=$BATCH; break
+    if [ "$BR_RC" -eq 0 ]; then LO=$BATCH; FOUND=1; break
     else HI=$BATCH; BATCH=$((BATCH / 2)); fi
   done
   while [ $((HI - LO)) -gt 64 ]; do
@@ -512,8 +513,13 @@ bracketed_halve_down() {
     saturation_test "$CTX_VAL"
     local BR_RC=$?
     if [ "$BR_RC" -eq 2 ]; then log "  STALL — aborting"; return 2; fi
-    if [ "$BR_RC" -eq 0 ]; then LO=$MID; else HI=$MID; fi
+    if [ "$BR_RC" -eq 0 ]; then LO=$MID; FOUND=1; else HI=$MID; fi
   done
+  if [ "$FOUND" -eq 0 ]; then
+    log "  ERROR: no passing batch found in halve-down (even at batch=64)"
+    BHD_RESULT=""
+    return 3
+  fi
   BHD_RESULT=$LO
 }
 
@@ -536,7 +542,7 @@ fire_request() {
       return 0
     fi
     kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null || true
-    log "  $LABEL: cold-load hang (no proxy line in ${SERVED_GRACE}s) — restarting + retry $ATTEMPT" >&2
+    log "  $LABEL: cold-load hang (no proxy line in ${SERVED_GRACE}s) — retrying as attempt $((ATTEMPT+1))" >&2
     restart >&2
   done
   log "  $LABEL: STALL — model never served after restart+retry (network/HF fetch)" >&2
@@ -740,13 +746,15 @@ else:
 }
 
 long_decode_check() {
-  log "  Long-decode: essay prompt, max_tokens=6000..."
+  local CTX=$(read_ctx)
+  local DECODE_MAX=$(python3 -c "print(max(256, min(6000, $CTX - 64)))")
+  log "  Long-decode: essay prompt, max_tokens=${DECODE_MAX}..."
   python3 -c "
 import json
 with open('/tmp/longdec_payload.json','w') as f:
-    json.dump({'model':'$MODEL','messages':[{'role':'user','content':'Write a detailed essay explaining the history of computing.'}],'max_tokens':6000,'ignore_eos':True}, f)
+    json.dump({'model':'$MODEL','messages':[{'role':'user','content':'Write a detailed essay explaining the history of computing.'}],'max_tokens':${DECODE_MAX},'ignore_eos':True}, f)
 "
-  fire_request /tmp/longdec_payload.json /tmp/longdec_response.json "long-decode" "$(adaptive_timeout 6000)"
+  fire_request /tmp/longdec_payload.json /tmp/longdec_response.json "long-decode" "$(adaptive_timeout $DECODE_MAX)"
   local RC=$?
   if [ "$RC" -eq 2 ]; then return 2; fi
   wait "$FIRE_PID" 2>/dev/null || true
@@ -812,14 +820,15 @@ print(f'{val:.1f}')
     return 0
   fi
 
-  # Decode probe (short prompt, full 4000-token window) — poll CPU during it
+  # Decode probe (short prompt, clamped decode window) — poll CPU during it
   # for GPU-residency classification
+  local DECODE_MAX=$(python3 -c "print(max(256, min(4000, $CTX - 64)))")
   python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':${DECODE_MAX},'ignore_eos':True}
 with open('/tmp/perf_decode_payload.json','w') as f: json.dump(payload, f)
 "
-  fire_request /tmp/perf_decode_payload.json /tmp/perf_decode.json "measure-decode" "$(adaptive_timeout 4000)"
+  fire_request /tmp/perf_decode_payload.json /tmp/perf_decode.json "measure-decode" "$(adaptive_timeout $DECODE_MAX)"
   local DEC_RC=$?
   if [ "$DEC_RC" -eq 2 ]; then echo "0|0|0"; return 0; fi
   local DEC_PID=$FIRE_PID
@@ -872,12 +881,14 @@ RESID_MIN_FLOOR_SAMPLES=10   # 20s @2s before early-kill verdicts are allowed (b
 residency_probe() {
   # stdout is reserved for the single verdict (GPU|CPU|AMBIGUOUS); all progress
   # logs go to stderr so command-substitution captures stay clean.
+  local CTX=$(read_ctx)
+  local DECODE_MAX=$(python3 -c "print(max(256, min(4000, $CTX - 64)))")
   python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':4000,'ignore_eos':True}
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':${DECODE_MAX},'ignore_eos':True}
 with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
 "
-  fire_request /tmp/resid_payload.json /tmp/resid_response.json "residency" "$(adaptive_timeout 4000)"
+  fire_request /tmp/resid_payload.json /tmp/resid_response.json "residency" "$(adaptive_timeout $DECODE_MAX)"
   local RC=$?
   if [ "$RC" -eq 2 ]; then
     log "  residency: STALL — model never served (network/HF fetch)" >&2
@@ -1014,10 +1025,16 @@ residency_descend() {
 # Warm-up: fires an untimed probe first to clear the cold-load, then times the second.
 # Echoes prefill_t_s to stdout. Logs progress to stderr.
 prefill_probe() {
-  local PROBE_CHARS=32000  # ~10K tokens at ~3 chars/token — enough to trigger streaming prefill lines
-  # Single full-length probe: model loads during this request AND produces streaming
-  # prefill lines. Lines 3-7 skip the cold-load ramp → steady-state t/s.
-  python3 -c "
+  local CTX=${1:-65536}
+  local PROBE_CHARS=$((CTX * 4))  # ~1 char/token worst case; shrink loop handles overshoot
+  [ "$PROBE_CHARS" -lt "$CTX" ] && PROBE_CHARS=$CTX     # floor first (ctx-based)
+  [ "$PROBE_CHARS" -gt 32000 ] && PROBE_CHARS=32000      # cap wins (keeps probe cheap)
+  local MAX_ATTEMPTS=15 ATTEMPT=0
+
+  while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+    ATTEMPT=$((ATTEMPT + 1))
+    # Build prompt sized to PROBE_CHARS (ctx-proportional, no chars_per_tok dependency)
+    python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
 n = $PROBE_CHARS
@@ -1025,33 +1042,46 @@ prompt = (filler * ((n // len(filler)) + 1))[:n]
 payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
 with open('/tmp/pp_timed.json','w') as f: json.dump(payload, f)
 "
-  fire_request /tmp/pp_timed.json /tmp/pp_out.json "prefill-probe" "$(adaptive_timeout 1)"
-  local RC=$?
-  if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
-  local WATCH=0
-  while kill -0 $FIRE_PID 2>/dev/null; do
-    if [ "$(oom_count_since_mark)" -gt 0 ]; then kill $FIRE_PID 2>/dev/null; break; fi
-    WATCH=$((WATCH + 1))
-    [ $((WATCH % 10)) -eq 0 ] && log "    prefill-probe: still running (${WATCH}x2s)" >&2
-    sleep 2
-  done
-  wait $FIRE_PID 2>/dev/null || true
-  local OOM=$(oom_count_since_mark)
-  if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
+    fire_request /tmp/pp_timed.json /tmp/pp_out.json "prefill-probe" "$(adaptive_timeout 1)"
+    local RC=$?
+    if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
 
-  # Parse the "prompt eval time" summary line from LOG_MARK forward.
-  # This line is always emitted (unlike streaming "prompt processing" lines).
-  # Format: "prompt eval time = X ms / N tokens (... Z tokens per second)"
-  local PPMATCH
-  PPMATCH=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
-    | grep "prompt eval time" | tail -1 \
-    | grep -oE '[0-9]+\.?[0-9]* tokens per second' | awk '{print $1}')
-  if [ -n "$PPMATCH" ] && [ "$PPMATCH" != "0" ]; then
-    log "  prefill-probe: ${PPMATCH} t/s (${PROBE_CHARS} chars)" >&2
-    echo "$PPMATCH"
-  else
+    local WATCH=0
+    while kill -0 $FIRE_PID 2>/dev/null; do
+      if [ "$(oom_count_since_mark)" -gt 0 ]; then kill $FIRE_PID 2>/dev/null; break; fi
+      WATCH=$((WATCH + 1))
+      [ $((WATCH % 10)) -eq 0 ] && log "    prefill-probe: still running (${WATCH}x2s)" >&2
+      sleep 2
+    done
+    wait $FIRE_PID 2>/dev/null || true
+
+    # Overflow → shrink and retry (mirrors saturation_test :647-650)
+    if grep -q "exceeds the available context" /tmp/pp_out.json 2>/dev/null; then
+      PROBE_CHARS=$((PROBE_CHARS * 9 / 10))
+      [ "$PROBE_CHARS" -lt "$CTX" ] && PROBE_CHARS=$CTX
+      [ "$PROBE_CHARS" -gt 32000 ] && PROBE_CHARS=32000
+      log "    prefill-probe: overflow rejected (attempt $ATTEMPT) — shrinking to ${PROBE_CHARS} chars" >&2
+      continue
+    fi
+
+    local OOM=$(oom_count_since_mark)
+    if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
+
+    # Parse the "prompt eval time" summary line from LOG_MARK forward.
+    local PPMATCH
+    PPMATCH=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+      | grep "prompt eval time" | tail -1 \
+      | grep -oE '[0-9]+\.?[0-9]* tokens per second' | awk '{print $1}')
+    if [ -n "$PPMATCH" ] && [ "$PPMATCH" != "0" ]; then
+      log "  prefill-probe: ${PPMATCH} t/s (${PROBE_CHARS} chars)" >&2
+      echo "$PPMATCH"
+      return 0
+    fi
+    # Parse failed — no useful data, don't retry (model served but output unreadable)
     echo "0"
-  fi
+    return 0
+  done
+  echo "0"
 }
 
 # ── CPU-compute saturation sweep (find fastest prefill batch) ──
@@ -1066,12 +1096,25 @@ cpu_saturation_sweep() {
 
   # Test a single batch via SHORT prefill probe (fast, no saturation).
   # Warm-up is inside prefill_probe (untimed first request, then timed).
-  # Echoes tps on stdout; appends (batch tps) to $PTS.
+  # Classifies failures externally: prefill_probe returns "0" on both OOM and
+  # network-stall; check oom_count_since_mark to distinguish.
+  # Echoes: numeric t/s on success, "OOM" or "STALL" on failure.
+  # Only appends to $PTS on genuine success (avoids polluting golden-section).
   test_rung() {
     local TB=$1
     set_batch "$TB" >&2; restart >&2
     local TPS
     TPS=$(prefill_probe "$CTX")
+    if [ "$TPS" = "0" ]; then
+      if [ "$(oom_count_since_mark)" -gt 0 ]; then
+        log "  batch=$TB: OOM (short probe)" >&2
+        echo "OOM"
+      else
+        log "  batch=$TB: STALL (short probe)" >&2
+        echo "STALL"
+      fi
+      return 0
+    fi
     log "  batch=$TB: prefill=${TPS} t/s (short probe)" >&2
     echo "$TB $TPS" >> "$PTS"
     echo "$TPS"
@@ -1239,11 +1282,11 @@ for b, t in data[:3]: print(b, t)
 ")
 
   if [ "$CONFIRM_FOUND" -eq 1 ]; then
-    echo "$CONFIRM_BATCH|$CONFIRM_TPS"
+    echo "$CONFIRM_BATCH|$CONFIRM_TPS|${SAT_PREFILL_TPS:-}"
   else
     log "  All top candidates failed confirm — keeping fastest (best-effort): batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
     set_batch "$BEST_BATCH" >&2
-    echo "$BEST_BATCH|$BEST_TPS"
+    echo "$BEST_BATCH|$BEST_TPS|${SAT_PREFILL_TPS:-}"
   fi
 }
 
@@ -1296,7 +1339,7 @@ gpu_saturation_sweep() {
     set_batch "$CEILING" >&2; restart >&2
     local G_PRE
     G_PRE=$(decode_guarded_probe "$CTX" | cut -d'|' -f1)
-    echo "$CEILING|${G_PRE:-0}"
+    echo "$CEILING|${G_PRE:-0}|"   # no saturation_test on this path — leave prefill field empty
     return 0
   fi
 
@@ -1492,10 +1535,10 @@ for b, p in pts[:$SHORTLIST_SIZE]:
   rm -f "$SHORTLIST_HEALTHY"
 
   if [ "$CONFIRM_FOUND" -eq 1 ]; then
-    echo "$CONFIRM_BATCH|$CONFIRM_PFC"
+    echo "$CONFIRM_BATCH|$CONFIRM_PFC|${SAT_PREFILL_TPS:-}"
   else
     log "  All decode-healthy candidates failed saturation — using CEILING (pre-validated batch=$CEILING)" >&2
-    echo "$CEILING|0"
+    echo "$CEILING|0|${SAT_PREFILL_TPS:-}"
   fi
 }
 
@@ -1504,6 +1547,8 @@ for b, p in pts[:$SHORTLIST_SIZE]:
 # MTP supported = probe succeeds AND log shows MTP engagement.
 # On failure, restores the original section and exits 1 (caller decides).
 detect_mtp() {
+  local CTX=$(read_ctx)
+  SERVED_GRACE=$((60 + CTX / 65536 * 40))
   log ""; log "=== MTP DETECTION: $MODEL ==="
   local SNAP=/tmp/mtp_section_${MODEL}.snap
   read_section > "$SNAP"
@@ -1617,16 +1662,18 @@ with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
 # ── MTP tuning decode test (essay + placement polling) ──────
 run_decode_test() {
   local LABEL=$1
+  local CTX=$(read_ctx)
+  local DECODE_MAX=$(python3 -c "print(max(256, min(4000, $CTX - 64)))")
   # progress to stderr (stdout is reserved for the pipe-delimited result)
   plog() { echo "$1" | tee -a "$LOG_FILE" >&2; }
   plog ""; plog "=== TEST: $LABEL ==="
 
   python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':'$ESSAY'}],'max_tokens':4000,'ignore_eos':True}
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'$ESSAY'}],'max_tokens':${DECODE_MAX},'ignore_eos':True}
 with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
 "
-  fire_request /tmp/mtp_payload.json /tmp/mtp_out.json "mtp-tune" "$(adaptive_timeout 4000)"
+  fire_request /tmp/mtp_payload.json /tmp/mtp_out.json "mtp-tune" "$(adaptive_timeout $DECODE_MAX)"
   local RC=$?
   if [ "$RC" -eq 2 ]; then
     plog "  STALL — model never served (network/HF fetch)"
@@ -1635,9 +1682,9 @@ with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
   local PID=$FIRE_PID
 
   # Placement poll: until request completes (min 3 samples), capped at 160s
-  plog "  Polling CPU/GPU until request completes (max 160s)..."
+  plog "  Polling CPU/GPU until request completes (max $((POLL_MAX_SAMPLES * 2))s)..."
   local CPU_SAMPLES=()
-  for i in $(seq 1 80); do
+  for i in $(seq 1 $POLL_MAX_SAMPLES); do
     local TOP CPU GPU
     TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
     CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
@@ -1731,7 +1778,7 @@ cmd_mtp() {
 
   # ── Phase B: n_max sweep {1,2,3,4,5} at p_min=0.7 ──
   local NMAX_VALUES="1 2 3 4 5"
-  local WIN_NMAX=0
+  local WIN_NMAX=0 WIN_SPEED=0
   declare -A NMAX_RESULTS
   log ""; log "=== PHASE B: n_max SWEEP (p_min=0.7) ==="
   for N in $NMAX_VALUES; do
@@ -1747,8 +1794,10 @@ cmd_mtp() {
     fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
     NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
-    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "${QUALITY:-0}" -lt 2 ] 2>/dev/null; then
-      WIN_NMAX=$N
+    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [[ "$QUALITY" =~ ^[0-9]+$ ]] && (( QUALITY < 2 )); then
+      if python3 -c "exit(0 if float($SPEED) > float($WIN_SPEED) else 1)" 2>/dev/null; then
+        WIN_NMAX=$N; WIN_SPEED=$SPEED
+      fi
     fi
   done
   if [ "$WIN_NMAX" -eq 0 ]; then
@@ -1759,7 +1808,7 @@ cmd_mtp() {
 
   # ── Phase C: p_min sweep {0.5,0.6,0.7,0.8,0.9} at winning n_max ──
   local PMIN_VALUES="0.5 0.6 0.7 0.8 0.9"
-  local WIN_PMIN=0.7
+  local WIN_PMIN=0.7 WIN_PMIN_SPEED=0
   declare -A PMIN_RESULTS
   log ""; log "=== PHASE C: p_min SWEEP (n_max=$WIN_NMAX) ==="
   for P in $PMIN_VALUES; do
@@ -1775,8 +1824,10 @@ cmd_mtp() {
     fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
     PMIN_RESULTS[$P]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
-    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "${QUALITY:-0}" -lt 2 ] 2>/dev/null; then
-      WIN_PMIN=$P
+    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [[ "$QUALITY" =~ ^[0-9]+$ ]] && (( QUALITY < 2 )); then
+      if python3 -c "exit(0 if float($SPEED) > float($WIN_PMIN_SPEED) else 1)" 2>/dev/null; then
+        WIN_PMIN=$P; WIN_PMIN_SPEED=$SPEED
+      fi
     fi
   done
 
@@ -1863,9 +1914,10 @@ cmd_bisect() {
     log "  CPU-compute at batch 256 — skipping ceiling search, running saturation sweep"
     local SWEEP_OUT
     SWEEP_OUT=$(cpu_saturation_sweep "$CTX")
-    local WIN WIN_TPS
+    local WIN WIN_TPS WIN_PREFILL
     WIN=$(echo "$SWEEP_OUT" | cut -d'|' -f1)
     WIN_TPS=$(echo "$SWEEP_OUT" | cut -d'|' -f2)
+    WIN_PREFILL=$(echo "$SWEEP_OUT" | cut -d'|' -f3)
     [ -z "$WIN" ] && WIN="$SWEEP_OUT"  # fallback if no pipe present
     set_batch "$WIN"
     local VALIDATED=$WIN PASS=1 CANDIDATES=0
@@ -1874,7 +1926,8 @@ cmd_bisect() {
     log "  batch=$WIN ubatch=$WIN ctx=$CTX"
     log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
     log "  CPU-compute early-detected. Batch ranked by short-probe prefill (${WIN_TPS} t/s);"
-    log "  saturation_test confirmed no-OOM at 99% ctx (real full-context prefill is measured in the bench step, not here)."
+    [ -n "$WIN_PREFILL" ] && log "  saturation_prefill=${WIN_PREFILL} t/s (real full-context; from last confirm attempt on fallback path)"
+    log "  saturation_test confirmed no-OOM at 99% ctx."
     log ""; log "  Next: run bench.sh bench $MODEL"
     log "=== DONE ==="
     exit 0
@@ -2105,9 +2158,10 @@ cmd_bisect() {
   # ── GPU SATURATION SWEEP: decode-guarded fastest prefill ──
   local SWEEP_OUT
   SWEEP_OUT=$(gpu_saturation_sweep "$CTX" "$VALIDATED")
-  local WIN WIN_TPS
+  local WIN WIN_TPS WIN_PREFILL
   WIN=$(echo "$SWEEP_OUT" | cut -d'|' -f1)
   WIN_TPS=$(echo "$SWEEP_OUT" | cut -d'|' -f2)
+  WIN_PREFILL=$(echo "$SWEEP_OUT" | cut -d'|' -f3)
   [ -z "$WIN" ] && WIN="$SWEEP_OUT"  # fallback
   set_batch "$WIN"
 
@@ -2117,13 +2171,13 @@ cmd_bisect() {
   log "  batch=$WIN ubatch=$WIN ctx=$CTX"
   log "  candidates=$CANDIDATES saturation-confirm=$PASS/1"
   log "  decode-guarded prefill sweep: fastest prefill among decode-healthy batches (decode ≥ 90% best)"
+  [ -n "$WIN_PREFILL" ] && log "  saturation_prefill=${WIN_PREFILL} t/s (real full-context; from last confirm attempt on fallback path)"
   log ""; log "  Next: run bench.sh bench $MODEL"
   log "=== DONE ==="
 }
 
 # ── SUBCOMMAND: bench (full benchmark record) ───────────────
 cmd_bench() {
-  local PROMPT_TOKENS=${2:-0}
   local JSON_FILE="${MODELS_DIR}/${MODEL}.json"
 
   # ── Environment fingerprint (host-level, captured once) ─────
@@ -2208,6 +2262,9 @@ except: print('')
   SERVED_GRACE=$((60 + CTX / 65536 * 40))
   [ -z "$CTX" ] && { log "ERROR: ctx-size not found"; exit 1; }
 
+  # Prompt size: 75% of ctx (CTX now guaranteed set)
+  local PROMPT_TOKENS=$((CTX * 3 / 4))
+
   # Read batch-size (scoped to the model's own section)
   local BATCH=$(read_batch)
   [ -z "$BATCH" ] && { log "ERROR: batch-size not found — run 'bench.sh bisect $MODEL' first"; exit 1; }
@@ -2281,11 +2338,6 @@ p = paths[0]
 size = os.path.getsize(p) if os.path.exists(p) else os.path.getsize(os.path.realpath(p))
 print(f'{size/1024/1024/1024:.2f}')
 " 2>/dev/null || echo "")
-
-  # Prompt size: if not specified, use 75% of ctx
-  if [ "$PROMPT_TOKENS" -eq 0 ]; then
-    PROMPT_TOKENS=$((CTX * 3 / 4))
-  fi
 
   log "Model: $MODEL | ctx: $CTX | batch: $BATCH | prompt: ${PROMPT_TOKENS} tokens"
 
@@ -2704,6 +2756,11 @@ run_full_suite() {
         for s in mtpcheck bisect mtp bench; do
           VERDICTS["$NAME|$s"]="OK (reset)"
         done
+      elif [ "$NAME" = "$PARENT_NAME" ]; then
+        lshow "  $NAME: family head, already benched (skip)"
+        for s in mtpcheck bisect mtp bench; do
+          VERDICTS["$NAME|$s"]="SKIPPED (family head)"
+        done
       else
         lshow "  $NAME: inheriting from $PARENT_NAME (JSON copied, no bench)"
         for s in mtpcheck bisect mtp bench; do
@@ -2771,7 +2828,7 @@ run_full_suite() {
   # ── Verdict summary ─────────────────────────────────────────
   lshow ""
   lshow "=== VERDICT SUMMARY ==="
-  lshow "$(printf '%-45s %-9s %-8s %-8s %-8s' MODEL mtpcheck bisect mtp bench)"
+  lshow "$(printf '%-45s %-8s %-8s %-8s %-8s' MODEL mtpcheck bisect mtp bench)"
   for i in $MODEL_IDXS; do
     NAME=$(model_name "$i")
     ROW=$(printf "%-45s" "$NAME")
@@ -2907,7 +2964,11 @@ case "$CMD" in
     for m in "$@"; do
       MODEL=$m
       if maybe_inherit "$m"; then
-        log "  $m: inheriting from $(family_of "$m")"
+        if [ "$m" = "$(family_of "$m")" ]; then
+          log "  $m: family head, already benched (skip)"
+        else
+          log "  $m: inheriting from $(family_of "$m") (JSON copied, no bench)"
+        fi
         continue
       fi
       ( cmd_bench ) || { echo "  $m: bench FAILED"; continue; }
