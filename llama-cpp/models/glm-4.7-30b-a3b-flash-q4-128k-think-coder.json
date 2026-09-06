@@ -1,0 +1,109 @@
+{
+  "model": "glm-4.7-30b-a3b-flash-q4-128k-think-coder",
+  "ctx": 131072,
+  "batch": 6464,
+  "ubatch": 6464,
+  "placement": "CPU",
+  "bench_date": "2026-09-05T18:00:51.336888",
+  "bench_method": "bench_model.sh v2",
+  "config": {
+    "temp": "0.7",
+    "top_k": null,
+    "top_p": "1.0",
+    "min_p": "0.01",
+    "repeat_penalty": "1.0",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "unsloth/GLM-4.7-Flash-GGUF:UD-Q4_K_XL",
+    "quant": "UD-Q4_K_XL",
+    "reasoning": "on",
+    "ctx": "131072",
+    "batch": "6464"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 98304,
+    "decode_prompt_tokens": 150,
+    "model_file_size_gb": 16.32,
+    "build_info": "b1-3737e41",
+    "wall_time_s": 141
+  },
+  "speed": {
+    "prefill_t_s": 199.12,
+    "prefill_ms": 480999.91,
+    "prefill_ms_per_tok": 5.022,
+    "decode_t_s": 28.99,
+    "decode_ms": 137943.53,
+    "decode_ms_per_tok": 34.4945
+  },
+  "request": {
+    "prefill_prompt_tokens": 96172,
+    "decode_prompt_tokens": 152,
+    "max_tokens": 4000,
+    "completion_tokens": 4000,
+    "total_tokens": 4152,
+    "cached_tokens": 150,
+    "cache_n": 150,
+    "predicted_n": 4000,
+    "finish_reason": "length",
+    "truncated": true
+  },
+  "mtp": {
+    "acceptance": null,
+    "draft_accepted": null,
+    "draft_generated": null,
+    "draft_mean_len": null,
+    "n_max_confirmed": null,
+    "p_min_confirmed": null,
+    "configured_n_max": null,
+    "configured_p_min": null,
+    "drafter": "none"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 1652.3,
+      "avg_gpu_util_pct": 32.7,
+      "avg_gpu_mem_util_pct": 21.8,
+      "cpu_stddev_pct": 215.9,
+      "peak_vram_mib": 10985,
+      "peak_power_w": 74.72,
+      "peak_temp_c": 60,
+      "peak_clocks_sm_mhz": 1957,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 12,
+      "final_temp_c": 48,
+      "final_power_w": 48.01,
+      "ram_used_mib": 50923,
+      "rss_mib": 227,
+      "sample_count": 58
+    }
+  },
+  "propagated": true,
+  "propagated_from": "glm-4.7-30b-a3b-flash-q4-128k",
+  "propagated_date": "2026-09-05T19:06:18.546915"
+}
