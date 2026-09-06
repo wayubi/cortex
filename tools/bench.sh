@@ -1153,13 +1153,11 @@ cpu_saturation_sweep() {
   done
 
   # If we never crossed the peak (monotonic rise to ctx/OOM), best is at the top.
+  # Skip golden-section refinement (nothing to refine), but still confirm via saturation.
   if [ "$STOP" -eq 0 ]; then
     log "  No descent seen — peak is at the tested edge. Best: batch=$BEST_BATCH (${BEST_TPS} t/s)" >&2
     set_batch "$BEST_BATCH" >&2
-    echo "$BEST_BATCH|$BEST_TPS"
-    return 0
-  fi
-
+  else
   # Reconstruct bracket: LO = largest tested rung below the peak, HI = smallest
   # tested rung above the peak. The true max lives somewhere in [LO, HI].
   local LO HI
@@ -1248,6 +1246,7 @@ print(lo, hi)
     fi
     [ $((HI - LO)) -le 64 ] && break
   done
+  fi  # STOP=1 (golden-section done)
 
   # ── Confirm: run saturation_test on the top-ranked candidates (99% ctx) ──
   log "  Short-probe sweep done. Top-ranked candidates:" >&2
