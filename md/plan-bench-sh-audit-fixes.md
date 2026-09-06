@@ -223,25 +223,28 @@ This makes the ladder's `STALL`/`OOM` branches (`:1089-1093`) live instead of de
 
 **Return contract:** `prefill_probe` remains **dumb** — it returns a numeric t/s or bare `"0"`, never a sentinel string. All classification (OOM / network-stall / context-overflow) is handled externally by `cpu_saturation_sweep`'s `test_rung` (A2). This avoids the A2/A3 contract conflict and preserves the existing `"STALL"` literal's meaning (cold-load network hang from `fire_request` RC=2).
 
+**Sizing formula:** sized purely from `$CTX`, no `chars_per_tok` dependency. `prefill_probe` runs in the CPU path where `CHARS_PER_TOK` is **not** measured (`:570` init = `0`; `measure_ratio` is only called inside `decode_guarded_probe:774`, not before `cpu_saturation_sweep`). Any ratio-dependent formula would yield 0 chars, which is worse than the status quo.
+
 Implementation:
-1. Read `$1` (CTX). Size `PROBE_CHARS = min(32000, ctx*0.5*chars_per_tok)` using measured ratio. **Floor: `ctx/4`** (ensures streaming lines fire for sub-10K models).
-2. Wrap the `fire_request` + parse in a retry loop (max 15 attempts, mirroring `saturation_test:616-648`). On overflow: grep `"exceeds the available context"` in `/tmp/pp_out.json`, shrink `PROBE_CHARS *= 0.9`, log, `continue`. On OOM: `echo "0"; return`. On successful parse: `echo TPS; return`. Exhausted attempts: `echo "0"`.
-3. `test_rung` in A2 remains unchanged — it still checks `if [ "$TPS" = "0" ]` and re-classifies via `oom_count_since_mark`.
+1. Read `$1` (CTX). Size `PROBE_CHARS = min(32000, ctx * 4)` — the `* 4` is a ~1 char/token fallback (worst case) so `ctx` tokens ≈ `ctx*4` chars; the shrink-and-retry loop handles any overshoot.
+2. **Floor: `ctx / 4` (TOKENS, unambiguous)** — ensures at least ~25% of ctx is probed, even in degenerate ratio cases. Since `PROBE_CHARS` is in chars and the fallback `* 4` already makes `ctx * 4` chars ≈ `ctx` tokens, the floor is expressed in the same unit: `floor_chars = (ctx / 4) * 4 = ctx`. In practice `min(32000, ctx*4)` already satisfies this (and the shrink loop catches overshoot), so the floor is a safety net for ratio edge-cases only.
+3. Wrap the `fire_request` + parse in a retry loop (max 15 attempts, mirroring `saturation_test:616-648`). On overflow: grep `"exceeds the available context"` in `/tmp/pp_out.json`, shrink `PROBE_CHARS *= 0.9`, log, `continue`. On OOM: `echo "0"; return`. On successful parse: `echo TPS; return`. Exhausted attempts: `echo "0"`.
+4. `test_rung` in A2 remains unchanged — it still checks `if [ "$TPS" = "0" ]` and re-classifies via `oom_count_since_mark`.
 
 This mirrors `saturation_test`'s existing overshoot-handling pattern (`:642-648`) without introducing any new sentinel values or altering the function's return contract.
 
 ### A4. Clamp decode `max_tokens` by ctx in 4 functions
 
-Apply the same clamp pattern as `cmd_bench:2333`:
+Apply the same clamp pattern as `cmd_bench:2333`. Use a **uniform prompt-token allowance of 64** across all four — all four prompts are short instructions (~15 tokens; see actual content: `long_decode_check:747`, `run_decode_test:1626`, `decode_guarded_probe:819`, `residency_probe:877`). The 64 constant is deliberately generous (~4× the actual prompt + template overhead) and avoids per-function measurement.
 
 | Function | Current hardcoded max_tokens | New formula |
 |---|---|---|
-| `long_decode_check` (`:743`) | `6000` | `min(6000, ctx - prompt)` |
-| `decode_guarded_probe` decode (`:819`) | `4000` | `min(4000, ctx - 150)` |
-| `residency_probe` (`:877`) | `4000` | `min(4000, ctx - 150)` |
-| `run_decode_test` (`:1626`) | `4000` | `min(4000, ctx - prompt)` |
+| `long_decode_check` (`:743`) | `6000` | `min(6000, ctx - 64)` |
+| `decode_guarded_probe` decode (`:819`) | `4000` | `min(4000, ctx - 64)` |
+| `residency_probe` (`:877`) | `4000` | `min(4000, ctx - 64)` |
+| `run_decode_test` (`:1626`) | `4000` | `min(4000, ctx - 64)` |
 
-Verify `$CTX` is in scope at each call site. Add a floor of `256` so degenerate cases don't produce negative `max_tokens`.
+Verify `$CTX` is in scope at each call site. Add a floor of `256` so degenerate cases (ctx < ~320) don't produce negative `max_tokens`.
 
 ### A5. `detect_mtp`: scale `SERVED_GRACE` (`:1506`)
 
