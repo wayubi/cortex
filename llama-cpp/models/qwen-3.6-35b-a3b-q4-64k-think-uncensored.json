@@ -1,10 +1,10 @@
 {
   "model": "qwen-3.6-35b-a3b-q4-64k-think-uncensored",
   "ctx": 65536,
-  "batch": 8768,
-  "ubatch": 8768,
+  "batch": 8192,
+  "ubatch": 8192,
   "placement": "CPU",
-  "bench_date": "2026-09-07T00:40:39.337881",
+  "bench_date": "2026-09-07T01:47:01.988872",
   "bench_method": "bench_model.sh v2",
   "config": {
     "temp": "0.6",
@@ -21,7 +21,7 @@
     "quant": "Q4_K_M",
     "reasoning": "on",
     "ctx": "65536",
-    "batch": "8768"
+    "batch": "8192"
   },
   "bench": {
     "max_tokens": 4000,
@@ -29,15 +29,15 @@
     "decode_prompt_tokens": 150,
     "model_file_size_gb": 19.71,
     "build_info": "b1-3737e41",
-    "wall_time_s": 97
+    "wall_time_s": 90
   },
   "speed": {
-    "prefill_t_s": 1336.59,
-    "prefill_ms": 35981.96,
-    "prefill_ms_per_tok": 0.7482,
-    "decode_t_s": 41.81,
-    "decode_ms": 95639.77,
-    "decode_ms_per_tok": 23.9159
+    "prefill_t_s": 1356.71,
+    "prefill_ms": 35448.31,
+    "prefill_ms_per_tok": 0.7371,
+    "decode_t_s": 45.42,
+    "decode_ms": 88041.73,
+    "decode_ms_per_tok": 22.0159
   },
   "request": {
     "prefill_prompt_tokens": 48093,
@@ -86,21 +86,21 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 1534.1,
-      "avg_gpu_util_pct": 35.4,
-      "avg_gpu_mem_util_pct": 26.6,
-      "cpu_stddev_pct": 233.7,
-      "peak_vram_mib": 10909,
-      "peak_power_w": 122.83,
-      "peak_temp_c": 59,
+      "avg_cpu_pct": 1514.6,
+      "avg_gpu_util_pct": 39.7,
+      "avg_gpu_mem_util_pct": 29.8,
+      "cpu_stddev_pct": 250.8,
+      "peak_vram_mib": 10911,
+      "peak_power_w": 108.97,
+      "peak_temp_c": 60,
       "peak_clocks_sm_mhz": 1965,
       "peak_clocks_mem_mhz": 7301,
-      "final_vram_mib": 10909,
-      "final_temp_c": 53,
-      "final_power_w": 63.03,
-      "ram_used_mib": 55222,
-      "rss_mib": 15092,
-      "sample_count": 41
+      "final_vram_mib": 10911,
+      "final_temp_c": 55,
+      "final_power_w": 54.73,
+      "ram_used_mib": 54948,
+      "rss_mib": 14850,
+      "sample_count": 38
     }
   }
 }
