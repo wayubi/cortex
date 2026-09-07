@@ -1849,13 +1849,42 @@ cmd_mtp() {
   fi
   local CTX=$(read_ctx)
   SERVED_GRACE=$((60 + CTX / 65536 * 40))
+
+  # Snapshot original n_max/p_min so a failed run restores the pre-run config
+  # (mirrors cmd_bisect's restore_batch EXIT trap).
+  local ORIG_NMAX ORIG_PMIN
+  ORIG_NMAX=$(python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', c, re.DOTALL)
+sec = m.group(1) if m else ''
+v = re.search(r'spec-draft-n-max\s*=\s*(\S+)', sec)
+print(v.group(1) if v else '')
+")
+  ORIG_PMIN=$(python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', c, re.DOTALL)
+sec = m.group(1) if m else ''
+v = re.search(r'spec-draft-p-min\s*=\s*(\S+)', sec)
+print(v.group(1) if v else '')
+")
+  local RESTORED=0
+  restore_mtp() {
+    [ "${RESTORED:-0}" -eq 1 ] && return
+    RESTORED=1
+    log "  Restoring original spec-draft-n-max=${ORIG_NMAX:-unset} spec-draft-p-min=${ORIG_PMIN:-unset} (run did not complete)"
+    [ -n "${ORIG_NMAX:-}" ] && set_key spec-draft-n-max "$ORIG_NMAX" >/dev/null 2>&1
+    [ -n "${ORIG_PMIN:-}" ] && set_key spec-draft-p-min "$ORIG_PMIN" >/dev/null 2>&1
+  }
+  trap 'RC=$?; if [ "$RC" -ne 0 ]; then restore_mtp; fi; exit $RC' EXIT
+
   log ""; log "Model: $MODEL | ctx: $CTX"
 
   # ── Phase 1: n_max sweep {2,3,4,5} at p_min=0.7 (speed axis) ──
   local NMAX_VALUES="2 3 4 5"
   local SWEEP_PMIN=0.7
   local WIN_NMAX=0 WIN_SPEED=0
-  local RUNNER_NMAX=0 RUNNER_SPEED=0
   declare -A NMAX_RESULTS
   log ""; log "=== PHASE 1: n_max SWEEP (p_min=$SWEEP_PMIN) ==="
   for N in $NMAX_VALUES; do
@@ -1867,7 +1896,7 @@ cmd_mtp() {
     local DEC_RC=$?
     if [ "$DEC_RC" -eq 2 ]; then
       log ""; log "  STALL during n_max=$N sweep — network/HF fetch, aborting tune"
-      return 1
+      exit 1
     fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
     NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
@@ -1876,23 +1905,19 @@ cmd_mtp() {
     python3 -c "exit(0 if float(${QUALITY:-1}) < 0.15 else 1)" 2>/dev/null && QUAL_OK=1
     if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "$QUAL_OK" -eq 1 ]; then
       if python3 -c "exit(0 if float($SPEED) > float($WIN_SPEED) else 1)" 2>/dev/null; then
-        RUNNER_NMAX=$WIN_NMAX; RUNNER_SPEED=$WIN_SPEED
         WIN_NMAX=$N; WIN_SPEED=$SPEED
-      elif python3 -c "exit(0 if float($SPEED) > float($RUNNER_SPEED) else 1)" 2>/dev/null; then
-        RUNNER_NMAX=$N; RUNNER_SPEED=$SPEED
       fi
     fi
   done
   if [ "$WIN_NMAX" -eq 0 ]; then
-    log ""; log "  WARNING: no n_max passed all filters. Using default 2."
-    WIN_NMAX=2
+    log ""; log "  No n_max passed all filters (OOM/degenerate/CPU) — failing model, no auto fallback"
+    exit 1
   fi
-  log ""; log "  PHASE 1 WINNER: n_max=$WIN_NMAX (runner-up=$RUNNER_NMAX)"
+  log ""; log "  PHASE 1 WINNER: n_max=$WIN_NMAX"
 
   # ── Phase 2: p_min sweep {0.5,0.6,0.7,0.8,0.9} at winning n_max ──
   local PMIN_VALUES="0.5 0.6 0.7 0.8 0.9"
   local WIN_PMIN=0 WIN_PMIN_SPEED=0
-  local RUNNER_PMIN=0 RUNNER_PMIN_SPEED=0
   declare -A PMIN_RESULTS
   log ""; log "=== PHASE 2: p_min SWEEP (n_max=$WIN_NMAX) ==="
   for P in $PMIN_VALUES; do
@@ -1904,7 +1929,7 @@ cmd_mtp() {
     local DEC_RC=$?
     if [ "$DEC_RC" -eq 2 ]; then
       log ""; log "  STALL during p_min=$P sweep — network/HF fetch, aborting tune"
-      return 1
+      exit 1
     fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
     PMIN_RESULTS[$P]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
@@ -1913,21 +1938,17 @@ cmd_mtp() {
     python3 -c "exit(0 if float(${QUALITY:-1}) < 0.15 else 1)" 2>/dev/null && QUAL_OK=1
     if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "$QUAL_OK" -eq 1 ]; then
       if python3 -c "exit(0 if float($SPEED) > float($WIN_PMIN_SPEED) else 1)" 2>/dev/null; then
-        RUNNER_PMIN=$WIN_PMIN; RUNNER_PMIN_SPEED=$WIN_PMIN_SPEED
         WIN_PMIN=$P; WIN_PMIN_SPEED=$SPEED
-      elif python3 -c "exit(0 if float($SPEED) > float($RUNNER_PMIN_SPEED) else 1)" 2>/dev/null; then
-        RUNNER_PMIN=$P; RUNNER_PMIN_SPEED=$SPEED
       fi
     fi
   done
   if [ "$WIN_PMIN" -eq 0 ]; then
-    log ""; log "  WARNING: no p_min passed all filters. Defaulting to 0.7."
-    WIN_PMIN=0.7
+    log ""; log "  No p_min passed all filters (OOM/degenerate/CPU) — failing model, no auto fallback"
+    exit 1
   fi
-  log ""; log "  PHASE 2 WINNER: p_min=$WIN_PMIN (runner-up=$RUNNER_PMIN)"
+  log ""; log "  PHASE 2 WINNER: p_min=$WIN_PMIN"
 
   # ── Phase 3: final confirm (strict degeneracy gate) ──
-  local CONFIRM_PASS=0
   local FINAL_NMAX=$WIN_NMAX FINAL_PMIN=$WIN_PMIN
   log ""; log "=== PHASE 3: FINAL CONFIRM (n_max=$FINAL_NMAX, p_min=$FINAL_PMIN) ==="
   set_key spec-draft-n-max "$FINAL_NMAX"
@@ -1938,47 +1959,29 @@ cmd_mtp() {
   local CONFIRM_RC=$?
   if [ "$CONFIRM_RC" -eq 2 ]; then
     log ""; log "  STALL during final confirm — aborting tune"
-    return 1
+    exit 1
   fi
   IFS='|' read -r CONFIRM_SPEED _ CONFIRM_PLACEMENT _ CONFIRM_QUALITY CONFIRM_OOM <<< "$CONFIRM_RESULT"
   log "  Final confirm: decode=${CONFIRM_SPEED} t/s | degeneracy=${CONFIRM_QUALITY} | OOM=$CONFIRM_OOM"
 
-  # Strict gate: < 0.05 = clean PASS; >= 0.15 = reject → fall back to runner
+  # Strict gate: < 0.05 = clean PASS; >= 0.05 = fail (no runner-up fallback).
   local CONFIRM_CLEAN=0
   python3 -c "exit(0 if float(${CONFIRM_QUALITY:-1}) < 0.05 else 1)" 2>/dev/null && CONFIRM_CLEAN=1
   if [ "$CONFIRM_OOM" -eq 0 ] && [ "$CONFIRM_PLACEMENT" != "CPU" ] && [ "$CONFIRM_CLEAN" -eq 1 ]; then
-    CONFIRM_PASS=1
     log "  Final confirm PASSED (degeneracy=${CONFIRM_QUALITY} < 0.05)"
+  else
+    log "  Final confirm FAILED (degeneracy=${CONFIRM_QUALITY:-?}) — failing model, no auto fallback"
+    exit 1
   fi
 
-  # If final confirm failed, fall back to runner-up n_max (re-tested at winning p_min)
-  if [ "$CONFIRM_PASS" -eq 0 ] && [ "$RUNNER_NMAX" -ne 0 ]; then
-    log "  Final confirm failed (degeneracy=${CONFIRM_QUALITY:-?}) — trying runner-up n_max=$RUNNER_NMAX"
-    set_key spec-draft-n-max "$RUNNER_NMAX"
-    set_key spec-draft-p-min "$WIN_PMIN"
-    restart
-    local FALLBACK_RESULT FALLBACK_QUALITY
-    FALLBACK_RESULT=$(run_decode_test "n_max=$RUNNER_NMAX, p_min=$WIN_PMIN (fallback)")
-    IFS='|' read -r _ _ _ _ FALLBACK_QUALITY _ <<< "$FALLBACK_RESULT"
-    if python3 -c "exit(0 if float(${FALLBACK_QUALITY:-1}) < 0.15 else 1)" 2>/dev/null; then
-      log "  Fallback passed (degeneracy=${FALLBACK_QUALITY}) — using runner-up n_max=$RUNNER_NMAX"
-      FINAL_NMAX=$RUNNER_NMAX
-      CONFIRM_PASS=1
-    else
-      log "  WARNING: runner-up also failed (degeneracy=${FALLBACK_QUALITY}). Keeping $WIN_NMAX."
-      FINAL_NMAX=$WIN_NMAX
-      set_key spec-draft-n-max "$WIN_NMAX"
-      set_key spec-draft-p-min "$WIN_PMIN"
-    fi
-  fi
-
-  # ── Apply winners ──
+  # ── Apply winners (success path — trap will not restore) ──
+  trap - EXIT
   log ""; log "=== APPLYING WINNERS ==="
   set_key spec-draft-n-max "$FINAL_NMAX"
   set_key spec-draft-p-min "$FINAL_PMIN"
 
   log ""; log "=== SUMMARY: $MODEL ==="
-  log "  n_max sweep (p_min=0.7):"
+  log "  n_max sweep (p_min=$SWEEP_PMIN):"
   for N in $NMAX_VALUES; do
     log "    n_max=$N: ${NMAX_RESULTS[$N]:-skipped}"
   done

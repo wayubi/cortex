@@ -143,9 +143,9 @@ Params:
 Both **n_max and p_min are bench-determined per model** — no hardcode, no stale `models.ini` value trusted.
 
 `cmd_mtp` runs three phases:
-1. **n_max sweep {2,3,4,5}** at p_min=0.7 (speed axis, 4 runs) — picks the fastest clean n_max + runner-up.
+1. **n_max sweep {2,3,4,5}** at p_min=0.7 (speed axis, 4 runs) — picks the fastest clean n_max.
 2. **p_min sweep {0.5,0.6,0.7,0.8,0.9}** at winning n_max (quality axis, 5 runs) — picks the clean+fast p_min; p_min quality is model-dependent (e.g. 0.5 degenerates on gemma, is viable on Qwen-think).
-3. **Final confirm** (1 run) — strict degeneracy gate on the chosen (n_max, p_min); on reject, falls back to runner-up n_max.
+3. **Final confirm** (1 run) — strict degeneracy gate on the chosen (n_max, p_min); on reject, the model is failed (exit non-zero); no auto fallback.
 
 **Total: 10 decode runs (~12-15 min).** Each model's p_min is empirically discovered; the sweep is the source of truth (not `models.ini`, not a global constant).
 
@@ -164,7 +164,7 @@ Thresholds (noise-tolerant, eliminates single-sample coin-flip):
 - **0.05–0.15** → borderline (PASS for sweep; re-check in confirm pass)
 - **> 0.15** → degenerate (REJECT)
 
-A single-sample flip (a config getting 0.05 one run and 0.20 the next) is absorbed by the confirm pass: the winner is re-run once, and if degeneracy ≥ 0.15 on the confirm, a warning is logged.
+A single-sample flip (a config getting 0.05 one run and 0.20 the next) is caught by the confirm pass: the winner is re-run once, and if degeneracy ≥ 0.05 on the confirm, the model is failed for user intervention (exit non-zero), matching the batch-bisect fail-hard behavior.
 
 ### Sweep results by model family (observed)
 
