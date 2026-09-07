@@ -765,7 +765,12 @@ else:
     return 3
   fi
 
-  if [ $((PT + CT)) -ge "$CTX" ]; then
+  # Allow decode to land within a small epsilon of the ctx ceiling. Small-ctx models
+  # (e.g. gemma-4-12b @ 16k) stop 0-4 tokens short of ctx at 99%-ctx prefill; that IS
+  # full-context saturation. EPSILON masks that boundary noise without admitting a
+  # genuinely short decode (which would be thousands short, not 8).
+  local EPSILON=8
+  if [ $((PT + CT)) -ge $((CTX - EPSILON)) ]; then
     log "  Saturation: PASS (prompt_tokens=${PT}, completion_tokens=${CT}, total=$((PT+CT)), ctx=${CTX}, prefill=${SAT_PREFILL_TPS} t/s)"
     return 0
   fi
