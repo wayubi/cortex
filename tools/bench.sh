@@ -2110,15 +2110,6 @@ cmd_bisect() {
     exit 1
   fi
 
-  log ""; log "=== LONG-DECODE CHECK ==="
-  set_batch "$VALIDATED"; restart
-  long_decode_check
-  local LD_RC=$?
-  if [ "$LD_RC" -eq 2 ]; then
-    log "  STALL during long-decode — aborting"
-    exit 1
-  fi
-
   # ── RESIDENCY GATE + SELECTION ──
   # GPU-resident models: sweep 256→ceiling via gpu_saturation_sweep, which measures
   # decode per rung and picks fastest prefill among decode-healthy candidates.
@@ -2154,6 +2145,16 @@ cmd_bisect() {
   WIN_PREFILL=$(echo "$SWEEP_OUT" | cut -d'|' -f3)
   [ -z "$WIN" ] && WIN="$SWEEP_OUT"  # fallback
   set_batch "$WIN"
+
+  # ── LONG-DECODE CHECK (on the final chosen batch, not the ceiling) ──
+  log ""; log "=== LONG-DECODE CHECK (batch=$WIN) ==="
+  set_batch "$WIN"; restart
+  long_decode_check
+  local LD_RC=$?
+  if [ "$LD_RC" -ne 0 ]; then
+    log "  LONG-DECODE failed (rc=$LD_RC) on chosen batch $WIN — failing model"
+    exit 1
+  fi
 
   log ""; log "  *** PERFORMANCE-OPTIMIZED batch=$WIN (${WIN_TPS} t/s, decode-guarded prefill) ***"
 
