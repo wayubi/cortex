@@ -1915,6 +1915,32 @@ print(v.group(1) if v else '')
   fi
   log ""; log "  PHASE 1 WINNER: n_max=$WIN_NMAX"
 
+  # ── Phase 1 confirm: strict re-check of n_max winner at sweep p_min ──
+  # Converts the single-sample n_max pick to a two-sample-agree gate (same fail-hard philosophy as Phase 3).
+  log ""; log "=== PHASE 1 CONFIRM (n_max=$WIN_NMAX, p_min=$SWEEP_PMIN) ==="
+  set_key spec-draft-n-max "$WIN_NMAX"
+  set_key spec-draft-p-min "$SWEEP_PMIN"
+  restart
+  local CONFIRM1_RESULT CONFIRM1_SPEED CONFIRM1_QUALITY CONFIRM1_OOM CONFIRM1_PLACEMENT
+  CONFIRM1_RESULT=$(run_decode_test "n_max=$WIN_NMAX, p_min=$SWEEP_PMIN (phase-1 confirm)")
+  local CONFIRM1_RC=$?
+  if [ "$CONFIRM1_RC" -eq 2 ]; then
+    log ""; log "  STALL during phase-1 confirm — aborting tune"
+    exit 1
+  fi
+  IFS='|' read -r CONFIRM1_SPEED _ CONFIRM1_PLACEMENT _ CONFIRM1_QUALITY CONFIRM1_OOM <<< "$CONFIRM1_RESULT"
+  log "  Phase-1 confirm: decode=${CONFIRM1_SPEED} t/s | degeneracy=${CONFIRM1_QUALITY} | OOM=$CONFIRM1_OOM"
+
+  # Strict gate: same criteria as Phase 3 confirm.
+  local CONFIRM1_CLEAN=0
+  python3 -c "exit(0 if float(${CONFIRM1_QUALITY:-1}) < 0.05 else 1)" 2>/dev/null && CONFIRM1_CLEAN=1
+  if [ "$CONFIRM1_OOM" -eq 0 ] && [ "$CONFIRM1_PLACEMENT" != "CPU" ] && [ "$CONFIRM1_CLEAN" -eq 1 ]; then
+    log "  Phase-1 confirm PASSED (degeneracy=${CONFIRM1_QUALITY} < 0.05)"
+  else
+    log "  Phase-1 confirm FAILED (degeneracy=${CONFIRM1_QUALITY:-?}) — failing model, no auto fallback"
+    exit 1
+  fi
+
   # ── Phase 2: p_min sweep {0.5,0.6,0.7,0.8,0.9} at winning n_max ──
   local PMIN_VALUES="0.5 0.6 0.7 0.8 0.9"
   local WIN_PMIN=0 WIN_PMIN_SPEED=0

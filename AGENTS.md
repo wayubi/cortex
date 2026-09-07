@@ -143,11 +143,11 @@ Params:
 Both **n_max and p_min are bench-determined per model** — no hardcode, no stale `models.ini` value trusted.
 
 `cmd_mtp` runs three phases:
-1. **n_max sweep {2,3,4,5}** at p_min=0.7 (speed axis, 4 runs) — picks the fastest clean n_max.
+1. **n_max sweep {2,3,4,5}** at p_min=0.7 (speed axis, 4 runs) — picks the fastest clean n_max; winner is then re-confirmed once with the strict <0.05 gate at the sweep p_min (1 run) — on failure, the model is failed (exit non-zero).
 2. **p_min sweep {0.5,0.6,0.7,0.8,0.9}** at winning n_max (quality axis, 5 runs) — picks the clean+fast p_min; p_min quality is model-dependent AND n_max-dependent (e.g. 0.5 is viable on Qwen-think, but its safety on gemma varies with n_max — see sweep results below).
 3. **Final confirm** (1 run) — strict degeneracy gate on the chosen (n_max, p_min); on reject, the model is failed (exit non-zero); no auto fallback.
 
-**Total: 10 decode runs (~12-15 min).** Each model's p_min is empirically discovered; the sweep is the source of truth (not `models.ini`, not a global constant).
+**Total: 11 decode runs (~13-16 min).** Each model's p_min is empirically discovered; the sweep is the source of truth (not `models.ini`, not a global constant).
 
 ### Quality assessment (novelty metric — same essay output, no extra generation)
 
