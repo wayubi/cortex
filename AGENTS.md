@@ -138,28 +138,47 @@ Params:
 - `spec-draft-p-min` — **quality guard**: draft tokens below this probability are rejected (target recomputes). Lower = more acceptance but riskier quality; higher = safer but slower.
 - (`spec-draft-n-min` shows as `n_min=0` at load and is not preset-controlled.)
 
-Benchmark method (per candidate — same edit/restart/watch style as batch tuning, but the metric is speed + quality, not OOM):
-1. Edit the target `[model]` entry's `spec-draft-n-max` / `spec-draft-p-min` in `models.ini`.
-2. `docker compose restart llama-cpp`; wait for `/v1/models` 200.
-3. Fire a **decode-heavy** request — a real generation task (an essay prompt, NOT filler, so quality is assessable), `max_tokens` ~4000, `ignore_eos: true` to force a stable long decode:
-   `curl -s -X POST http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"<model>","messages":[{"role":"user","content":"Write a detailed 1000-word essay explaining transformers and MoE"}],"max_tokens":4000,"ignore_eos":true}'`
-4. Read the log (`docker logs --since 3m cortex-llama-cpp-1`): grep for `tokens per second` (the speed metric), `draft acceptance = X (a / g)`, and `n_max=…, p_min=…` (confirms params applied).
-5. Assess output quality from the saved response — degradation shows as repetition loops, incoherence, or drift (check consecutive-sentence repeats; clean if <~2). `ignore_eos` makes the model ramble past natural endings (`**Revised Final Version…**` / `(End of Thought Process)` restarts) — that is an artifact of forced generation, NOT speculation degradation.
-6. Sweep order: n-max first (`{1,2,3,4,5}` at `p_min=0.7`), then p-min (`{0.5,0.6,0.7,0.8,0.9}` at the winning n-max).
+### Benchmark method (`cmd_mtp` in bench.sh)
 
-Proven observation (Qwen3.5-9B-MTP @ 16K): the **non-think** variant was **flat at ~58 t/s (57.6–58.8)** across the whole n_max×p_min space — neither param moved the needle, quality clean everywhere. The **think** variant differed: p_min showed a monotonic speed trend (lower=faster: 0.9→52.7, 0.7→56.3, 0.5→58.9, 0.3→58.9 plateau), but acceptance collapsed (0.98→0.69), so 0.7 was kept as the safe default; n_max=3+ **OOMs at load** (the draft-context compute buffer scales with `n_max × batch` and batch 2048 was already near the ceiling). Don't assume one variant's tuning transfers to the other — bench think/non-think separately. On dense 9B MTP models the defaults (`n_max=2, p_min=0.7`) are as good as anything.
+Both **n_max and p_min are bench-determined per model** — no hardcode, no stale `models.ini` value trusted.
 
-**Placement re-check is MANDATORY after any n_max change** (caused a real regression on ornith): the draft-context compute buffer scales with `n_max × batch`, so a batch bisected at n_max=2 may NOT fit the draft at n_max=3/5. The spill is silent — no OOM, just decode dropping 3–4× and CPU climbing to 270–680%. Always re-run the CPU placement check (step 8) on the affected entry after changing n_max, at the SAME batch. Also tune MTP on the real workload, not a prose essay: prose has high draft acceptance that overstates the MTP benefit — reasoning/CoT tokens accept less. (Observed on ornith-1.5-9b: prose essay suggested n_max=5 peak; a proper 3–5× reasoning-workload bench put the peak at n_max=3 @ 52.5 t/s vs 51.7 at 2 and 44.1 no-MTP.) **Tradeoff: raising n_max shrinks the batch ceiling (draft buffer = n_max × batch) — but a smaller batch at higher n_max does NOT necessarily beat a bigger batch at lower n_max.** Re-bisect batch at each candidate n_max before comparing: on ornith 128k/256k, n_max=2 at the full batch (4736/960) decoded equal-or-faster than n_max=3 at its reduced ceiling (4608/832), so n_max=2 won there despite the 64k showing n_max=3's small edge.
+`cmd_mtp` runs three phases:
+1. **n_max sweep {2,3,4,5}** at p_min=0.7 (speed axis, 4 runs) — picks the fastest clean n_max + runner-up.
+2. **p_min sweep {0.5,0.6,0.7,0.8,0.9}** at winning n_max (quality axis, 5 runs) — picks the clean+fast p_min; p_min quality is model-dependent (e.g. 0.5 degenerates on gemma, is viable on Qwen-think).
+3. **Final confirm** (1 run) — strict degeneracy gate on the chosen (n_max, p_min); on reject, falls back to runner-up n_max.
 
-On the **35B MoE** the picture is different and harder: decode shows **±10–15% run-to-run variance** (identical configs measured 36.5→42.1 t/s across repeat runs), which **exceeds the config deltas** (n_max 1–5 and p_min 0.5–0.9 moved t/s by less than the noise). Single-sample sweeps are therefore unreliable on compute-bound MoE models; defaults were retained and further tuning would require multi-sample averaging (3× per config) to be statistically meaningful.
+**Total: 10 decode runs (~12-15 min).** Each model's p_min is empirically discovered; the sweep is the source of truth (not `models.ini`, not a global constant).
 
-On the **Gemma 4 QAT 12B** (separate Q4_0 MTP drafter) deeper speculation helps a lot: n_max swept 1–6 rose 54→79 t/s to a peak at **5** (non-think) / tied at 4–5 (think), with acceptance dropping to ~0.79 — yet quality stayed clean and the low acceptance is a speed cost (marginal drafts rejected), not a quality problem, because p_min still gates what is accepted.
+### Quality assessment (novelty metric — same essay output, no extra generation)
 
-**Acceptance-rate principle (read this before judging a config by `draft acceptance`):** the acceptance number is NOT a universal quality gate — it depends on the drafter (in-model full-precision head vs a separate Q4 GGUF) and on n_max (deeper speculation generates more marginal drafts that get rejected, dragging the ratio down). The same-looking number can mean opposite things:
-- Acceptance dropping because **p_min was lowered** = the quality bar is being relaxed (low-confidence drafts accepted) — genuine risk.
-- Acceptance dropping because **n_max was raised** = only wasted draft compute (rejected drafts are recomputed by the target) — quality preserved.
+Quality is scored from the **same decode output** used for speed (no extra generation time). The metric is **8-gram degeneracy ratio** — fraction of 8-word spans that appear more than once:
 
-So the Qwen-era habit of targeting ~0.9 acceptance was just the natural operating point of Qwen's in-model head at n_max=2, NOT a rule. The durable principle: **protect p_min** (the real quality gate) and treat `draft acceptance` as a rough signal, never a gate. Judging a config by the acceptance number alone will falsely condemn a good deep-speculation config (e.g. Gemma n_max=5 @ 0.79) while blessing a risky low-p_min one (Qwen think p_min=0.5 @ 0.82). Verify quality directly on the output instead.
+```
+degeneracy = duplicate_8gram_count / total_8grams
+  0.0 = all unique (clean)
+  1.0 = fully degenerate (loops)
+```
+
+Thresholds (noise-tolerant, eliminates single-sample coin-flip):
+- **< 0.05** → clean (PASS; normal prose has some structural repetition)
+- **0.05–0.15** → borderline (PASS for sweep; re-check in confirm pass)
+- **> 0.15** → degenerate (REJECT)
+
+A single-sample flip (a config getting 0.05 one run and 0.20 the next) is absorbed by the confirm pass: the winner is re-run once, and if degeneracy ≥ 0.15 on the confirm, a warning is logged.
+
+### Sweep results by model family (observed)
+
+**Qwen 3.5-9B-MTP @ 16K:** non-think variant flat ~58 t/s across n_max×p_min (neither param moved the needle). Think variant: p_min monotonic (lower=faster, 0.9→52.7 to 0.5→58.9, with acceptance collapse 0.98→0.69); n_max=3+ OOMs at load (draft buffer = n_max×batch). Defaults (`n_max=2, p_min=0.7`) are as good as anything.
+
+**Gemma 4 QAT 12B** (separate Q4_0 MTP drafter): n_max is the dominant lever — 1→6 rose 54→79 t/s, peak at 4–5 (tied). p_min=0.7 is the safe floor (0.5 degenerates at high n_max). Vendor reference: unsloth recommends `n_max=4` (p_min=0.0 default). On dense 12B the draft-context compute buffer is small (~8.6K batch ceiling), so n_max up to 6 is feasible.
+
+**35B MoE:** decode shows ±10–15% run-to-run variance exceeding config deltas (n_max/p_min moved t/s by less than noise). Single-sample sweeps unreliable; defaults retained; further tuning requires multi-sample averaging (3× per config).
+
+### Acceptance-rate principle
+`draft acceptance` is NOT a universal quality gate — it depends on drafter type and n_max. Acceptance dropping because p_min was lowered = quality bar relaxed (genuine risk). Acceptance dropping because n_max was raised = only wasted draft compute (rejected drafts recomputed by target, quality preserved). The durable principle: **protect p_min** (the real quality gate) and treat `draft acceptance` as a rough signal, never a gate.
+
+### Placement re-check
+**Mandatory after any n_max change.** Draft-context compute buffer scales with `n_max × batch` — a batch bisected at n_max=2 may NOT fit the draft at n_max=3/5. The spill is silent: no OOM, just decode dropping 3–4× and CPU climbing to 270–680%. Re-run placement check after changing n_max at the SAME batch. **Tradeoff: raising n_max shrinks the batch ceiling (draft buffer = n_max × batch).** Re-bisect batch at each candidate n_max before comparing: on ornith 128k/256k, n_max=2 at the full batch decoded equal-or-faster than n_max=3 at its reduced ceiling, so n_max=2 won.
 
 ## Gotchas
 

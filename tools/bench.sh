@@ -383,6 +383,43 @@ b = re.search(r'batch-size\s*=\s*(\S+)', sec)
 print(b.group(1) if b else '')
 ")
   [ -n "$PARENT_BATCH" ] && set_batch_for "$CHILD" "$PARENT_BATCH"
+
+  # Write parent's MTP values (n_max/p_min) to child's models.ini section
+  # so that sibling models.ini config matches the inherited parent JSON.
+  local PARENT_NMAX PARENT_PMIN
+  PARENT_NMAX=$(python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'(\['+re.escape('$PARENT')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
+sec = m.group(2) if m else ''
+v = re.search(r'spec-draft-n-max\s*=\s*(\S+)', sec)
+print(v.group(1) if v else '')
+")
+  PARENT_PMIN=$(python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'(\['+re.escape('$PARENT')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
+sec = m.group(2) if m else ''
+v = re.search(r'spec-draft-p-min\s*=\s*(\S+)', sec)
+print(v.group(1) if v else '')
+")
+  python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'(\['+re.escape('$CHILD')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
+if not m: exit()
+sec = m.group(2); new_lines = []
+nmax = '${PARENT_NMAX}'; pmin = '${PARENT_PMIN}'
+for line in sec.split('\n'):
+    if re.match(r'\s*spec-draft-n-max\s*=', line) and nmax:
+        new_lines.append('spec-draft-n-max = ' + nmax)
+    elif re.match(r'\s*spec-draft-p-min\s*=', line) and pmin:
+        new_lines.append('spec-draft-p-min = ' + pmin)
+    else:
+        new_lines.append(line)
+with open('$INI','w') as f: f.write(c[:m.start(2)] + '\n'.join(new_lines) + c[m.end(2):])
+" 2>/dev/null
+  log "  Inherited parent MTP config: spec-draft-n-max=${PARENT_NMAX:-?} spec-draft-p-min=${PARENT_PMIN:-?}"
 }
 
 # Determine whether a model should inherit or be bench-marked fresh.
@@ -1764,26 +1801,26 @@ except: print('0')
 " 2>/dev/null)
   ACCEPT=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -oE "draft acceptance = [0-9.]+" | tail -1 | awk '{print $3}')
   QUALITY=$(python3 -c "
-import json, re
+import json
 try:
     d = json.load(open('/tmp/mtp_out.json'))
     text = d['choices'][0]['message']['content']
 except:
     print('?'); exit()
-sents = [s.strip() for s in re.split(r'[.!?]\s+', text) if len(s.strip()) > 30]
-repeats = 0
-for i in range(len(sents) - 1):
-    if sents[i] == sents[i+1]:
-        repeats += 1
-# also flag repeated 8-word spans
 words = text.split()
-tri = [' '.join(words[i:i+8]) for i in range(len(words)-8)]
+if len(words) < 8:
+    print('0'); exit()
+ngrams = [' '.join(words[i:i+8]) for i in range(len(words)-7)]
+total = len(ngrams)
+if total == 0:
+    print('0'); exit()
 from collections import Counter
-dup = sum(1 for v in Counter(tri).values() if v > 1)
-print(max(repeats, dup if dup >= 3 else 0))
+counts = Counter(ngrams)
+dup = sum(v for v in counts.values() if v > 1)
+print(round(dup/total, 4))
 ")
 
-  plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-?} | placement=$PLACEMENT (cpu ${AVG_CPU}%) | quality-repeats=${QUALITY:-?} | OOM=$OOM"
+  plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-?} | placement=$PLACEMENT (cpu ${AVG_CPU}%) | degeneracy=${QUALITY:-?} | OOM=$OOM"
   echo "$SPEED|$ACCEPT|$PLACEMENT|$AVG_CPU|$QUALITY|$OOM"
 }
 
@@ -1800,6 +1837,11 @@ cmd_mtpcheck() {
 }
 
 # ── SUBCOMMAND: mtp (tuning only; capability pre-settled) ───
+# Empirically determines optimal n_max and p_min per model.
+# Phase 1: n_max sweep {2,3,4,5} at p_min=0.7 (speed axis).
+# Phase 2: p_min sweep {0.5-0.9} at winning n_max (quality axis).
+# Phase 3: final confirm (strict degeneracy gate).
+# Total: 4 + 5 + 1 = 10 runs (~12-15 min).
 cmd_mtp() {
   if ! grep -q "spec-type.*draft-mtp" <(read_section); then
     echo "  ERROR: $MODEL has no spec-type=draft-mtp — run 'bench.sh mtpcheck $MODEL' first"
@@ -1809,17 +1851,19 @@ cmd_mtp() {
   SERVED_GRACE=$((60 + CTX / 65536 * 40))
   log ""; log "Model: $MODEL | ctx: $CTX"
 
-  # ── Phase B: n_max sweep {1,2,3,4,5} at p_min=0.7 ──
-  local NMAX_VALUES="1 2 3 4 5"
+  # ── Phase 1: n_max sweep {2,3,4,5} at p_min=0.7 (speed axis) ──
+  local NMAX_VALUES="2 3 4 5"
+  local SWEEP_PMIN=0.7
   local WIN_NMAX=0 WIN_SPEED=0
+  local RUNNER_NMAX=0 RUNNER_SPEED=0
   declare -A NMAX_RESULTS
-  log ""; log "=== PHASE B: n_max SWEEP (p_min=0.7) ==="
+  log ""; log "=== PHASE 1: n_max SWEEP (p_min=$SWEEP_PMIN) ==="
   for N in $NMAX_VALUES; do
     set_key spec-draft-n-max "$N"
-    set_key spec-draft-p-min 0.7
+    set_key spec-draft-p-min "$SWEEP_PMIN"
     restart
     local RESULT SPEED ACC PLACEMENT AVGCPU QUALITY OOM
-    RESULT=$(run_decode_test "n_max=$N, p_min=0.7")
+    RESULT=$(run_decode_test "n_max=$N, p_min=$SWEEP_PMIN")
     local DEC_RC=$?
     if [ "$DEC_RC" -eq 2 ]; then
       log ""; log "  STALL during n_max=$N sweep — network/HF fetch, aborting tune"
@@ -1827,9 +1871,15 @@ cmd_mtp() {
     fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
     NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
-    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [[ "$QUALITY" =~ ^[0-9]+$ ]] && (( QUALITY < 2 )); then
+    # Quality gate: reject clearly degenerate (degeneracy > 0.15).
+    local QUAL_OK=0
+    python3 -c "exit(0 if float(${QUALITY:-1}) < 0.15 else 1)" 2>/dev/null && QUAL_OK=1
+    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "$QUAL_OK" -eq 1 ]; then
       if python3 -c "exit(0 if float($SPEED) > float($WIN_SPEED) else 1)" 2>/dev/null; then
+        RUNNER_NMAX=$WIN_NMAX; RUNNER_SPEED=$WIN_SPEED
         WIN_NMAX=$N; WIN_SPEED=$SPEED
+      elif python3 -c "exit(0 if float($SPEED) > float($RUNNER_SPEED) else 1)" 2>/dev/null; then
+        RUNNER_NMAX=$N; RUNNER_SPEED=$SPEED
       fi
     fi
   done
@@ -1837,13 +1887,14 @@ cmd_mtp() {
     log ""; log "  WARNING: no n_max passed all filters. Using default 2."
     WIN_NMAX=2
   fi
-  log ""; log "  WINNING n_max: $WIN_NMAX"
+  log ""; log "  PHASE 1 WINNER: n_max=$WIN_NMAX (runner-up=$RUNNER_NMAX)"
 
-  # ── Phase C: p_min sweep {0.5,0.6,0.7,0.8,0.9} at winning n_max ──
+  # ── Phase 2: p_min sweep {0.5,0.6,0.7,0.8,0.9} at winning n_max ──
   local PMIN_VALUES="0.5 0.6 0.7 0.8 0.9"
-  local WIN_PMIN=0.7 WIN_PMIN_SPEED=0
+  local WIN_PMIN=0 WIN_PMIN_SPEED=0
+  local RUNNER_PMIN=0 RUNNER_PMIN_SPEED=0
   declare -A PMIN_RESULTS
-  log ""; log "=== PHASE C: p_min SWEEP (n_max=$WIN_NMAX) ==="
+  log ""; log "=== PHASE 2: p_min SWEEP (n_max=$WIN_NMAX) ==="
   for P in $PMIN_VALUES; do
     set_key spec-draft-n-max "$WIN_NMAX"
     set_key spec-draft-p-min "$P"
@@ -1857,16 +1908,74 @@ cmd_mtp() {
     fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
     PMIN_RESULTS[$P]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
-    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [[ "$QUALITY" =~ ^[0-9]+$ ]] && (( QUALITY < 2 )); then
+    # Quality gate: reject clearly degenerate (degeneracy > 0.15).
+    local QUAL_OK=0
+    python3 -c "exit(0 if float(${QUALITY:-1}) < 0.15 else 1)" 2>/dev/null && QUAL_OK=1
+    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "$QUAL_OK" -eq 1 ]; then
       if python3 -c "exit(0 if float($SPEED) > float($WIN_PMIN_SPEED) else 1)" 2>/dev/null; then
+        RUNNER_PMIN=$WIN_PMIN; RUNNER_PMIN_SPEED=$WIN_PMIN_SPEED
         WIN_PMIN=$P; WIN_PMIN_SPEED=$SPEED
+      elif python3 -c "exit(0 if float($SPEED) > float($RUNNER_PMIN_SPEED) else 1)" 2>/dev/null; then
+        RUNNER_PMIN=$P; RUNNER_PMIN_SPEED=$SPEED
       fi
     fi
   done
+  if [ "$WIN_PMIN" -eq 0 ]; then
+    log ""; log "  WARNING: no p_min passed all filters. Defaulting to 0.7."
+    WIN_PMIN=0.7
+  fi
+  log ""; log "  PHASE 2 WINNER: p_min=$WIN_PMIN (runner-up=$RUNNER_PMIN)"
 
+  # ── Phase 3: final confirm (strict degeneracy gate) ──
+  local CONFIRM_PASS=0
+  local FINAL_NMAX=$WIN_NMAX FINAL_PMIN=$WIN_PMIN
+  log ""; log "=== PHASE 3: FINAL CONFIRM (n_max=$FINAL_NMAX, p_min=$FINAL_PMIN) ==="
+  set_key spec-draft-n-max "$FINAL_NMAX"
+  set_key spec-draft-p-min "$FINAL_PMIN"
+  restart
+  local CONFIRM_RESULT CONFIRM_SPEED CONFIRM_QUALITY CONFIRM_OOM CONFIRM_PLACEMENT
+  CONFIRM_RESULT=$(run_decode_test "n_max=$FINAL_NMAX, p_min=$FINAL_PMIN (final confirm)")
+  local CONFIRM_RC=$?
+  if [ "$CONFIRM_RC" -eq 2 ]; then
+    log ""; log "  STALL during final confirm — aborting tune"
+    return 1
+  fi
+  IFS='|' read -r CONFIRM_SPEED _ CONFIRM_PLACEMENT _ CONFIRM_QUALITY CONFIRM_OOM <<< "$CONFIRM_RESULT"
+  log "  Final confirm: decode=${CONFIRM_SPEED} t/s | degeneracy=${CONFIRM_QUALITY} | OOM=$CONFIRM_OOM"
+
+  # Strict gate: < 0.05 = clean PASS; >= 0.15 = reject → fall back to runner
+  local CONFIRM_CLEAN=0
+  python3 -c "exit(0 if float(${CONFIRM_QUALITY:-1}) < 0.05 else 1)" 2>/dev/null && CONFIRM_CLEAN=1
+  if [ "$CONFIRM_OOM" -eq 0 ] && [ "$CONFIRM_PLACEMENT" != "CPU" ] && [ "$CONFIRM_CLEAN" -eq 1 ]; then
+    CONFIRM_PASS=1
+    log "  Final confirm PASSED (degeneracy=${CONFIRM_QUALITY} < 0.05)"
+  fi
+
+  # If final confirm failed, fall back to runner-up n_max (re-tested at winning p_min)
+  if [ "$CONFIRM_PASS" -eq 0 ] && [ "$RUNNER_NMAX" -ne 0 ]; then
+    log "  Final confirm failed (degeneracy=${CONFIRM_QUALITY:-?}) — trying runner-up n_max=$RUNNER_NMAX"
+    set_key spec-draft-n-max "$RUNNER_NMAX"
+    set_key spec-draft-p-min "$WIN_PMIN"
+    restart
+    local FALLBACK_RESULT FALLBACK_QUALITY
+    FALLBACK_RESULT=$(run_decode_test "n_max=$RUNNER_NMAX, p_min=$WIN_PMIN (fallback)")
+    IFS='|' read -r _ _ _ _ FALLBACK_QUALITY _ <<< "$FALLBACK_RESULT"
+    if python3 -c "exit(0 if float(${FALLBACK_QUALITY:-1}) < 0.15 else 1)" 2>/dev/null; then
+      log "  Fallback passed (degeneracy=${FALLBACK_QUALITY}) — using runner-up n_max=$RUNNER_NMAX"
+      FINAL_NMAX=$RUNNER_NMAX
+      CONFIRM_PASS=1
+    else
+      log "  WARNING: runner-up also failed (degeneracy=${FALLBACK_QUALITY}). Keeping $WIN_NMAX."
+      FINAL_NMAX=$WIN_NMAX
+      set_key spec-draft-n-max "$WIN_NMAX"
+      set_key spec-draft-p-min "$WIN_PMIN"
+    fi
+  fi
+
+  # ── Apply winners ──
   log ""; log "=== APPLYING WINNERS ==="
-  set_key spec-draft-n-max "$WIN_NMAX"
-  set_key spec-draft-p-min "$WIN_PMIN"
+  set_key spec-draft-n-max "$FINAL_NMAX"
+  set_key spec-draft-p-min "$FINAL_PMIN"
 
   log ""; log "=== SUMMARY: $MODEL ==="
   log "  n_max sweep (p_min=0.7):"
@@ -1877,7 +1986,7 @@ cmd_mtp() {
   for P in $PMIN_VALUES; do
     log "    p_min=$P: ${PMIN_RESULTS[$P]:-skipped}"
   done
-  log ""; log "  WINNERS: spec-draft-n-max=$WIN_NMAX spec-draft-p-min=$WIN_PMIN"
+  log "  WINNERS: spec-draft-n-max=$FINAL_NMAX spec-draft-p-min=$FINAL_PMIN"
   log "  (restart llama-cpp to apply)"
   log "=== DONE ==="
 }
