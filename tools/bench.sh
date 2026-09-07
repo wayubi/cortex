@@ -2799,7 +2799,7 @@ run_full_suite() {
       [ -z "$PARENT_NAME" ] && continue
       [ "${RESET_SEEN[$PARENT_NAME]:-0}" -eq 1 ] && continue
       RESET_SEEN["$PARENT_NAME"]=1
-      reset_parent_full "$PARENT_NAME"
+      reset_parent_full "$PARENT_NAME" || true
     done
   fi
 
@@ -3021,7 +3021,7 @@ case "$CMD" in
       for m in "$@"; do
         PARENT=$(family_of "$m")
         [ "${RESET_DONE[$PARENT]:-0}" -eq 1 ] && continue
-        reset_parent_full "$PARENT"
+        reset_parent_full "$PARENT" || true
       done
     fi
     for m in "$@"; do
