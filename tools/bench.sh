@@ -1894,8 +1894,8 @@ cmd_bisect() {
   local ORIG_BATCH=$(read_batch)
   local RESTORED=0
   restore_batch() {
-    [ "$RESTORED" -eq 1 ] && return
-    if [ -n "$ORIG_BATCH" ]; then
+    [ "${RESTORED:-0}" -eq 1 ] && return
+    if [ -n "${ORIG_BATCH:-}" ]; then
       log "  Restoring original batch=$ORIG_BATCH (run did not complete)"
       set_batch "$ORIG_BATCH" >/dev/null 2>&1
     fi
@@ -1992,7 +1992,7 @@ cmd_bisect() {
     if [ "$S_RC" -eq 3 ]; then
       log "  FORMAT ERROR at $B (500 / peg-native format failure)"
     elif [ "$S_RC" -eq 4 ]; then
-      log "  SIZING FAILURE at $B (could not reach compaction in $ATTEMPT attempts)"
+      log "  SIZING FAILURE at $B (could not reach compaction)"
     else
       log "  OOM at $B"
     fi
