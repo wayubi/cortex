@@ -723,7 +723,7 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
     # Decode-rate floor: parse latest tg from n_gen streaming lines (decode-only)
     local TG
     TG=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
-         | grep "n_gen = " | tail -1 | grep -oE "tg = [0-9.]+" | awk '{print $3}')
+         | grep "n_gen = " | tail -1 | grep -oE "tg =\s*[0-9.]+" | awk '{print $3}')
     if [ -n "$TG" ] 2>/dev/null; then
       if python3 -c "exit(0 if $TG < $DECODE_FLOOR else 1)" 2>/dev/null; then
         SLOW=$((SLOW + 1))
