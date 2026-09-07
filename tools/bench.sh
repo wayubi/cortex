@@ -489,40 +489,6 @@ print(t)
 "
 }
 
-# Bracketed halve-down + bisect (O(log)) to find the largest batch below $CEIL
-# that survives full saturation. Result is written to global $BHD_RESULT.
-# Returns 0 = success, 2 = STALL, 3 = no passing batch found (caller must handle).
-# Note: called directly (not via $() command substitution) so that exit/return
-# propagates correctly under both standalone and suite (if-condition) dispatch.
-bracketed_halve_down() {
-  local CEIL=$1 CTX_VAL=$2
-  local HI=$CEIL LO=0 FOUND=0
-  local BATCH=$((CEIL / 2))
-  while [ "$BATCH" -ge 64 ]; do
-    set_batch "$BATCH"; restart
-    saturation_test "$CTX_VAL"
-    local BR_RC=$?
-    if [ "$BR_RC" -eq 2 ]; then log "  STALL — aborting"; return 2; fi
-    if [ "$BR_RC" -eq 0 ]; then LO=$BATCH; FOUND=1; break
-    else HI=$BATCH; BATCH=$((BATCH / 2)); fi
-  done
-  while [ $((HI - LO)) -gt 64 ]; do
-    MID=$(((LO + HI) / 2)); MID=$((MID / 64 * 64))
-    [ "$MID" -le "$LO" ] && MID=$((LO + 64))
-    set_batch "$MID"; restart
-    saturation_test "$CTX_VAL"
-    local BR_RC=$?
-    if [ "$BR_RC" -eq 2 ]; then log "  STALL — aborting"; return 2; fi
-    if [ "$BR_RC" -eq 0 ]; then LO=$MID; FOUND=1; else HI=$MID; fi
-  done
-  if [ "$FOUND" -eq 0 ]; then
-    log "  ERROR: no passing batch found in halve-down (even at batch=64)"
-    BHD_RESULT=""
-    return 3
-  fi
-  BHD_RESULT=$LO
-}
-
 # Fire a chat-completions POST from $1 (payload @file) to $2 (out), watching for
 # the router's proxy_reques line. On a cold-load hang: kill curl, restart, retry
 # once. Sets $FIRE_PID to the curl PID on success.
@@ -2125,7 +2091,7 @@ cmd_bisect() {
   log "  Refined lo=$LO — max batch passing tiny probe AND saturation"
 
   # ── FINAL CONFIRM (winner already passed saturation in the gated bisect;
-  #    this fresh-restart run is the single re-confirm) ──
+  #    this fresh-restart run is the authoritative full-context saturation test) ──
   log ""; log "=== FINAL CONFIRM (batch=$VALIDATED) ==="
   set_batch "$VALIDATED"; restart
   PASS=0
@@ -2139,46 +2105,10 @@ cmd_bisect() {
     PASS=1
     log "  *** VALIDATED batch=$VALIDATED ***"
   else
-    log "  Final confirm FAIL — bracketed halve-down search"
-    bracketed_halve_down "$VALIDATED" "$CTX" || exit 1
-    VALIDATED=$BHD_RESULT
-    PASS=1
-    log "  *** Saturation-validated batch=$VALIDATED (bracketed search) ***"
+    log "  Final confirm FAIL — chosen batch $VALIDATED failed full-context saturation"
+    log "  Failing model (no auto step-down). Inspect logs; re-run to retry."
+    exit 1
   fi
-
-  # ── RE-CONFIRM: multi-cycle cold-load validation ──
-  # The bisect's single-pass saturation can miss intermittent load crashes.
-  # Re-check with N cold-loads; if any crash, step the batch down.
-  # Wraps in a while loop so stepped-down values are re-submitted.
-  log ""
-  while true; do
-    log "=== RE-CONFIRM: testing batch=$VALIDATED × 3 ==="
-    local RC_PASS=0 RC_CYCLES=0
-    for RC_CYCLES in 1 2 3; do
-      set_batch "$VALIDATED"; restart
-      tiny_probe
-      local RC_T=$?
-      local RC_O=$(oom_count_since_mark)
-      if [ "$RC_T" -ne 0 ] || [ "$RC_O" -gt 0 ]; then
-        log "  Re-confirm $RC_CYCLES: FAIL (OOM or probe failure at batch=$VALIDATED)"
-        break
-      fi
-      RC_PASS=$((RC_PASS + 1))
-      log "  Re-confirm $RC_CYCLES: PASS"
-    done
-    if [ "$RC_PASS" -eq 3 ]; then
-      log "  Re-confirm PASSED (3/3 cycles) — batch $VALIDATED is reliable"
-      break
-    fi
-    log "  Re-confirm FAILED ($RC_PASS/3 cycles passed) — stepping down"
-    bracketed_halve_down "$VALIDATED" "$CTX" || exit 1
-    VALIDATED=$BHD_RESULT
-    if [ "$VALIDATED" -le 64 ]; then
-      log "  ERROR: no reliable batch found above 64 — aborting"
-      exit 1
-    fi
-    log "  Stepped down to batch=$VALIDATED — re-confirming..."
-  done
 
   log ""; log "=== LONG-DECODE CHECK ==="
   set_batch "$VALIDATED"; restart
