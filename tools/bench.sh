@@ -2120,7 +2120,16 @@ cmd_bisect() {
     fi
     local S_RC=0
     if [ "$T_RC" -eq 0 ]; then
-      log "  Probe PASS at $B — saturation-validating..."
+      # Residency gate: reject CPU-spilled batches immediately (avoid minutes of saturation).
+      # A GPU model that CPU-spills at high batch is above the usable ceiling.
+      log "  Probe PASS at $B — checking residency..."
+      local R_V
+      R_V=$(residency_probe)
+      if [ "$R_V" = "CPU" ]; then
+        log "  CPU-spillover at $B — not GPU-resident, descending"
+        return 1
+      fi
+      log "  GPU-resident at $B — saturation-validating..."
       saturation_test "$CTX"
       S_RC=$?
       if [ "$S_RC" -eq 2 ]; then
@@ -2214,21 +2223,30 @@ cmd_bisect() {
       exit 1
     fi
     if [ "$T_RC" -eq 0 ]; then
-      log "  Probe PASS — running saturation..."
-      saturation_test "$CTX"
-      local S_RC=$?
-      if [ "$S_RC" -eq 2 ]; then
-        log "  STALL during saturation at $MID — aborting bisect"
-        exit 1
-      fi
-      if [ "$S_RC" -eq 0 ]; then
-        log "  PASS (probe + saturation)"; LO=$MID
-      elif [ "$S_RC" -eq 3 ]; then
-        log "  FORMAT ERROR (500 / peg-native format failure)"; HI=$MID
-      elif [ "$S_RC" -eq 4 ]; then
-        log "  SIZING FAILURE (could not reach compaction)"; HI=$MID
+      # Residency gate: reject CPU-spilled batches immediately.
+      log "  Probe PASS — checking residency..."
+      local R_V
+      R_V=$(residency_probe)
+      if [ "$R_V" = "CPU" ]; then
+        log "  CPU-spillover at $MID — not GPU-resident, descending"
+        HI=$MID
       else
-        log "  OOM"; HI=$MID
+        log "  GPU-resident at $MID — running saturation..."
+        saturation_test "$CTX"
+        local S_RC=$?
+        if [ "$S_RC" -eq 2 ]; then
+          log "  STALL during saturation at $MID — aborting bisect"
+          exit 1
+        fi
+        if [ "$S_RC" -eq 0 ]; then
+          log "  PASS (probe + saturation)"; LO=$MID
+        elif [ "$S_RC" -eq 3 ]; then
+          log "  FORMAT ERROR (500 / peg-native format failure)"; HI=$MID
+        elif [ "$S_RC" -eq 4 ]; then
+          log "  SIZING FAILURE (could not reach compaction)"; HI=$MID
+        else
+          log "  OOM"; HI=$MID
+        fi
       fi
     else
       log "  OOM (probe)"; HI=$MID
