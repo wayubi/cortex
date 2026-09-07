@@ -31,6 +31,7 @@ OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate call
 ESSAY="Write a detailed 1000-word essay explaining transformers and MoE"
 POLL_MIN_SAMPLES=3
 POLL_MAX_SAMPLES=80
+MAX_BATCH=16384          # batch search cap: never probe above min(ctx, MAX_BATCH)
 
 # Shared per-model state (set before each engine call)
 MODEL=""
@@ -1118,6 +1119,7 @@ with open('/tmp/pp_timed.json','w') as f: json.dump(payload, f)
 # Then confirms winner via full saturation_test (99% ctx). Progress → stderr.
 cpu_saturation_sweep() {
   local CTX=$1
+  local BATCH_CAP=$(( CTX < MAX_BATCH ? CTX : MAX_BATCH ))
   local PTS=/tmp/cpu_sweep_points.txt
   : > "$PTS"
 
@@ -1152,7 +1154,7 @@ cpu_saturation_sweep() {
   # ── Phase 1: doubling ladder, peak-anchored bracket ──
   log "  Ladder: doubling from 256..." >&2
   local B=256 BEST_TPS=0 BEST_BATCH=256 DESC=0 STOP=0
-  while [ "$B" -le "$CTX" ]; do
+  while [ "$B" -le "$BATCH_CAP" ]; do
     log "  Testing batch=$B..." >&2
     local TPS
     TPS=$(test_rung "$B")
@@ -1203,12 +1205,12 @@ for b, t in pts:
 # default edges if peak is at an endpoint
 if lo is None: lo = 256
 if hi is None:
-    # no tested rung above peak — use next doubling rung or ctx cap
-    hi = min($CTX, peak * 2)
+    # no tested rung above peak — use next doubling rung or cap
+    hi = min($BATCH_CAP, peak * 2)
 print(lo, hi)
-" 2>/dev/null || echo "256 $CTX")
+" 2>/dev/null || echo "256 $BATCH_CAP")
   [ -z "$LO" ] && LO=256
-  [ -z "$HI" ] && HI=$CTX
+  [ -z "$HI" ] && HI=$BATCH_CAP
   log "  Peak=$BEST_BATCH (${BEST_TPS} t/s) → golden-section bracket [$LO, $HI]" >&2
 
   # ── Phase 2: golden-section max-search, granularity=64 ──
@@ -2000,17 +2002,19 @@ cmd_bisect() {
   local LO HI VALIDATED PASS CANDIDATES
 
   # ── PHASE 1: CEILING SEARCH ──
-  # ctx first, then 2048+doubling ladder.
-  log ""; log "=== PHASE 1: CEILING SEARCH (ctx=$CTX, ladder 2048→up) ==="
+  # Cap search at min(ctx, MAX_BATCH); never probe batches above the cap.
+  local CEIL
+  CEIL=$(( CTX < MAX_BATCH ? CTX : MAX_BATCH ))
+  log ""; log "=== PHASE 1: CEILING SEARCH (ceiling=$CEIL, ctx=$CTX, ladder 2048→up) ==="
   LO=0; HI=0; VALIDATED=0
 
-  # Probe 1: ctx itself
-  if ceiling_probe "$CTX"; then
-    LO=$CTX; HI=$((CTX + 64)); VALIDATED=$CTX
+  # Probe 1: search top (= ctx for small-ctx, capped for large-ctx)
+  if ceiling_probe "$CEIL"; then
+    LO=$CEIL; HI=$((CEIL + 64)); VALIDATED=$CEIL
     log "  Bracket: lo=$LO (PASS), hi=$HI (assumed OOM above)"
   else
-    HI=$CTX
-    if [ "$CTX" -gt 2048 ]; then
+    HI=$CEIL
+    if [ "$CEIL" -gt 2048 ]; then
       # Jump to the realistic region and ladder UP by doubling
       if ceiling_probe 2048; then
         LO=2048
@@ -2034,8 +2038,8 @@ cmd_bisect() {
         done
       fi
     else
-      # ctx <= 2048 and failed — halve down from ctx
-      B=$((CTX / 2 / 64 * 64))
+      # CEIL <= 2048 and failed — halve down from CEIL
+      B=$((CEIL / 2 / 64 * 64))
       while [ "$B" -ge 64 ]; do
         if ceiling_probe "$B"; then LO=$B; break
         else HI=$B; B=$((B / 2 / 64 * 64)); fi
