@@ -144,7 +144,7 @@ Both **n_max and p_min are bench-determined per model** — no hardcode, no stal
 
 `cmd_mtp` runs three phases:
 1. **n_max sweep {2,3,4,5}** at p_min=0.7 (speed axis, 4 runs) — picks the fastest clean n_max.
-2. **p_min sweep {0.5,0.6,0.7,0.8,0.9}** at winning n_max (quality axis, 5 runs) — picks the clean+fast p_min; p_min quality is model-dependent (e.g. 0.5 degenerates on gemma, is viable on Qwen-think).
+2. **p_min sweep {0.5,0.6,0.7,0.8,0.9}** at winning n_max (quality axis, 5 runs) — picks the clean+fast p_min; p_min quality is model-dependent AND n_max-dependent (e.g. 0.5 is viable on Qwen-think, but its safety on gemma varies with n_max — see sweep results below).
 3. **Final confirm** (1 run) — strict degeneracy gate on the chosen (n_max, p_min); on reject, the model is failed (exit non-zero); no auto fallback.
 
 **Total: 10 decode runs (~12-15 min).** Each model's p_min is empirically discovered; the sweep is the source of truth (not `models.ini`, not a global constant).
@@ -170,7 +170,7 @@ A single-sample flip (a config getting 0.05 one run and 0.20 the next) is caught
 
 **Qwen 3.5-9B-MTP @ 16K:** non-think variant flat ~58 t/s across n_max×p_min (neither param moved the needle). Think variant: p_min monotonic (lower=faster, 0.9→52.7 to 0.5→58.9, with acceptance collapse 0.98→0.69); n_max=3+ OOMs at load (draft buffer = n_max×batch). Defaults (`n_max=2, p_min=0.7`) are as good as anything.
 
-**Gemma 4 QAT 12B** (separate Q4_0 MTP drafter): n_max is the dominant lever — 1→6 rose 54→79 t/s, peak at 4–5 (tied). p_min=0.7 is the safe floor (0.5 degenerates at high n_max). Vendor reference: unsloth recommends `n_max=4` (p_min=0.0 default). On dense 12B the draft-context compute buffer is small (~8.6K batch ceiling), so n_max up to 6 is feasible.
+**Gemma 4 QAT 12B** (separate Q4_0 MTP drafter): n_max is the dominant lever — 1→6 rose 54→79 t/s, peak at 4–5 (tied). Gemma documents no p_min floor; the unsloth reference is `n_max=4` with llama.cpp's p_min default 0.0. p_min is sweep-determined per n_max, not a fixed floor — our runs found 0.5 clean at n_max=2 (0622) but degenerate at n_max=4, where 0.6 won cleanly (1059). On dense 12B the draft-context compute buffer is small (~8.6K batch ceiling), so n_max up to 6 is feasible.
 
 **35B MoE:** decode shows ±10–15% run-to-run variance exceeding config deltas (n_max/p_min moved t/s by less than noise). Single-sample sweeps unreliable; defaults retained; further tuning requires multi-sample averaging (3× per config).
 
