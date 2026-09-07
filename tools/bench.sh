@@ -701,6 +701,13 @@ else:
   # reject the batch. Catches pathological full-context decode collapse (e.g. REAP 198k).
   local DECODE_FLOOR=2  # t/s absolute minimum for usable decode
   local DECODE_FLOOR_SAMPLES=3  # consecutive samples below floor to trigger rejection
+  # Stall detector: llama.cpp only logs its first n_gen at n_gen=100. A decode that is
+  # collapsed-but-alive (e.g. 0.09 t/s) can take 15+ min to reach that, so the floor above
+  # cannot fire promptly. Arm a stall timer once the DECODE task has launched (a
+  # 'launch_slot_ ... processing task' MORE RECENT than the last 'prompt processing' line —
+  # i.e. prefill done, generating now). If no n_gen appears within STALL_GRACE_SEC, reject.
+  local STALL_GRACE_SEC=90
+  local STALL_GRACE_SAMPLES=$((STALL_GRACE_SEC / 2))  # at 2s per watchdog tick
   python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
@@ -714,15 +721,45 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
   if [ "$RC" -eq 2 ]; then return 2; fi
 
   local WATCH=0 SLOW=0 REJECT=0
+  local NGEN_SEEN=0 DECODE_ARMED=0 ARMED_WATCH=0
+  local LAST_LINE_PP=0 LAST_LINE_LAUNCH=0 LAST_LINE_NGEN=0
   while kill -0 $FIRE_PID 2>/dev/null; do
     if [ "$(oom_count_since_mark)" -gt 0 ]; then
       log "  Saturation: OOM detected — killing curl"
       kill $FIRE_PID 2>/dev/null
       break
     fi
+    # ---- Track decode-task launch vs prefill progress (for stall detector) ----
+    # Window is cumulative (LOG_MARK fixed), so compare LINE NUMBERS within the window,
+    # not mere presence. A 'launch_slot_ ... processing task' whose line number is NEWER
+    # than the last 'prompt processing' line means prefill finished and the decode task
+    # has begun (decode produces n_gen, not prompt-processing) → arm the stall timer.
+    local WINDOW_LOGS
+    WINDOW_LOGS=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)))
+    LAST_LINE_PP=$(echo "$WINDOW_LOGS" | grep -n "prompt processing" | tail -1 | cut -d: -f1)
+    LAST_LINE_LAUNCH=$(echo "$WINDOW_LOGS" | grep -n "launch_slot_.*processing task" | tail -1 | cut -d: -f1)
+    LAST_LINE_NGEN=$(echo "$WINDOW_LOGS" | grep -n "n_gen =" | tail -1 | cut -d: -f1)
+    [ -n "$LAST_LINE_NGEN" ] && NGEN_SEEN=1
+    # Arm when the decode task is active: its launch is the most recent event (newer than
+    # the last prompt-processing line) and no n_gen has appeared yet.
+    if [ "$NGEN_SEEN" -eq 0 ] && [ "$DECODE_ARMED" -eq 0 ] \
+       && [ -n "$LAST_LINE_LAUNCH" ] \
+       && [ "$LAST_LINE_LAUNCH" -gt "${LAST_LINE_PP:-0}" ] \
+       && [ "$LAST_LINE_LAUNCH" -gt "${LAST_LINE_NGEN:-0}" ]; then
+      DECODE_ARMED=1
+      ARMED_WATCH=$WATCH
+      log "  Saturation: decode task started, arming stall timer (${STALL_GRACE_SEC}s no-n_gen)"
+    fi
+    # Stall gate: decode armed but no n_gen within grace → reject.
+    if [ "$DECODE_ARMED" -eq 1 ] && [ "$NGEN_SEEN" -eq 0 ] \
+       && [ $((WATCH - ARMED_WATCH)) -ge "$STALL_GRACE_SAMPLES" ]; then
+      log "  Saturation: decode stalled — no n_gen within ${STALL_GRACE_SEC}s of decode start; rejecting batch"
+      kill $FIRE_PID 2>/dev/null
+      REJECT=1; break
+    fi
     # Decode-rate floor: parse latest tg from n_gen streaming lines (decode-only)
     local TG
-    TG=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+    TG=$(echo "$WINDOW_LOGS" \
          | grep "n_gen = " | tail -1 | grep -oE "tg =\s*[0-9.]+" | awk '{print $3}')
     if [ -n "$TG" ] 2>/dev/null; then
       if python3 -c "exit(0 if $TG < $DECODE_FLOOR else 1)" 2>/dev/null; then
@@ -744,7 +781,7 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
 
   local OOM=$(oom_count_since_mark)
   if [ "$OOM" -gt 0 ]; then log "  Saturation: OOM"; return 1; fi
-  if [ "$REJECT" -eq 1 ]; then log "  Saturation: decode too slow — batch rejected"; return 5; fi
+  if [ "$REJECT" -eq 1 ]; then log "  Saturation: decode rejected (too slow or stalled) — batch not validated"; return 5; fi
 
   local PT CT
   read -r PT CT < <(python3 -c "
