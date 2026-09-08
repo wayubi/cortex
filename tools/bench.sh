@@ -3712,13 +3712,10 @@ except: print(0)
   fi
 
   # ── Phase A: PREFILL (75%-ctx prompt, max_tokens=1) ─────────
-  # Decouple decode sizing: decode uses a short 150-token prompt so the full
-  # decode window fits even on small-ctx models (4k → ~3946 decode tokens).
-  local DECODE_PROMPT_TOKENS=150
-  local DECODE_MAX_TOKENS=$((CTX - DECODE_PROMPT_TOKENS))
+  # Phase B decode uses the natural-stop DECODE_PROMPT (see below); max_tokens is
+  # only a safety cap so the decode window fits even on small-ctx models.
+  local DECODE_MAX_TOKENS=$((CTX - 150))
   [ "$DECODE_MAX_TOKENS" -gt 4000 ] && DECODE_MAX_TOKENS=4000
-  local DECODE_PROMPT_CHARS
-  DECODE_PROMPT_CHARS=$(python3 -c "print(int($DECODE_PROMPT_TOKENS * $CHARS_PER_TOK_RATIO))" 2>/dev/null || echo $((DECODE_PROMPT_TOKENS * 4)))
 
   python3 -c "
 import json
@@ -3741,17 +3738,17 @@ print(f'  Prefill payload: {len(prompt)} chars, ~{$PROMPT_TOKENS} tokens (max_to
   if [ "$RC" -eq 2 ]; then log "  STALL on prefill — aborting bench"; return 1; fi
   wait "$FIRE_PID" 2>/dev/null || true
 
-  # ── Phase B: DECODE (short prompt, placement polling) ───────
+  # ── Phase B: DECODE (natural-stop prompt, placement polling) ───────
+  # §5.2 / plan §23.2#1: the bench decode must NOT force tokens (ignore_eos
+  # would loop-inflate decode t/s and draft acceptance). Use DECODE_PROMPT
+  # (natural stop) so the recorded decode_t_s is the real figure. cmd_bench's own
+  # placement / hardware polling below is unchanged.
+  export DECODE_PROMPT_VAL="$DECODE_PROMPT"
   python3 -c "
-import json
-filler = 'The history of computing is long and complex. '
-target_chars = $DECODE_PROMPT_CHARS
-prompt = ''
-while len(prompt) < target_chars: prompt += filler
-prompt = prompt[:target_chars]
-payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':$DECODE_MAX_TOKENS,'ignore_eos':True}
+import json, os
+payload = {'model':'$MODEL','messages':[{'role':'user','content':os.environ['DECODE_PROMPT_VAL']}],'max_tokens':$DECODE_MAX_TOKENS}
 with open('/tmp/bench_payload.json','w') as f: json.dump(payload, f)
-print(f'  Decode payload: {len(prompt)} chars, ~$DECODE_PROMPT_TOKENS tokens (max_tokens=$DECODE_MAX_TOKENS)')
+print(f'  Decode payload: DECODE_PROMPT (natural stop, max_tokens=$DECODE_MAX_TOKENS)')
 "
 
   # Mark log position for MTP + OOM capture of the decode request
@@ -3898,6 +3895,20 @@ if dd:
         'finish_reason': dd['choices'][0].get('finish_reason'),
         'truncated': bool(dd['choices'][0].get('finish_reason') == 'length'),
     })
+    # 8-gram degeneracy on the natural-stop output (§5.2), heading lines stripped.
+    try:
+        _text = dd['choices'][0]['message']['content']
+        _lines = [ln for ln in _text.split('\n') if not ln.lstrip().startswith('#')]
+        _w = (' '.join(_lines)).split()
+        if len(_w) >= 8:
+            from collections import Counter
+            _ng = [' '.join(_w[i:i+8]) for i in range(len(_w)-7)]
+            _c = Counter(_ng)
+            out['request']['degeneracy'] = round(sum(v for v in _c.values() if v > 1) / len(_ng), 4)
+        else:
+            out['request']['degeneracy'] = 0
+    except Exception:
+        out['request']['degeneracy'] = None
 
 print(json.dumps(out))
 ")
@@ -3956,7 +3967,7 @@ env = json.loads('''$ENV_JSON''')
 
 # Merge the §6.4 MTP tuning status file (/tmp/mtp_status_<model>.json) if present
 # (ok / failed / stall / not_mtp). tuning_status defaults to not_run when absent
-# (mtp tuning never ran for this bench, e.g. `bench.sh bench <model>` directly).
+# (mtp tuning never ran for this bench, e.g. a direct 'bench.sh bench' run).
 status = {}
 _status_path = '/tmp/mtp_status_${MODEL}.json'
 if os.path.exists(_status_path):
@@ -3994,7 +4005,7 @@ data = {
     'bench': {
         'max_tokens': $DECODE_MAX_TOKENS,
         'prefill_prompt_tokens': $PROMPT_TOKENS,
-        'decode_prompt_tokens': $DECODE_PROMPT_TOKENS,
+        'decode_prompt_tokens': speed.get('request', {}).get('decode_prompt_tokens', 0),
         'model_file_size_gb': ${MODEL_FILE_SIZE:-null},
         'build_info': '${BUILD_INFO}',
         'wall_time_s': $WALL_TIME_S,
