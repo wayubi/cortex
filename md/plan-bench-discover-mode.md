@@ -1375,3 +1375,26 @@ Same six models as §38. Add to the checks: the `discover` block in each JSON li
 **Note on the picks.** Warm measurement changed the shape of the curve: 512 gained 10% and everything from 1024 to 2048 sits within 2%. The 64-token pick will move between runs inside that plateau (1152 at 12:33, 1664 at 12:50). Both are correct answers to the question as posed; the bench prefill at 75% of context will not distinguish them.
 
 **Remaining acceptance runs double as the first catalogue heads.** Run `gpt-oss-20b-a4b-q4-64k-think-low` (CPU-compute, slow probes), `gemma-4-12b-q4-qat-mtp-16k` (MTP, residency policy inside a bracket) and `qwen-3.5-9b-q4-mtp-256k` (ceiling edge) with `--no-inherit --strict`, and check in their logs: `warm-up done` on every point, no `residency:` line inside a PASS/PASS bracket, `placement: GPU|CPU` in the record, the `discover` block complete. Then the rest of the catalogue: family heads first, siblings inherit. `models.ini` was restored to the committed state after the author's runs.
+
+---
+
+## 42. Refinement depth as a user setting (2026-09-08, user direction)
+
+The user keeps 64-token refinement as the default for this installation but wants the pre-Change-G behaviour available to anyone else using the script. Make refinement depth a setting rather than a rewrite.
+
+**Change H — `BENCH_REFINE` / `--refine=<mode>`.** Global flag next to `--thorough` / `--strict`, env fallback `BENCH_REFINE`, three values:
+
+| mode | behaviour | when to use |
+|---|---|---|
+| `64` (default) | Change G as accepted in §41: unconditional golden-section refinement of the bracket around the best rung down to 64-token granularity | this installation; when a fully measured record and the last few percent matter |
+| `coarse` | Change E as accepted in §34: refine only while a step beats the current best by more than `PREFILL_NOISE` (3%); ceiling edge bisected to `max(64, 6% of the lower bound)`, interior peak to `max(256, 6% of best)`; typically one to three probes | faster runs; someone happy with a rung-level answer plus one sanity midpoint |
+| `off` | ladder only; pick = best rung (Change C); no refinement, not even at a ceiling edge | quickest possible pass, or re-checking a known value |
+
+Implementation notes for the implementer:
+- Keep one search loop. `64` runs it to the 64 stop; `coarse` adds the E stopping rules inside the same loop (stop when the better interior point does not beat the pre-step best by `PREFILL_NOISE`, and use the E resolution formula as the width stop); `off` skips the loop and logs `refinement off`. Do not resurrect the deleted E code; the rules are three conditions.
+- The warm-up probe and the median-of-three stay on in every mode. They correct a measurement bias (§40.2#2), not a resolution choice, and `off` mode still ranks rungs on them.
+- Record the mode in the discover JSON (`refine_mode`) and in the RESULT block, so a record's resolution is self-describing.
+- Interactive mode: add the choice to the "Search depth?" prompt (`[6]4 / [c]oarse / [o]ff`, default 64) and print it in the MASTER PLAN block.
+- `AGENTS.md`: one paragraph in the batch-tuning section describing the three modes and the default, and stating the cost difference measured in §41 (about 3.5 min of refinement per model at `64`, about 1 min at `coarse`, none at `off`).
+
+Acceptance: `bench.sh --refine=off bisect lfm-2.5-8b-a1b-q4-8k-think` completes with no `golden` lines and a rung pick; `--refine=coarse` completes with one to three refinement probes and stops with a `within noise` line; no flag reproduces the §41 run shape. All three write a discover JSON carrying `refine_mode`.
