@@ -699,3 +699,24 @@ The structure matches §4 and §5 closely, the restore trap is in place, the lad
 7. **Nothing else blocking.** `DEC_BASE` is taken at rung 256 after the prefill measurement on the same instance, the cliff logic follows §4.4 (CPU placement definitive, SHORT skips speed only, re-sample once below 0.70, WARN band below 0.90), `PICK_PF=0` after a step-down is cosmetic, and the JSON write is best-effort behind `|| true`, which is fine for a diagnostic file.
 
 Proceed to step D after the §20.1 fix and the lfm direct-invocation verification.
+
+---
+
+## 21. §11 step-2 acceptance results — Step C (2026-09-07, later)
+
+The §20.1 fix (commit `7de6697`) and the §20.3 review findings (commit `8b83429`) are in. All four §11 step-2 discover acceptance models ran with `BENCH_DISCOVER=1` and PASSED:
+
+| Model | class | discover result | vs committed | budget |
+|---|---|---|---|---|
+| `lfm-2.5-8b-a1b-q4-4k-think` | small-ctx non-MTP | mode=GPU, pick=1024–2048 (flat peak, run-noise), saturation+long-decode PASS | committed 1024 | ≤7 restarts, pick ≤4096 |
+| `gemma-4-12b-q4-qat-mtp-16k` | dense MTP | mode=GPU, pick=512, ladder best 1175@1024, confirm PASS, decode 54.4 @pick vs 55.2 @256 | committed 1408 | pick in 512–2048 |
+| `gpt-oss-20b-a4b-q4-64k-think-low` | CPU-compute | mode=CPU detected at rung 256, only 2 residency probes, pick=2048 (peak 2549@2048), confirm PASS | committed 2112 | ≤9 restarts, pick ≈2048 |
+| `ornith-1.5-9b-q4-mtp-64k-think` | dense MTP, 16:45 comparison | mode=GPU, pick=512, ladder best 1515@1024, confirm PASS, decode 43.1 @pick vs 44.1 @256, **7 restarts** | committed 8192 (thorough 16:45: 37 restarts / 52 min) | ≤11 restarts, ≤20 min |
+
+**Observations for the author:**
+- The direct-invocation bug class (§20.1) is fixed: `bisect <model> <batch>` and `BENCH_DISCOVER=1 bisect <model>` both now reach `=== DONE ===` with exit 0.
+- **Discover picks lower batches than thorough** by design (smallest within 3% of best prefill). Magnitudes: gemma 1408→512, gpt-oss 2112→2048, ornith 8192→512. The ornith 8192→512 drop is the largest; thorough's own decode-guarded prefill sweep had settled ~1664 for ornith-64k, so discover's 512 is well below that. This matches the §3.2 headroom rationale but the implementer flags the magnitude for the author in case the 3% tolerance is too permissive on flat-prefill dense models.
+- The ladder `ceiling(coarse)` was capped by the two-consecutive-below break, not an OOM/SPILL, on flat curves — as §14 Q4 said, that is informational and nothing consumes it.
+- Acceptance models.ini writes (the discover picks) were reverted to committed state after the runs; no working-tree residue.
+
+Step C is complete. Proceeding to Step D (`cmd_mtp_discover` + §6.4 status plumbing).
