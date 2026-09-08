@@ -3123,8 +3123,16 @@ cmd_bisect_test_batch() {
 # both the ladder and discover_measure_candidate call), not only in the refinement
 # path. Every sized-prefill value recorded for a batch is therefore a median when
 # the probe is fast, never a single high-noise sample that could out-rank a median.
+# §40.2#2: the FIRST prefill at a new ubatch shape pays a one-time setup cost (CUDA
+# graph capture for that shape), which weighs more on larger ubatches (a fixed-
+# length probe holds fewer of them). So run ONE untimed warm-up probe first, then
+# take the timed sample(s): a slow probe (>5 s, every 64K/256K and CPU-compute
+# model) is one timed sample after warm-up; a fast probe is the median of three.
 prefill_probe_sized() {
-  local CTX=${1:-65536} RAW0 T0 RAW1 RAW2
+  local CTX=${1:-65536} WARM T0 RAW0 RAW1 RAW2
+  WARM=$(prefill_probe_sized_raw "$CTX")
+  if [ "$WARM" = "0" ] || [ -z "$WARM" ]; then echo "0"; return 0; fi
+  log "  prefill-sized: warm-up done (~${WARM} t/s)" >&2
   T0=$(date +%s)
   RAW0=$(prefill_probe_sized_raw "$CTX")
   if [ "$RAW0" = "0" ] || [ -z "$RAW0" ] || [ $(( $(date +%s) - T0 )) -ge 5 ]; then
@@ -3756,16 +3764,25 @@ print(' '.join(out))
   log ""; log "  Next: run bench.sh bench $MODEL"
   log "=== DONE ==="
 
-  # Write the discover JSON for cmd_bench to merge (§4.5). Best-effort.
-  python3 -c "
-import json, datetime
+  # Write the discover JSON for cmd_bench to merge (§4.5). §40.2#1: the refine
+  # batch list is passed through an env var, NOT embedded as "${REFINE_B[@]}"
+  # inside this double-quoted python -c string — once there are two or more
+  # points, [@] expands to separate shell words, splitting the program across
+  # several python3 -c arguments so Python sees a truncated first chunk and the
+  # writer silently fails (which the old "2>/dev/null || true" hid). A stale or
+  # missing discover block must never be merged into a bench record, so this
+  # writer FAILS the bisect (exit 1) if the JSON is not written.
+  local DISC_JSON="/tmp/discover_${MODEL}.json"
+  export DISC_REFINE="${REFINE_B[*]:-}"
+  if ! python3 -c "
+import json, datetime, os
 model='$MODEL'
-refine_batches=set('''${REFINE_B[@]}'''.split())
+refine_batches=set(int(x) for x in os.environ.get('DISC_REFINE','').split() if x)
 points=[l.split() for l in open('$POINTS') if l.strip()]
 ladder=[]
 for t in points:
     b=int(t[0]); st=t[1]; pf=(float(t[2]) if len(t)>2 and t[2] not in ('OOM','SPILL','PASS') else None)
-    if st=='PASS' and str(b) in refine_batches:
+    if st=='PASS' and b in refine_batches:
         st='REFINE'
     ladder.append({'batch':b,'status':st,'prefill':pf})
 discover={
@@ -3774,14 +3791,17 @@ discover={
   'best_prefill':float('$BEST_PREFILL'),
   'pick':int('$PICK'),
   'pick_rule':f'best measured PASS point (incl. ${PREFILL_NOISE}-aware refinement); TOL=${PREFILL_TOL}',
-  'refine_points':sorted(int(x) for x in refine_batches if x),
+  'refine_points':sorted(refine_batches),
   'ceiling_coarse':('${HIGHPASS}' + (' PASS / ${CEIL_FAIL_B} ${CEIL_FAIL_R}' if '${CEIL_FAIL_B}' else ' PASS (not probed higher)')),
   'ladder_break':'${CEIL_BREAK:-0}',
   'written_at':datetime.datetime.now().isoformat(),
 }
-with open('/tmp/discover_${MODEL}.json','w') as f:
+with open('$DISC_JSON','w') as f:
     json.dump(discover,f,indent=2)
-" 2>/dev/null || true
+"; then
+    log "  ERROR: failed to write discover JSON $DISC_JSON"
+    exit 1
+  fi
   exit 0
 }
 
