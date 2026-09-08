@@ -1863,16 +1863,19 @@ print('  removed ' + key)
 # Both requests use temperature=0, seed=42, logprobs=true, top_logprobs=10,
 # max_tokens=1024 and the identical prompt (passed via env var, not spliced).
 #
-# Output distribution is a statement about the probabilities, so it is tested on
-# the probabilities, not on which side of a coin-flip the greedy argmax landed.
+# Criterion is OFF-only. The OFF (no-speculation) run is the reference sampler
+# and carries real probabilities at every position; the server does NOT populate
+# probabilities for speculatively-accepted tokens in the ON run (they carry a
+# placeholder, so any number read from tops_on[d] at such a position is invalid).
 # At the first differing token index d:
-#   gap_off = lp_off[d](off-chosen) − lp_off[d](on-chosen)
-#   gap_on  = lp_on[d](on-chosen)  − lp_on[d](off-chosen)
-#   overlap = |top5_off[d] ∩ top5_on[d]|
-#   drift   = mean over i<d of |lp_off[i] − lp_on[i]|      (numerical noise level)
-# PASS if gap_off < MTP_TIE_NATS AND gap_on < MTP_TIE_NATS AND overlap ≥ 4.
-# FAIL otherwise — in particular if the ON-chosen token is absent from the OFF
-# run's top-10 (a real distribution difference, not a near-tie flip).
+#   gap_off  = lp_off[d](off-chosen) − lp_off[d](on-chosen)
+# PASS      if on-chosen ∈ OFF top-10 at d  AND  gap_off < MTP_TIE_NATS
+# FAIL      otherwise — the ON run chose a token the reference distribution
+#           considered clearly worse.
+# REPORT    gap_on and top-5 overlap only when the ON run has real probabilities
+#           at d (non-empty tops_on[d]); never gate on them.
+# DRIFT     mean |lp_off − lp_on| over positions i<d where the ON run has real
+#           probabilities; print "n/a" if none.
 cmd_mtpverify() {
   local CTX=$(read_ctx)
   SERVED_GRACE=$((60 + CTX / 65536 * 40))
@@ -1932,7 +1935,6 @@ with open('${OUT}.payload','w') as f: json.dump(payload, f)
     [ "$HALF_B" -lt 64 ] && HALF_B=64
     log "  CONTROL: MTP off at batch=$HALF_B vs batch=$CUR_B (non-gating)"
     local C1=/tmp/mtpv_${MODEL}_ctl1.json C2=/tmp/mtpv_${MODEL}_ctl2.json
-    set_key spec-type nonexistent >/dev/null 2>&1  # ensure off
     del_key spec-type
     set_batch "$HALF_B"; restart
     mtpv_request "$C1" "ctl1"; local O1=$(oom_count_since_mark)
@@ -1953,12 +1955,17 @@ d=next((i for i in range(min(len(ia),len(ib))) if ia[i]!=ib[i]),None)
 out='  CONTROL: '
 if d is None: out+='identical (%d tokens)'%min(len(ia),len(ib))
 else:
-    out+='divergence at %d; off-chosen lp %.3f vs on-chosen lp %.3f'%(d, ca[d], cb[d])
+    # OFF-only gap (both runs are OFF; treat run A's distribution as reference)
+    if ib[d] in ta[d]:
+        gap=ca[d]-ta[d][ib[d]]
+        out+='divergence at %d; reference chose id %d lp %.3f, other id %d lp %.3f → gap=%.3f'%(d, ia[d], ca[d], ib[d], ta[d][ib[d]], gap)
+    else:
+        out+='divergence at %d; other-chosen id %d absent from reference top-10'%(d, ib[d])
 print(out)
 ")
   fi
 
-  # ── Compare with the margin criterion ──
+  # ── Compare with the OFF-only margin criterion (§18.3) ──
   python3 -c "
 import json, os
 MTPV_OFF='$OFF_JSON'; MTPV_ON='$ON_JSON'
@@ -1970,18 +1977,13 @@ def load(p):
     lp=ch.get('logprobs',{})
     cont=lp.get('content',[]) if isinstance(lp,dict) else []
     ids=[t.get('id') for t in cont]
-    # top_logprobs: dict token_id -> logprob, plus each position's chosen logprob
+    # tops: dict token_id -> logprob (may be empty at draft-accepted positions on the ON run)
     tops=[]
-    chos=[]
     for t in cont:
         tl=t.get('top_logprobs',[])
         tops.append({x.get('id'):x.get('logprob') for x in tl})
-        chos.append(t.get('logprob'))
     spd=d.get('timings',{}).get('predicted_per_second',0)
     return ids, tops, spd
-
-def tok(p):
-    d=json.load(open(p)); return [t.get('id') for t in d['choices'][0]['logprobs']['content']]
 
 ids_off, tops_off, spd_off = load(MTPV_OFF)
 ids_on,  tops_on,  spd_on  = load(MTPV_ON)
@@ -1991,44 +1993,53 @@ if ids_off is None or ids_on is None:
 else:
     n = min(len(ids_off), len(ids_on))
     d = next((i for i in range(n) if ids_off[i] != ids_on[i]), None)
-    # drift = mean |chosen_lp_off[i] - chosen_lp_on[i]| over the identical prefix
-    toks_off = tok(MTPV_OFF); toks_on = tok(MTPV_ON)
-    drift_den = max(1, d if d is not None else n)
-    drift = 0.0
+
+    # drift: mean |chosen_lp_off[i] - chosen_lp_on[i]| over i<d where the ON run has
+    # REAL probabilities (non-empty tops_on[i]); skip placeholder positions.
+    drift_sum=0.0; drift_cnt=0
     for i in range(min(n, d if d is not None else n)):
-        # chosen token id matches (identical prefix), compare its logprob
-        lo=tops_off[i].get(ids_off[i], 0.0); ln=tops_on[i].get(ids_on[i], 0.0)
-        if lo!=0.0 or ln!=0.0: drift += abs(lo-ln)
-    drift = drift / drift_den if drift_den else 0.0
+        if tops_on[i] and ids_off[i] in tops_off[i] and ids_on[i] in tops_on[i]:
+            lo=tops_off[i].get(ids_off[i]); ln=tops_on[i].get(ids_on[i])
+            if lo is not None and ln is not None:
+                drift_sum += abs(lo-ln); drift_cnt += 1
+    drift = (drift_sum/drift_cnt) if drift_cnt else None
 
     print('  off: %d tokens, %.1f t/s | on: %d tokens, %.1f t/s' % (len(ids_off), spd_off, len(ids_on), spd_on))
     if d is None:
         print('  RESULT: PASS (identical over common prefix, %d tokens)' % min(len(ids_off), len(ids_on)))
     else:
         off_chosen = ids_off[d]; on_chosen = ids_on[d]
-        # Both chosen tokens must be present in BOTH runs' top-logprobs at d to test margins.
         lp_off_off = tops_off[d].get(off_chosen)
         lp_off_on  = tops_off[d].get(on_chosen)
-        lp_on_on   = tops_on[d].get(on_chosen)
-        lp_on_off  = tops_on[d].get(off_chosen)
-        s5_off=set(list(tops_off[d].keys())[:5]); s5_on=set(list(tops_on[d].keys())[:5])
-        overlap = len(s5_off & s5_on)
+        in_top10 = (on_chosen in tops_off[d])
+        # ON-side numbers are reported only when real (non-empty tops_on[d]); never gated.
+        on_real = bool(tops_on[d])
+        gap_on = None; overlap = None
+        if on_real:
+            lp_on_on=tops_on[d].get(on_chosen); lp_on_off=tops_on[d].get(off_chosen)
+            if lp_on_on is not None and lp_on_off is not None: gap_on = lp_on_on - lp_on_off
+            s5_off=set(list(tops_off[d].keys())[:5]); s5_on=set(list(tops_on[d].keys())[:5])
+            overlap = len(s5_off & s5_on)
 
-        if lp_off_off is None or lp_off_on is None or lp_on_on is None or lp_on_off is None:
-            absent = 'on-chosen absent from off-top10' if lp_off_on is None else ('off-chosen absent from on-top10' if lp_on_off is None else 'missing lp')
-            print('  RESULT: FAIL at token %d — %s (not a near-tie)' % (d, absent))
+        if not in_top10 or lp_off_off is None or lp_off_on is None:
+            print('  divergence at token %d' % d)
+            print('    off chose id %s lp %s ; on-chosen id %s present in OFF top-10: %s' % (off_chosen, ('%.4f'%lp_off_off) if lp_off_off is not None else 'n/a', on_chosen, in_top10))
+            print('  RESULT: FAIL — on-run chose a token the reference (OFF) distribution did not rank in its top 10')
         else:
             gap_off = lp_off_off - lp_off_on
-            gap_on  = lp_on_on  - lp_on_off
-            ok = (gap_off < MTP_TIE and gap_on < MTP_TIE and overlap >= 4)
+            ok = (in_top10 and gap_off < MTP_TIE)
             verdict = 'PASS' if ok else 'FAIL'
             print('  divergence at token %d' % d)
-            print('    off chose id %s lp %.4f ; on-chosen id %s lp %.4f (off run) → gap_off=%.4f' % (off_chosen, lp_off_off, on_chosen, lp_off_on, gap_off))
-            print('    on  chose id %s lp %.4f ; off-chosen id %s lp %.4f (on  run) → gap_on =%.4f' % (on_chosen, lp_on_on, off_chosen, lp_on_off, gap_on))
-            print('    overlap(top5)=%d  drift(prefix)=%.4f' % (overlap, drift))
-            print('  RESULT: %s (gap_off<%.2f AND gap_on<%.2f AND overlap>=4)' % (verdict, MTP_TIE, MTP_TIE))
-            if ok: print('  Premise holds: divergence is a near-tie flip under numerical drift (~%.2f nats).' % MTP_TIE)
-            else:  print('  WARNING: on-run chose a token the off-run considered clearly worse — output distribution appears to change.')
+            print('    off chose id %s lp %.4f ; on-chosen id %s lp %.4f (OFF top-10 rank) → gap_off=%.4f' % (off_chosen, lp_off_off, on_chosen, lp_off_on, gap_off))
+            if on_real and gap_on is not None and overlap is not None:
+                print('    on-side (real probs present): gap_on=%.4f  overlap(top5)=%d' % (gap_on, overlap))
+            else:
+                print('    on-side: no real probabilities at d (draft-accepted position); not gated')
+            drift_str = ('%.4f'%drift) if drift is not None else 'n/a'
+            print('    drift(prefix, real ON probs)=%s' % drift_str)
+            print('  RESULT: %s (on-chosen ∈ OFF top-10 AND gap_off < %.2f)' % (verdict, MTP_TIE))
+            if ok: print('  Premise holds: divergence is a near-tie flip under kernel logit noise.')
+            else:  print('  WARNING: on-run chose a token the reference distribution considered clearly worse — output distribution appears to change.')
 "
   log "  OOM: off=$OOM_OFF on=$OOM_ON (should be 0 both)"
   [ -n "$CTRL_RESULT" ] && log "$CTRL_RESULT"
