@@ -13,9 +13,10 @@
 #
 # Global flags (before the subcommand): --no-inherit, --reset-parent,
 # --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
-# failed, §6.4 part 3). Default mode is discover; --thorough re-enables the old
-# exhaustive tuners/bisect. Env BENCH_THOROUGH=1 is honoured; BENCH_DISCOVER=1 is
-# a deprecated no-op alias (discover is the default).
+# failed, §6.4 part 3), --refine=64|coarse|off (discover refinement depth, §42
+# Change H; env BENCH_REFINE). Default mode is discover; --thorough re-enables the
+# old exhaustive tuners/bisect. Env BENCH_THOROUGH=1 is honoured; BENCH_DISCOVER=1
+# is a deprecated no-op alias (discover is the default).
 #
 # Full suite order per model (fixed): mtpcheck -> bisect -> mtp -> bench.
 # mtpcheck empirically determines MTP capability and sets/clears spec-type in
@@ -55,6 +56,10 @@ DECODE_WARN=0.90          # discover: below this: WARN only
 MTP_TIE=0.05              # MTP tuning: candidates within 5% are a tie → smaller value wins
 THOROUGH=0
 STRICT=0                  # --strict: skip bench when mtp tuning failed (plan §6.4 part 3 / §7)
+REFINE_MODE=64            # discover refinement depth (plan §42 Change H): 64 (default, Change G
+                          # golden-section to 64) | coarse (Change E: stop when no step beats the
+                          # pre-step best by PREFILL_NOISE, E resolution width) | off (ladder only).
+                          # Set via --refine= or env BENCH_REFINE. Warm-up + median-of-3 always on.
 
 # Shared per-model state (set before each engine call)
 MODEL=""
@@ -3464,14 +3469,15 @@ print(' '.join(out))
     return 0
   }
 
-  # ── Phase B refinement — Change G: unconditional golden-section to 64 (§38) ──
-  # Supersedes Change E's noise-stopping rules (keep this structure; the policy is
-  # now: always refine the bracket around the Change C pick down to 64-token
-  # granularity, cheap because memory is monotonic in batch). Refinement runs for
-  # ALL modes: the prefill curve is not flat where it matters on simple non-MTP
-  # models (lfm 8K/16K/32K rose to 2112/2176/3008) or CPU-compute (gpt-oss rises
-  # to 2048, falls at 4096). Change A still only skips residency and decode
-  # samples on simple models (batch-independent), not prefill refinement.
+  # ── Phase B refinement — golden-section (§38 Change G); depth is a setting (§42
+  # Change H: --refine=64|coarse|off) ──
+  # 64 (default): always refine the bracket around the Change C pick down to
+  # 64-token granularity (Change G, §41). coarse: the SAME loop with the Change E
+  # stop rules (noise gate + E resolution). off: no refinement. Refinement runs for
+  # ALL modes when on: the prefill curve is not flat where it matters on simple
+  # non-MTP models (lfm 8K/16K/32K rose to 2112/2176/3008) or CPU-compute
+  # (gpt-oss rises to 2048, falls at 4096). Change A still only skips residency and
+  # decode samples on simple models (batch-independent), not prefill refinement.
 
   # find_measured $batch: echo the stored prefill of an already-measured PASS
   # point (ladder rung or refinement), or nothing if it was never measured.
@@ -3511,6 +3517,12 @@ print(' '.join(out))
     return 0
   }
 
+  # §42 Change H: refinement depth is a setting (one of 64|coarse|off, validated
+  # at startup). off → no refinement at all: pick stays the best ladder rung and
+  # no bracket is computed.
+  if [ "$REFINE_MODE" = "off" ]; then
+    log "  refinement off (mode=off) — pick stays the best ladder rung $PICK (${PICK_PF} t/s)"
+  else
   # ── Bracket determination ──
   # BLO = nearest measured PASS strictly below PICK (256 if none); BHI = nearest
   # measured PASS strictly above PICK if one exists; else, at a ceiling edge
@@ -3521,7 +3533,7 @@ print(' '.join(out))
   # (lfm 4K: pick 4096 = cap, peak actually ~3K, bracket [2048, 4096] must be
   # searched). Exception: if BLO >= PROBE_TOKENS the whole bracket is a single
   # ubatch of the same prompt and measures identically — skip and log why.
-  local BLO=0 BHI=0 PB B_IDX
+  local BLO=0 BHI=0 PB B_IDX CEIL_EDGE=0
   for B_IDX in "${!PASS_B[@]}"; do
     PB=${PASS_B[$B_IDX]}
     if [ "$PB" -lt "$PICK" ] && [ "$PB" -gt "$BLO" ]; then BLO=$PB; fi
@@ -3533,6 +3545,7 @@ print(' '.join(out))
        && { [ "$CEIL_FAIL_R" = "OOM" ] || [ "$CEIL_FAIL_R" = "SPILL" ]; } \
        && [ "$CEIL_FAIL_B" -gt "$PICK" ]; then
       BHI=$CEIL_FAIL_B          # ceiling edge: upper bound is the failed rung
+      CEIL_EDGE=1
     elif [ "$BLO" -ge "$PROBE_TOKENS" ]; then
       log "  top-rung pick=$PICK, whole bracket [${BLO}, ${PICK}] is single-ubatch (BLO ${BLO} >= probe ${PROBE_TOKENS}) — skip refinement"
       BHI=$BLO
@@ -3544,7 +3557,24 @@ print(' '.join(out))
   if [ "$BHI" -le "$BLO" ]; then
     log "  no bracket above/below — skip refinement (lo=$BLO hi=$BHI)"
   else
-    log ""; log "  golden-section refinement: bracket [$BLO, $BHI] → 64-token granularity (Change G)"
+    # Resolution / width stop and the noise gate depend on REFINE_MODE (§42).
+    #   mode 64:   golden-section to a 64-token bracket (Change G, §41).
+    #   mode coarse: the SAME loop, but stop when a step's better interior point
+    #     does not beat the pre-step best by PREFILL_NOISE, and stop the bracket at
+    #     the Change E resolution — max(64, 6% of lower) at a ceiling edge, else
+    #     max(256, 6% of best) (Change E, §34). Typically one to three probes.
+    # Warm-up + median-of-3 stay on in every mode (§40.2#2 is a measurement rule,
+    # not a resolution choice).
+    local WSTOP=64 NOISE_GATE=0
+    if [ "$REFINE_MODE" = "coarse" ]; then
+      NOISE_GATE=1
+      if [ "$CEIL_EDGE" -eq 1 ]; then
+        WSTOP=$(python3 -c "print(max(64, round(0.06*$BLO)))")
+      else
+        WSTOP=$(python3 -c "print(max(256, round(0.06*$PICK)))")
+      fi
+    fi
+    log ""; log "  refinement (mode=$REFINE_MODE): bracket [$BLO, $BHI] → ${WSTOP}-token granularity"
     # Golden-section maximisation of prefill over [GS_LO, GS_HI], candidates
     # rounded to 64 and any point already measured is reused (never re-probed).
     # Endpoints are measured PASS rungs except when BHI is the failed ceiling rung
@@ -3554,8 +3584,9 @@ print(' '.join(out))
     # measured PASS (nothing in a PASS/PASS bracket can spill); it runs only while
     # the active upper bound is a failed (unmeasured) rung and the model is not
     # SIMPLE_NONMTP and not MODE=CPU.
-    local GS_LO=$BLO GS_HI=$BHI GS_STEPS=0 GSW GA GB FGA FGB UPPER_MEAS SKRES
-    while [ $((GS_HI - GS_LO)) -gt 64 ] && [ "$GS_STEPS" -lt 14 ]; do
+    local GS_LO=$BLO GS_HI=$BHI GS_STEPS=0 GSW GA GB FGA FGB UPPER_MEAS SKRES STEP_BEST STEP_BETTER
+    while [ $((GS_HI - GS_LO)) -gt "$WSTOP" ] && [ "$GS_STEPS" -lt 14 ]; do
+      STEP_BEST=$PICK_PF       # best entering this step (coarse noise gate)
       GS_STEPS=$((GS_STEPS + 1))
       GSW=$((GS_HI - GS_LO))
       GA=$(( GS_LO + GSW * 382 / 1000 )); GA=$(( GA / 64 * 64 ))   # interior, ~0.382
@@ -3599,11 +3630,22 @@ print(' '.join(out))
       # better at GA (left) → the max is in [GS_LO, GB], so hi=GB; else lo=GA.
       if python3 -c "exit(0 if float('$FGA') >= float('$FGB') else 1)" 2>/dev/null; then
         GS_HI=$GB
+        STEP_BETTER=$FGA
       else
         GS_LO=$GA
+        STEP_BETTER=$FGB
       fi
       log "  golden: GA=$GA=${FGA} t/s GB=$GB=${FGB} t/s → bracket [$GS_LO, $GS_HI]" >&2
+      # Coarse noise gate (§42 / Change E): keep refining only while the better
+      # interior point this step beats the pre-step best by PREFILL_NOISE.
+      if [ "$NOISE_GATE" -eq 1 ]; then
+        if ! python3 -c "exit(0 if float('$STEP_BETTER') > float('$STEP_BEST') * (1 + $PREFILL_NOISE) else 1)" 2>/dev/null; then
+          log "  coarse: $STEP_BETTER t/s within noise of pre-step best ${STEP_BEST} (noise ${PREFILL_NOISE}) — stop"
+          break
+        fi
+      fi
     done
+  fi
   fi
 
   log "  after refinement: pick=$PICK (${PICK_PF} t/s)"
@@ -3747,6 +3789,7 @@ print(' '.join(out))
   set_batch "$PICK"
   log ""; log "=== RESULT ==="
   log "  batch=$PICK ubatch=$PICK ctx=$CTX"
+  log "  refine_mode=$REFINE_MODE"
   if python3 -c "exit(0 if float('$PREFILL_TOL') > 0 else 1)" 2>/dev/null; then
     log "  mode=$MODE_TXT  pick=$PICK (smallest within ${PREFILL_TOL} of best ${BEST_PREFILL} t/s)"
   else
@@ -3787,6 +3830,7 @@ for t in points:
     ladder.append({'batch':b,'status':st,'prefill':pf})
 discover={
   'mode':'$MODE_TXT',
+  'refine_mode':'$REFINE_MODE',
   'ladder':ladder,
   'best_prefill':float('$BEST_PREFILL'),
   'pick':int('$PICK'),
@@ -4597,14 +4641,23 @@ for arg in "$@"; do
     --reset-parent) RESET_PARENT=1 ;;
     --thorough)    THOROUGH=1 ;;
     --strict)      STRICT=1 ;;
+    --refine=*)    REFINE_MODE="${arg#--refine=}" ;;
     *)             MAIN_ARGS+=("$arg") ;;
   esac
 done
 # Env fallbacks: BENCH_THOROUGH=1 (and BENCH_DISCOVER, deprecated, is the old
-# discover selector and is now the default, so it is ignored).
+# discover selector and is now the default, so it is ignored); BENCH_REFINE sets
+# the discover refinement depth (§42 Change H) unless --refine= was given.
 if [ "${THOROUGH:-0}" -eq 0 ] && [ "${BENCH_THOROUGH:-0}" -eq 1 ]; then
   THOROUGH=1
 fi
+if [ "${REFINE_MODE:-64}" = "64" ] && [ -n "${BENCH_REFINE:-}" ]; then
+  REFINE_MODE=$BENCH_REFINE
+fi
+case "$REFINE_MODE" in
+  64|coarse|off) : ;;
+  *) echo "ERROR: invalid --refine / BENCH_REFINE value '$REFINE_MODE' (expected 64|coarse|off)"; exit 1 ;;
+esac
 # Replace "$@" with filtered args for downstream parsing
 set -- "${MAIN_ARGS[@]+"${MAIN_ARGS[@]}"}"
 
@@ -4658,10 +4711,20 @@ if [ "$#" -eq 0 ]; then
     *)                                      THOROUGH=0; log "  Search depth: discover (fast)" ;;
   esac
 
+  # Discover refinement depth (§42 Change H): [6]4 / [c]oarse / [o]ff.
+  if [ "$THOROUGH" -eq 0 ]; then
+    read -r -p "Discover refinement? [6]4-token / [c]oarse / [o]ff (default 64): " REFINE_INPUT
+    case "${REFINE_INPUT:-64}" in
+      [cC]|[cC][oO][aA][rR][sS][eE]) REFINE_MODE=coarse; log "  Discover refinement: coarse (Change E)" ;;
+      [oO]|[oO][fF][fF])              REFINE_MODE=off;    log "  Discover refinement: off (ladder only)" ;;
+      *)                              REFINE_MODE=64;     log "  Discover refinement: 64-token (Change G)" ;;
+    esac
+  fi
+
   lshow "=== MASTER PLAN ==="
   lshow "  models: $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)"
   lshow "  steps: mtpcheck bisect mtp bench (full suite)"
-  if [ "$THOROUGH" -eq 1 ]; then lshow "  depth: thorough"; else lshow "  depth: discover"; fi
+  if [ "$THOROUGH" -eq 1 ]; then lshow "  depth: thorough"; else lshow "  depth: discover, refine: $REFINE_MODE"; fi
   lshow "  log: $LOG_FILE"
 
   echo ""
@@ -4741,8 +4804,9 @@ case "$CMD" in
     echo "       bench.sh bisect <model> [test-batch]"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
-    echo "       global flags: --no-inherit --reset-parent --thorough --strict"
+    echo "       global flags: --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
+    echo "       env: BENCH_REFINE=64|coarse|off sets the discover refinement depth (default 64)"
     exit 1
     ;;
 esac
