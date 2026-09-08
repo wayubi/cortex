@@ -1950,7 +1950,7 @@ mtp_write_status() {
   local SF; SF=$(mtp_status_file)
   MTP_STATUS="$1" MTP_REASON="$2" MTP_TN="$3" MTP_TP="$4" \
   MTP_SAMP="$(mtp_sample_file)" MTP_SF="$SF" python3 -c '
-import json, os
+import json, os, datetime
 samples = []
 sf = os.environ["MTP_SAMP"]
 if os.path.exists(sf):
@@ -1978,6 +1978,7 @@ def n_or_null(s):
 out = {
     "status": os.environ["MTP_STATUS"],
     "reason": os.environ["MTP_REASON"] or None,
+    "written_at": datetime.datetime.now().isoformat(),
     "tuned_n_max": n_or_null(os.environ["MTP_TN"]),
     "tuned_p_min": n_or_null(os.environ["MTP_TP"]),
     "samples": samples,
@@ -2023,9 +2024,19 @@ print(v.group(1) if v else '')
 # not-capable paths; we need its exit code so we can stamp the status file.
 cmd_mtpcheck() {
   if ( detect_mtp ); then
+    # MTP-capable: stamp a fresh not_run status so a later cmd_bench that runs
+    # without mtp tuning (or after a crash) does not report a stale prior tune as
+    # ok. cmd_mtp overwrites this with ok/failed on a real tune.
+    MTP_STAT="$(mtp_status_file)" python3 -c "
+import json, os, datetime
+open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_run','written_at':datetime.datetime.now().isoformat()}))
+" 2>/dev/null || true
     return 0
   else
-    MTP_STAT="$(mtp_status_file)" python3 -c "import json,os; open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_mtp'}))" 2>/dev/null || true
+    MTP_STAT="$(mtp_status_file)" python3 -c "
+import json, os, datetime
+open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_mtp','written_at':datetime.datetime.now().isoformat()}))
+" 2>/dev/null || true
     return 1
   fi
 }
@@ -3490,7 +3501,7 @@ print(' '.join(out))
 
   # Write the discover JSON for cmd_bench to merge (§4.5). Best-effort.
   python3 -c "
-import json
+import json, datetime
 model='$MODEL'
 points=[l.split() for l in open('$POINTS') if l.strip()]
 ladder=[{'batch':int(t[0]),'status':t[1],'prefill':(float(t[2]) if len(t)>2 and t[2] not in ('OOM','SPILL','PASS') else None)} for t in points]
@@ -3502,6 +3513,7 @@ discover={
   'pick_rule':f'smallest PASS batch within ${PREFILL_TOL} of best prefill',
   'ceiling_coarse':('${HIGHPASS}' + (' PASS / ${CEIL_FAIL_B} ${CEIL_FAIL_R}' if '${CEIL_FAIL_B}' else ' PASS (not probed higher)')),
   'ladder_break':'${CEIL_BREAK:-0}',
+  'written_at':datetime.datetime.now().isoformat(),
 }
 with open('/tmp/discover_${MODEL}.json','w') as f:
     json.dump(discover,f,indent=2)
@@ -3981,6 +3993,7 @@ _mtp_tuning = {
     'tuned_n_max': status.get('tuned_n_max') if status else None,
     'tuned_p_min': status.get('tuned_p_min') if status else None,
     'tuning_samples': status.get('samples') if status and status.get('samples') is not None else [],
+    'tuning_written_at': status.get('written_at') if status else None,
 }
 
 # Merge the §4.5 discover-ladder result (/tmp/discover_<model>.json) if present.
