@@ -11,6 +11,10 @@
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
 #   ./tools/bench.sh bench <models...>          # full benchmark JSON record
 #
+# Global flags (before the subcommand): --no-inherit, --reset-parent,
+# --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
+# failed, §6.4 part 3). Env BENCH_DISCOVER=1 selects the discover-mode tuners.
+#
 # Full suite order per model (fixed): mtpcheck -> bisect -> mtp -> bench.
 # mtpcheck empirically determines MTP capability and sets/clears spec-type in
 # models.ini BEFORE the bisect, so the bisect runs against the true MTP state.
@@ -44,6 +48,7 @@ DECODE_CLIFF=0.70         # discover: decode at pick below this fraction of the 
 DECODE_WARN=0.90          # discover: below this: WARN only
 MTP_TIE=0.05              # MTP tuning: candidates within 5% are a tie → smaller value wins
 THOROUGH=0
+STRICT=0                  # --strict: skip bench when mtp tuning failed (plan §6.4 part 3 / §7)
 
 # Shared per-model state (set before each engine call)
 MODEL=""
@@ -396,10 +401,23 @@ print(b.group(1) if b else '')
 ")
   [ -n "$PARENT_BATCH" ] && set_batch_for "$CHILD" "$PARENT_BATCH"
 
-  # Write parent's MTP values (n_max/p_min) to child's models.ini section
-  # so that sibling models.ini config matches the inherited parent JSON.
-  local PARENT_NMAX PARENT_PMIN
-  PARENT_NMAX=$(python3 -c "
+  # Write parent's MTP values (n_max/p_min) to child's models.ini section ONLY
+  # when the parent JSON records mtp.tuning_status == "ok" (§6.4 part 4 / Q7).
+  # Unvalidated MTP values (the old n_max_confirmed load-log field) must not
+  # propagate. Batch and the rest of the JSON still always inherit.
+  local PARENT_TUNING
+  PARENT_TUNING=$(python3 -c "
+import json
+try:
+    d = json.load(open('$MODELS_DIR/$PARENT.json'))
+except Exception:
+    print('missing'); exit()
+ts = (d.get('mtp') or {}).get('tuning_status')
+print(ts if ts else 'unknown')
+")
+  if [ "$PARENT_TUNING" = "ok" ]; then
+    local PARENT_NMAX PARENT_PMIN
+    PARENT_NMAX=$(python3 -c "
 import re
 with open('$INI') as f: c = f.read()
 m = re.search(r'(\['+re.escape('$PARENT')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
@@ -407,7 +425,7 @@ sec = m.group(2) if m else ''
 v = re.search(r'spec-draft-n-max\s*=\s*(\S+)', sec)
 print(v.group(1) if v else '')
 ")
-  PARENT_PMIN=$(python3 -c "
+    PARENT_PMIN=$(python3 -c "
 import re
 with open('$INI') as f: c = f.read()
 m = re.search(r'(\['+re.escape('$PARENT')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
@@ -415,7 +433,7 @@ sec = m.group(2) if m else ''
 v = re.search(r'spec-draft-p-min\s*=\s*(\S+)', sec)
 print(v.group(1) if v else '')
 ")
-  python3 -c "
+    python3 -c "
 import re
 with open('$INI') as f: c = f.read()
 m = re.search(r'(\['+re.escape('$CHILD')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
@@ -431,7 +449,12 @@ for line in sec.split('\n'):
         new_lines.append(line)
 with open('$INI','w') as f: f.write(c[:m.start(2)] + '\n'.join(new_lines) + c[m.end(2):])
 " 2>/dev/null
-  log "  Inherited parent MTP config: spec-draft-n-max=${PARENT_NMAX:-?} spec-draft-p-min=${PARENT_PMIN:-?}"
+    log "  Inherited parent MTP config: spec-draft-n-max=${PARENT_NMAX:-?} spec-draft-p-min=${PARENT_PMIN:-?}"
+  elif [ "$PARENT_TUNING" = "unknown" ]; then
+    log "  MTP values NOT inherited (parent JSON predates tuning_status; re-run 'bench.sh mtp $PARENT' to stamp it)"
+  else
+    log "  MTP values NOT inherited (parent tuning_status=$PARENT_TUNING)"
+  fi
 }
 
 # Determine whether a model should inherit or be bench-marked fresh.
@@ -1895,16 +1918,116 @@ run_decode_test() {
   echo "$SPEED|$ACCEPT|$PLACEMENT|$AVGCPU|$QUALITY|$OOM|$TOKENS|$MEANLEN|$FINISH"
 }
 
+# ── MTP tuning status plumbing (§6.4 part 1) ───────────────
+# Both tuners (cmd_mtp_thorough and cmd_mtp_discover) and mtpcheck write
+# /tmp/mtp_status_<model>.json on every exit path so cmd_bench can distinguish
+# not_mtp / failed / stall / not_run / ok. Samples are accumulated line by line
+# into a per-model TSV (so the EXIT trap, which runs in the tuning subshell, can
+# read everything that was measured) and folded into the status JSON by
+# write_mtp_status.
+mtp_status_file() { echo "/tmp/mtp_status_${MODEL}.json"; }
+mtp_sample_file() { echo "/tmp/mtp_samples_${MODEL}.tsv"; }
+
+mtp_init_samples() {
+  : > "$(mtp_sample_file)"
+  MTP_DIE_STATUS=""
+  MTP_DIE_REASON=""
+  MTP_TUNED_NMAX="null"
+  MTP_TUNED_PMIN="null"
+}
+
+# Append one measured sample to the per-model TSV.
+# Fields (pipe-delimited): n_max p_min tps tokens placement accept degeneracy oom meanlen
+mtp_add_sample() {
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "${1:-}" "${2:-}" "${3:-0}" "${4:-0}" "${5:-}" "${6:-}" "${7:-}" "${8:-0}" "${9:-}" \
+    >> "$(mtp_sample_file)"
+}
+
+# Write the status JSON from the collected samples. Args: status reason tuned_n_max tuned_p_min.
+# tuned values may be 'null'. Best-effort; never let a status write fail a run.
+mtp_write_status() {
+  local SF; SF=$(mtp_status_file)
+  MTP_STATUS="$1" MTP_REASON="$2" MTP_TN="$3" MTP_TP="$4" \
+  MTP_SAMP="$(mtp_sample_file)" MTP_SF="$SF" python3 -c '
+import json, os
+samples = []
+sf = os.environ["MTP_SAMP"]
+if os.path.exists(sf):
+    for ln in open(sf):
+        p = ln.rstrip("\n").split("|")
+        if len(p) < 9: continue
+        def num(x):
+            try: return int(x)
+            except ValueError: pass
+            try: return float(x)
+            except ValueError: return x
+        samples.append({
+            "n_max": num(p[0]), "p_min": num(p[1]), "tps": num(p[2]),
+            "tokens": num(p[3]), "placement": p[4] or None,
+            "accept": num(p[5]), "degeneracy": num(p[6]),
+            "oom": num(p[7]), "mean_draft_len": num(p[8]),
+        })
+def n_or_null(s):
+    s = s.strip()
+    if s == "" or s == "null": return None
+    try: return int(s)
+    except ValueError: pass
+    try: return float(s)
+    except ValueError: return None
+out = {
+    "status": os.environ["MTP_STATUS"],
+    "reason": os.environ["MTP_REASON"] or None,
+    "tuned_n_max": n_or_null(os.environ["MTP_TN"]),
+    "tuned_p_min": n_or_null(os.environ["MTP_TP"]),
+    "samples": samples,
+}
+try:
+    open(os.environ["MTP_SF"], "w").write(json.dumps(out))
+except Exception:
+    pass
+' 2>/dev/null || true
+}
+
+# Called from each tuner's EXIT trap with the subshell's exit code. On success
+# (rc 0) writes "ok" with the tuned values the tuner set on MTP_TUNED_NMAX/PMIN;
+# on failure writes failed/stall as recorded by mtp_die / mtp_die_stall.
+mtp_trap_exit() {
+  local RC=$1
+  if [ "$RC" -eq 0 ]; then
+    mtp_write_status ok "" "${MTP_TUNED_NMAX:-null}" "${MTP_TUNED_PMIN:-null}"
+  else
+    mtp_write_status "${MTP_DIE_STATUS:-failed}" "${MTP_DIE_REASON:-unknown failure}" null null
+  fi
+}
+mtp_die()       { MTP_DIE_STATUS=failed; MTP_DIE_REASON="$1"; exit 1; }
+mtp_die_stall() { MTP_DIE_STATUS=stall;   MTP_DIE_REASON="$1"; exit 1; }
+
+# Generic ini key reader (echoes the value or empty).
+read_ini_val() {
+  python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', c, re.DOTALL)
+sec = m.group(1) if m else ''
+v = re.search(r'^\s*'+re.escape('$1')+r'\s*=\s*(\S+)', sec, re.MULTILINE)
+print(v.group(1) if v else '')
+"
+}
+
 # ── SUBCOMMAND: mtpcheck ────────────────────────────────────
 # Empirically determine MTP capability, write spec-type to models.ini.
 # Exit 0 = MTP-capable (spec-type left set), 1 = not MTP (config restored).
+# Writes {"status":"not_mtp"} when the model is not MTP-capable (§6.4 part 1).
+# detect_mtp is run in a subshell because it exits (not returns) on the
+# not-capable paths; we need its exit code so we can stamp the status file.
 cmd_mtpcheck() {
-  local IS_MTP=1
-  detect_mtp || IS_MTP=0
-  if [ "$IS_MTP" -eq 0 ]; then
+  if ( detect_mtp ); then
+    return 0
+  else
+    MTP_STAT="$(mtp_status_file)" python3 -c "import json,os; open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_mtp'}))" 2>/dev/null || true
     return 1
   fi
-  return 0
 }
 
 # Remove a key (and its whole line) from the model's section in models.ini.
@@ -2115,13 +2238,16 @@ else:
   log "  MTP verify complete. Original spec-type state restored."
 }
 
-# ── SUBCOMMAND: mtp (tuning only; capability pre-settled) ───
-# Empirically determines optimal n_max and p_min per model.
+# ── MTP tuning: THOROUGH variant (old exhaustive tuner) ─────
+# Empirically determines optimal n_max and p_min per model. This is the OLD
+# quality-gated, fail-hard, exhaustive tuner (Phase 1 confirm + Phase 3 strict
+# degeneracy confirm). Kept verbatim (plus the §6.4 status-file writes that apply
+# to both tuners) and dispatched only for --thorough / the default this step.
 # Phase 1: n_max sweep {2,3,4,5} at p_min=0.7 (speed axis).
 # Phase 2: p_min sweep {0.5-0.9} at winning n_max (quality axis).
 # Phase 3: final confirm (strict degeneracy gate).
 # Total: 4 + 5 + 1 = 10 runs (~12-15 min).
-cmd_mtp() {
+cmd_mtp_thorough() {
   if ! grep -q "spec-type.*draft-mtp" <(read_section); then
     echo "  ERROR: $MODEL has no spec-type=draft-mtp — run 'bench.sh mtpcheck $MODEL' first"
     exit 1
@@ -2132,22 +2258,8 @@ cmd_mtp() {
   # Snapshot original n_max/p_min so a failed run restores the pre-run config
   # (mirrors cmd_bisect's restore_batch EXIT trap).
   local ORIG_NMAX ORIG_PMIN
-  ORIG_NMAX=$(python3 -c "
-import re
-with open('$INI') as f: c = f.read()
-m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', c, re.DOTALL)
-sec = m.group(1) if m else ''
-v = re.search(r'spec-draft-n-max\s*=\s*(\S+)', sec)
-print(v.group(1) if v else '')
-")
-  ORIG_PMIN=$(python3 -c "
-import re
-with open('$INI') as f: c = f.read()
-m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', c, re.DOTALL)
-sec = m.group(1) if m else ''
-v = re.search(r'spec-draft-p-min\s*=\s*(\S+)', sec)
-print(v.group(1) if v else '')
-")
+  ORIG_NMAX=$(read_ini_val spec-draft-n-max)
+  ORIG_PMIN=$(read_ini_val spec-draft-p-min)
   local RESTORED=0
   restore_mtp() {
     [ "${RESTORED:-0}" -eq 1 ] && return
@@ -2156,9 +2268,12 @@ print(v.group(1) if v else '')
     [ -n "${ORIG_NMAX:-}" ] && set_key spec-draft-n-max "$ORIG_NMAX" >/dev/null 2>&1
     [ -n "${ORIG_PMIN:-}" ] && set_key spec-draft-p-min "$ORIG_PMIN" >/dev/null 2>&1
   }
-  trap 'RC=$?; if [ "$RC" -ne 0 ]; then restore_mtp; fi; exit $RC' EXIT
+  # On failure restore the ini AND stamp the status file; on success (rc 0) the
+  # ok status is written explicitly below (this tuner clears the trap).
+  trap 'RC=$?; if [ "$RC" -ne 0 ]; then restore_mtp; fi; mtp_trap_exit "$RC" || true; exit $RC' EXIT
 
-  log ""; log "Model: $MODEL | ctx: $CTX"
+  mtp_init_samples
+  log ""; log "Model: $MODEL | ctx: $CTX | mode: THOROUGH"
 
   # ── Phase 1: n_max sweep {2,3,4,5} at p_min=0.7 (speed axis) ──
   local NMAX_VALUES="2 3 4 5"
@@ -2170,14 +2285,15 @@ print(v.group(1) if v else '')
     set_key spec-draft-n-max "$N"
     set_key spec-draft-p-min "$SWEEP_PMIN"
     restart
-    local RESULT SPEED ACC PLACEMENT AVGCPU QUALITY OOM
+    local RESULT SPEED ACC PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH
     RESULT=$(run_decode_test "n_max=$N, p_min=$SWEEP_PMIN")
     local DEC_RC=$?
     if [ "$DEC_RC" -eq 2 ]; then
       log ""; log "  STALL during n_max=$N sweep — network/HF fetch, aborting tune"
-      exit 1
+      mtp_die_stall "STALL during n_max=$N sweep"
     fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
+    mtp_add_sample "$N" "$SWEEP_PMIN" "$SPEED" "$TOKENS" "$PLACEMENT" "$ACC" "$QUALITY" "$OOM" "$MEANLEN"
     NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM|$TOKENS|$MEANLEN"
     # Quality gate: reject clearly degenerate (degeneracy > 0.15).
     local QUAL_OK=0
@@ -2190,7 +2306,7 @@ print(v.group(1) if v else '')
   done
   if [ "$WIN_NMAX" -eq 0 ]; then
     log ""; log "  No n_max passed all filters (OOM/degenerate/CPU) — failing model, no auto fallback"
-    exit 1
+    mtp_die "no n_max passed all filters (OOM/degenerate/CPU)"
   fi
   log ""; log "  PHASE 1 WINNER: n_max=$WIN_NMAX"
 
@@ -2205,9 +2321,10 @@ print(v.group(1) if v else '')
   local CONFIRM1_RC=$?
   if [ "$CONFIRM1_RC" -eq 2 ]; then
     log ""; log "  STALL during phase-1 confirm — aborting tune"
-    exit 1
+    mtp_die_stall "STALL during phase-1 confirm"
   fi
-  IFS='|' read -r CONFIRM1_SPEED _ CONFIRM1_PLACEMENT _ CONFIRM1_QUALITY CONFIRM1_OOM _ _ _ <<< "$CONFIRM1_RESULT"
+  IFS='|' read -r CONFIRM1_SPEED CONFIRM1_ACCEPT CONFIRM1_PLACEMENT _ CONFIRM1_QUALITY CONFIRM1_OOM CONFIRM1_TOKENS CONFIRM1_MEANLEN _ <<< "$CONFIRM1_RESULT"
+  mtp_add_sample "$WIN_NMAX" "$SWEEP_PMIN" "$CONFIRM1_SPEED" "$CONFIRM1_TOKENS" "$CONFIRM1_PLACEMENT" "$CONFIRM1_ACCEPT" "$CONFIRM1_QUALITY" "$CONFIRM1_OOM" "$CONFIRM1_MEANLEN"
   log "  Phase-1 confirm: decode=${CONFIRM1_SPEED} t/s | degeneracy=${CONFIRM1_QUALITY} | OOM=$CONFIRM1_OOM"
 
   # Strict gate: same criteria as Phase 3 confirm.
@@ -2217,7 +2334,7 @@ print(v.group(1) if v else '')
     log "  Phase-1 confirm PASSED (degeneracy=${CONFIRM1_QUALITY} < 0.05)"
   else
     log "  Phase-1 confirm FAILED (degeneracy=${CONFIRM1_QUALITY:-?}) — failing model, no auto fallback"
-    exit 1
+    mtp_die "phase-1 confirm failed (degeneracy=${CONFIRM1_QUALITY:-?})"
   fi
 
   # ── Phase 2: p_min sweep {0.5,0.6,0.7,0.8,0.9} at winning n_max ──
@@ -2229,14 +2346,15 @@ print(v.group(1) if v else '')
     set_key spec-draft-n-max "$WIN_NMAX"
     set_key spec-draft-p-min "$P"
     restart
-    local RESULT SPEED ACC PLACEMENT AVGCPU QUALITY OOM
+    local RESULT SPEED ACC PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH
     RESULT=$(run_decode_test "n_max=$WIN_NMAX, p_min=$P")
     local DEC_RC=$?
     if [ "$DEC_RC" -eq 2 ]; then
       log ""; log "  STALL during p_min=$P sweep — network/HF fetch, aborting tune"
-      exit 1
+      mtp_die_stall "STALL during p_min=$P sweep"
     fi
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
+    mtp_add_sample "$WIN_NMAX" "$P" "$SPEED" "$TOKENS" "$PLACEMENT" "$ACC" "$QUALITY" "$OOM" "$MEANLEN"
     PMIN_RESULTS[$P]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM|$TOKENS|$MEANLEN"
     # Quality gate: reject clearly degenerate (degeneracy > 0.15).
     local QUAL_OK=0
@@ -2249,7 +2367,7 @@ print(v.group(1) if v else '')
   done
   if [ "$WIN_PMIN" -eq 0 ]; then
     log ""; log "  No p_min passed all filters (OOM/degenerate/CPU) — failing model, no auto fallback"
-    exit 1
+    mtp_die "no p_min passed all filters (OOM/degenerate/CPU)"
   fi
   log ""; log "  PHASE 2 WINNER: p_min=$WIN_PMIN"
 
@@ -2264,9 +2382,10 @@ print(v.group(1) if v else '')
   local CONFIRM_RC=$?
   if [ "$CONFIRM_RC" -eq 2 ]; then
     log ""; log "  STALL during final confirm — aborting tune"
-    exit 1
+    mtp_die_stall "STALL during final confirm"
   fi
-  IFS='|' read -r CONFIRM_SPEED _ CONFIRM_PLACEMENT _ CONFIRM_QUALITY CONFIRM_OOM _ _ _ <<< "$CONFIRM_RESULT"
+  IFS='|' read -r CONFIRM_SPEED CONFIRM_ACCEPT CONFIRM_PLACEMENT _ CONFIRM_QUALITY CONFIRM_OOM CONFIRM_TOKENS CONFIRM_MEANLEN _ <<< "$CONFIRM_RESULT"
+  mtp_add_sample "$FINAL_NMAX" "$FINAL_PMIN" "$CONFIRM_SPEED" "$CONFIRM_TOKENS" "$CONFIRM_PLACEMENT" "$CONFIRM_ACCEPT" "$CONFIRM_QUALITY" "$CONFIRM_OOM" "$CONFIRM_MEANLEN"
   log "  Final confirm: decode=${CONFIRM_SPEED} t/s | degeneracy=${CONFIRM_QUALITY} | OOM=$CONFIRM_OOM"
 
   # Strict gate: < 0.05 = clean PASS; >= 0.05 = fail (no runner-up fallback).
@@ -2276,7 +2395,7 @@ print(v.group(1) if v else '')
     log "  Final confirm PASSED (degeneracy=${CONFIRM_QUALITY} < 0.05)"
   else
     log "  Final confirm FAILED (degeneracy=${CONFIRM_QUALITY:-?}) — failing model, no auto fallback"
-    exit 1
+    mtp_die "final confirm failed (degeneracy=${CONFIRM_QUALITY:-?})"
   fi
 
   # ── Apply winners (success path — trap will not restore) ──
@@ -2284,6 +2403,8 @@ print(v.group(1) if v else '')
   log ""; log "=== APPLYING WINNERS ==="
   set_key spec-draft-n-max "$FINAL_NMAX"
   set_key spec-draft-p-min "$FINAL_PMIN"
+  # Stamp ok (the EXIT trap was cleared above, so write explicitly).
+  mtp_write_status ok "" "$FINAL_NMAX" "$FINAL_PMIN" || true
 
   log ""; log "=== SUMMARY: $MODEL ==="
   log "  n_max sweep (p_min=$SWEEP_PMIN):"
@@ -2297,6 +2418,240 @@ print(v.group(1) if v else '')
   log "  WINNERS: spec-draft-n-max=$FINAL_NMAX spec-draft-p-min=$FINAL_PMIN"
   log "  (restart llama-cpp to apply)"
   log "=== DONE ==="
+}
+
+# ── MTP discover-mode ranking helpers (read the collected sample TSV) ──
+# Valid phase-1 sample: p_min == 0.7, placement != CPU, oom == 0, tokens >= MIN.
+mtp_mean_for() {  # $1 nmax $2 pmin -> mean tps over valid samples of that config ('' if none)
+  local NM=$1 PM=$2
+  MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS python3 -c "
+import os
+rows = []
+for ln in open(os.environ['MTP_SAMP']):
+    p = ln.rstrip('\n').split('|')
+    if len(p) < 9: continue
+    if p[0] != '$NM' or p[1] != '$PM': continue
+    try: tps = float(p[2]); tok = int(p[3]); oom = int(p[7])
+    except Exception: continue
+    if oom or p[4] == 'CPU' or tok < int(os.environ['MTP_MIN']): continue
+    rows.append(tps)
+if not rows:
+    print('')
+else:
+    print('%.4f' % (sum(rows) / len(rows)))
+"
+}
+
+# Phase-1 winner with the §6.2 tie rule: pick the highest-mean n_max; if the
+# runner-up mean is within MTP_TIE of the best, pick the smaller of the two.
+mtp_phase1_winner() {
+  MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS MTP_TIE="$MTP_TIE" python3 -c '
+import os, sys
+rows = []
+for ln in open(os.environ["MTP_SAMP"]):
+    p = ln.rstrip("\n").split("|")
+    if len(p) < 9: continue
+    if p[1] != "0.7": continue
+    try: tps = float(p[2]); tok = int(p[3]); oom = int(p[7])
+    except Exception: continue
+    if oom or p[4] == "CPU" or tok < int(os.environ["MTP_MIN"]): continue
+    rows.append((p[0], tps))
+agg = {}
+for nm, t in rows: agg.setdefault(nm, []).append(t)
+rank = sorted(((nm, sum(l) / len(l)) for nm, l in agg.items()), key=lambda x: -x[1])
+if not rank:
+    sys.exit(1)
+best = rank[0]
+if len(rank) > 1 and rank[1][1] >= best[1] * (1 - float(os.environ["MTP_TIE"])):
+    print(min(int(best[0]), int(rank[1][0])))
+else:
+    print(int(best[0]))
+'
+}
+
+# ── SUBCOMMAND: mtp DISCOVER variant (plan §6.1/§6.2) ────────
+# Adaptive, non-exhaustive n_max/p_min search. NO quality gate (MTP parameters
+# cannot change the output distribution — §18 premise); placement / OOM / SHORT
+# are the only rejections and degeneracy is only a WARN diagnostic. Always
+# includes the ini's current n_max (it was validated by the batch ladder).
+cmd_mtp_discover() {
+  local CTX=$(read_ctx)
+  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+
+  # Snapshot/restore original n_max & p_min on any failure (EXIT trap).
+  local ORIG_NMAX ORIG_PMIN
+  ORIG_NMAX=$(read_ini_val spec-draft-n-max)
+  ORIG_PMIN=$(read_ini_val spec-draft-p-min)
+  local RESTORED=0
+  restore_mtp() {
+    [ "${RESTORED:-0}" -eq 1 ] && return
+    RESTORED=1
+    log "  Restoring original spec-draft-n-max=${ORIG_NMAX:-unset} spec-draft-p-min=${ORIG_PMIN:-unset} (run did not complete)"
+    [ -n "${ORIG_NMAX:-}" ] && set_key spec-draft-n-max "$ORIG_NMAX" >/dev/null 2>&1
+    [ -n "${ORIG_PMIN:-}" ] && set_key spec-draft-p-min "$ORIG_PMIN" >/dev/null 2>&1
+  }
+  trap 'RC=$?; if [ "$RC" -ne 0 ]; then restore_mtp; fi; mtp_trap_exit "$RC" || true; exit $RC' EXIT
+
+  mtp_init_samples
+
+  log ""; log "Model: $MODEL | ctx: $CTX | mode: DISCOVER"
+  local P_REF=0.7
+  local CUR=${ORIG_NMAX:-}
+  [ -z "$CUR" ] && CUR=2
+  log "  ini spec-draft-n-max=$CUR spec-draft-p-min=${ORIG_PMIN:-unset}"
+
+  # ── Phase 1: n_max ladder at p_ref ──
+  # S = sorted dedup{2, 4, cur}; n_max bounded to [2,6].
+  local S="2 4"
+  case "$CUR" in 2|4) : ;; *) S="$S $CUR" ;; esac
+  S=$(printf '%s\n' $S | sort -n -u | tr '\n' ' ')
+  log ""; log "=== PHASE 1: n_max LADDER $S at p_min=$P_REF ==="
+
+  # Measure one (n_max,p_min) config at p_ref, log its sample, echo
+  # "tps|tokens|placement|oom" on success; returns 2 on STALL.
+  discover_measure() {
+    local N=$1 P=$2 LABEL=$3
+    set_key spec-draft-n-max "$N" >/dev/null 2>&1
+    set_key spec-draft-p-min "$P" >/dev/null 2>&1
+    restart
+    local RESULT DR
+    RESULT=$(decode_sample "n_max=$N p_min=$P ($LABEL)")
+    DR=$?
+    if [ "$DR" -eq 2 ]; then
+      log "  STALL during $LABEL (n_max=$N p_min=$P) — network/HF fetch"
+      return 2
+    fi
+    local SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH
+    IFS='|' read -r SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
+    mtp_add_sample "$N" "$P" "$SPEED" "$TOKENS" "$PLACEMENT" "$ACCEPT" "$QUALITY" "$OOM" "$MEANLEN"
+    # degeneracy is diagnostic only — WARN, never a gate.
+    if [ -n "$QUALITY" ] && python3 -c "exit(0 if float('$QUALITY') > 0.15 else 1)" 2>/dev/null; then
+      log "  WARN: n_max=$N p_min=$P degeneracy=${QUALITY} > 0.15 (diagnostic, not a gate)"
+    fi
+    echo "$SPEED|$TOKENS|$PLACEMENT|$OOM"
+    return 0
+  }
+
+  # run_ph1: measure n_max $1 at p_ref and remember its validity.
+  run_ph1() {
+    local NM=$1 R SP TK PL OO DR
+    R=$(discover_measure "$NM" "$P_REF" "phase-1 n_max=$NM")
+    DR=$?
+    if [ "$DR" -eq 2 ]; then mtp_die_stall "STALL measuring n_max=$NM at p_min=$P_REF"; fi
+    IFS='|' read -r SP TK PL OO <<< "$R"
+    if [ "$OO" -eq 0 ] && [ "$PL" != "CPU" ] && [ "$TK" -ge "$MIN_DECODE_TOKENS" ]; then
+      log "  n_max=$NM: PASS (${SP} t/s, ${TK} tokens, $PL)"
+    else
+      log "  n_max=$NM: rejected (placement=$PL oom=$OO tokens=$TK)"
+    fi
+  }
+
+  local NM
+  for NM in $S; do run_ph1 "$NM"; done
+
+  # Every candidate rejected (placement/OOM) or all samples SHORT → fail.
+  if ! mtp_phase1_winner >/dev/null 2>&1; then
+    log "  No valid n_max candidate (all rejected by placement/OOM or all samples SHORT)"
+    mtp_die "every n_max candidate rejected (placement/OOM) or every sample SHORT"
+  fi
+
+  # Extend to untested neighbours of the current best, within [2,6].
+  local B
+  B=$(mtp_phase1_winner 2>/dev/null) || mtp_die "no n_max winner"
+  local MEAS="$S"
+  measured_n() { printf '%s\n' $MEAS | grep -qx "$1"; }
+  local NX
+  NX=$((B + 1))
+  if [ "$NX" -le 6 ] && ! measured_n "$NX"; then run_ph1 "$NX"; MEAS="$MEAS $NX"; fi
+  NX=$((B - 1))
+  if [ "$NX" -ge 2 ] && ! measured_n "$NX"; then run_ph1 "$NX"; MEAS="$MEAS $NX"; fi
+
+  # Re-measure the best and the runner-up once more (mean = two samples).
+  local TOP1 TOP2 R1 R2
+  R1=$(mtp_phase1_winner 2>/dev/null) || mtp_die "no n_max winner after neighbour extension"
+  TOP1=$R1
+  # runner-up = highest-mean n_max other than TOP1, via a dedicated python pass.
+  TOP2=$(MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS MTP_TIE="$MTP_TIE" python3 -c "
+import os, sys
+rows=[]
+for ln in open(os.environ['MTP_SAMP']):
+    p=ln.rstrip('\n').split('|')
+    if len(p)<9: continue
+    if p[1]!='0.7': continue
+    try: tps=float(p[2]); tok=int(p[3]); oom=int(p[7])
+    except Exception: continue
+    if oom or p[4]=='CPU' or tok < int(os.environ['MTP_MIN']): continue
+    rows.append((p[0],tps))
+agg={}
+for nm,t in rows: agg.setdefault(nm,[]).append(t)
+ex='$TOP1'
+rank=sorted((nm for nm,l in agg.items() if nm!=ex), key=lambda nm: -(sum(agg[nm])/len(agg[nm])))
+print(rank[0] if rank else '')
+")
+  if [ -n "$TOP2" ] && [ "$TOP2" != "$TOP1" ]; then
+    run_ph1 "$TOP2"
+  fi
+  # (re-)confirm the top candidate; fold the neighbour in if it is now the best.
+  if [ -n "$TOP1" ]; then run_ph1 "$TOP1"; fi
+
+  local WIN_NMAX
+  WIN_NMAX=$(mtp_phase1_winner 2>/dev/null) || mtp_die "no n_max winner after re-measure"
+  log ""; log "  PHASE 1 WINNER: n_max=$WIN_NMAX"
+
+  # ── Phase 2: p_min at WIN_NMAX (reference = its 0.7 mean) ──
+  local REF
+  REF=$(mtp_mean_for "$WIN_NMAX" "$P_REF")
+  [ -z "$REF" ] && { log "  No valid 0.7 reference at n_max=$WIN_NMAX — should not happen"; mtp_die "no valid 0.7 reference at n_max=$WIN_NMAX"; }
+  local PP="0.5 0.9"
+  case "${ORIG_PMIN:-0.7}" in 0.5|0.9|0.7|"") : ;; *) PP="$PP $ORIG_PMIN" ;; esac
+  log ""; log "=== PHASE 2: p_min at n_max=$WIN_NMAX (ref p=0.7 = ${REF} t/s) ==="
+  local WIN_PMIN="$P_REF" WIN_CAND="" WIN_CAND_TP=""
+  for P in $PP; do
+    log "  measuring p_min=$P ..."
+    discover_measure "$WIN_NMAX" "$P" "phase-2 p_min=$P"
+    local D2=$?
+    if [ "$D2" -eq 2 ]; then mtp_die_stall "STALL measuring p_min=$P at n_max=$WIN_NMAX"; fi
+    local m
+    m=$(mtp_mean_for "$WIN_NMAX" "$P")
+    if [ -z "$m" ]; then log "    p_min=$P: no valid sample — skipping"; continue; fi
+    if python3 -c "exit(0 if float('$m') > float('$REF') * (1 + $MTP_TIE) else 1)" 2>/dev/null; then
+      if [ -z "$WIN_CAND" ] || python3 -c "exit(0 if float('$m') > float('$WIN_CAND_TP') else 1)" 2>/dev/null; then
+        WIN_CAND="$P"; WIN_CAND_TP="$m"
+      fi
+    fi
+  done
+  if [ -n "${WIN_CAND:-}" ]; then
+    log "  p_min=$WIN_CAND (${WIN_CAND_TP} t/s) beats 0.7 by > ${MTP_TIE} — chosen"
+    WIN_PMIN="$WIN_CAND"
+  else
+    log "  no p_min beats 0.7 (${REF} t/s) by more than ${MTP_TIE} — keeping 0.7"
+  fi
+
+  # ── Apply winners (trap writes ok on rc 0) ──
+  log ""; log "=== APPLYING WINNERS ==="
+  set_key spec-draft-n-max "$WIN_NMAX" >/dev/null
+  set_key spec-draft-p-min "$WIN_PMIN" >/dev/null
+  MTP_TUNED_NMAX=$WIN_NMAX
+  MTP_TUNED_PMIN=$WIN_PMIN
+  log ""; log "  WINNERS: spec-draft-n-max=$WIN_NMAX spec-draft-p-min=$WIN_PMIN"
+  log "  (restart llama-cpp to apply)"
+  log "=== DONE ==="
+}
+
+# ── SUBCOMMAND: mtp (dispatcher) ────────────────────────────
+# Decides which tuner runs. This step keeps the DEFAULT on the OLD path
+# (cmd_mtp_thorough). BENCH_DISCOVER=1 forces the discover tuner; --thorough /
+# THOROUGH=1 is the old path explicitly. Step E flips the default to discover.
+cmd_mtp() {
+  if ! grep -q "spec-type.*draft-mtp" <(read_section); then
+    echo "  ERROR: $MODEL has no spec-type=draft-mtp — run 'bench.sh mtpcheck $MODEL' first"
+    exit 1
+  fi
+  if [ "${BENCH_DISCOVER:-0}" -eq 1 ] && [ "${THOROUGH:-0}" -ne 1 ]; then
+    cmd_mtp_discover
+  else
+    cmd_mtp_thorough
+  fi
 }
 
 # ── cmd_bisect_thorough: legacy exhaustive batch search (kept verbatim) ──
@@ -3549,7 +3904,7 @@ meta = json.loads('''$META''')
 if not meta['mtp']['is_mtp']:
     print(json.dumps({
         'acceptance': None, 'draft_accepted': None, 'draft_generated': None,
-        'draft_mean_len': None, 'n_max_confirmed': None, 'p_min_confirmed': None,
+        'draft_mean_len': None, 'n_max_loaded': None, 'p_min_loaded': None,
     }))
     exit()
 logs = '''$REQ_LOGS'''
@@ -3570,8 +3925,8 @@ print(json.dumps({
     'draft_accepted': int(acc.group(2)) if acc else None,
     'draft_generated': int(acc.group(3)) if acc else None,
     'draft_mean_len': float(acc.group(4)) if acc else None,
-    'n_max_confirmed': load_val(r'--spec-draft-n-max'),
-    'p_min_confirmed': load_val(r'--draft-p-min'),
+    'n_max_loaded': load_val(r'--spec-draft-n-max'),
+    'p_min_loaded': load_val(r'--draft-p-min'),
 }))
 ")
 
@@ -3587,11 +3942,29 @@ for k,v in d.items(): print(f'  {k}: {v}')
 
   # Write JSON
   python3 - << PYEOF
-import json, datetime
+import json, datetime, os
 speed = json.loads('''$SPEED''')
 meta = json.loads('''$META''')
 mtp = json.loads('''$MTP''')
 env = json.loads('''$ENV_JSON''')
+
+# Merge the §6.4 MTP tuning status file (/tmp/mtp_status_<model>.json) if present
+# (ok / failed / stall / not_mtp). tuning_status defaults to not_run when absent
+# (mtp tuning never ran for this bench, e.g. `bench.sh bench <model>` directly).
+status = {}
+_status_path = '/tmp/mtp_status_${MODEL}.json'
+if os.path.exists(_status_path):
+    try:
+        with open(_status_path) as _sf: status = json.load(_sf)
+    except Exception:
+        status = {}
+_mtp_tuning = {
+    'tuning_status': status.get('status') if status else 'not_run',
+    'tuning_reason': status.get('reason') if status else None,
+    'tuned_n_max': status.get('tuned_n_max') if status else None,
+    'tuned_p_min': status.get('tuned_p_min') if status else None,
+    'tuning_samples': status.get('samples') if status and status.get('samples') is not None else [],
+}
 
 data = {
     'model': '$MODEL',
@@ -3614,6 +3987,7 @@ data = {
     'request': speed.get('request', {}),
     'mtp': {
         **mtp,
+        **_mtp_tuning,
         'configured_n_max': meta['mtp']['n_max'],
         'configured_p_min': meta['mtp']['p_min'],
         'drafter': meta['mtp']['drafter'],
@@ -3676,16 +4050,23 @@ reset_parent_full() {
   fi
 
   # step 3: mtp tuning (only if MTP-capable and bisect succeeded)
+  local MTP_OK=1
   if [ "$IS_MTP" -eq 1 ]; then
     log "  $(date +%H:%M:%S) starting mtp for $P"
     if ( cmd_mtp ); then
       log "  $(date +%H:%M:%S) mtp OK for $P"
     else
+      MTP_OK=0
       log "  $(date +%H:%M:%S) mtp FAILED for $P"
     fi
   fi
 
-  # step 4: bench
+  # step 4: bench. With --strict, a failed mtp tune skips bench (§6.4 part 3);
+  # the JSON would otherwise carry tuning_status:failed.
+  if [ "$MTP_OK" -eq 0 ] && [ "$STRICT" -eq 1 ]; then
+    log "  $(date +%H:%M:%S) bench: SKIPPED (mtp failed, --strict)"
+    return 0
+  fi
   log "  $(date +%H:%M:%S) starting bench for $P"
   if ( cmd_bench ); then
     log "  $(date +%H:%M:%S) bench OK for $P"
@@ -3768,6 +4149,7 @@ run_full_suite() {
     lshow "  $(date +%H:%M:%S) finished bisect for $NAME"
 
     # step 3: mtp tuning (only if MTP-capable and bisect succeeded)
+    local MTP_FAILED=0
     if [ "$BISECT_FAILED" -eq 1 ]; then
       VERDICTS["$NAME|mtp"]="SKIPPED (bisect failed)"
     elif [ "$IS_MTP" -eq 0 ]; then
@@ -3777,15 +4159,20 @@ run_full_suite() {
       if ( cmd_mtp ); then
         VERDICTS["$NAME|mtp"]="OK"
       else
+        MTP_FAILED=1
         VERDICTS["$NAME|mtp"]="FAIL"
       fi
       lshow "  $(date +%H:%M:%S) finished mtp for $NAME"
     fi
 
-    # step 4: bench
+    # step 4: bench. With --strict, a failed mtp tune skips bench (§6.4 part 3);
+    # otherwise bench still runs and its JSON records tuning_status:failed.
     if [ "$BISECT_FAILED" -eq 1 ]; then
       lshow "  bench: SKIPPED (bisect failed — models.ini batch unreliable)"
       VERDICTS["$NAME|bench"]="SKIPPED (bisect failed)"
+    elif [ "$MTP_FAILED" -eq 1 ] && [ "$STRICT" -eq 1 ]; then
+      lshow "  bench: SKIPPED (mtp failed, --strict)"
+      VERDICTS["$NAME|bench"]="SKIPPED (mtp failed)"
     elif [ "$(read_batch)" = "" ]; then
       lshow "  bench: SKIPPED (no batch-size — run bisect first)"
       VERDICTS["$NAME|bench"]="SKIPPED"
@@ -3833,6 +4220,8 @@ for arg in "$@"; do
   case "$arg" in
     --no-inherit)  INHERIT_MODE=0 ;;
     --reset-parent) RESET_PARENT=1 ;;
+    --thorough)    THOROUGH=1 ;;
+    --strict)      STRICT=1 ;;
     *)             MAIN_ARGS+=("$arg") ;;
   esac
 done
@@ -3964,6 +4353,8 @@ case "$CMD" in
     echo "       bench.sh bisect <model> [test-batch]"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
+    echo "       global flags: --no-inherit --reset-parent --thorough --strict"
+    echo "       env: BENCH_DISCOVER=1 selects discover-mode bisect/mtp tuners"
     exit 1
     ;;
 esac
