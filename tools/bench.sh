@@ -3380,9 +3380,9 @@ print(' '.join(out))
     exit 1
   fi
 
-  # ── Phase B: pick = best PASS point; Change-E noise-aware refinement ──
-  # (§30.2b). PREFILL_TOL default 0 → best-measured rung; a user-set value keeps
-  # the smallest-within-tolerance rule. Refinement tracks extra points in
+  # ── Phase B: pick = best PASS point; Change G golden-section refinement (§38) ──
+  # PREFILL_TOL default 0 → best-measured rung; a user-set value keeps the
+  # smallest-within-tolerance rule. Refinement tracks extra points in
   # REFINE_B[]/REFINE_P[] (for step-down + JSON), never in the ladder arrays.
   local THRESH
   THRESH=$(python3 -c "print(float($BEST_PREFILL) * (1 - $PREFILL_TOL))")
@@ -3402,141 +3402,182 @@ print(' '.join(out))
   # All progress (set_batch/restart/tiny_probe/residency/log) goes to stderr so
   # stdout carries ONLY the numeric prefill when captured via $(...) — otherwise
   # the points append and the caller's parse are polluted by progress lines.
+  # Optional $2 (SKIP_RES=1) forces residency to be skipped even for a non-simple
+  # GPU model — used for interior points of a PASS/PASS bracket (Change G, §38):
+  # memory is monotonic in batch, so nothing between two passing rungs can spill.
   discover_measure_candidate() {
-    local CB=$1
+    local CB=$1 SKIP_RES=${2:-0}
     set_batch "$CB" >&2; restart >&2
     local TR=0
     tiny_probe >&2 || TR=$?
     if [ "$TR" -eq 2 ]; then log "  STALL measuring candidate $CB — aborting" >&2; return 2; fi
     if [ "$TR" -ne 0 ]; then echo "0"; return 0; fi
-    if [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$CB" -eq 256 ]; }; then
+    if [ "$SKIP_RES" -ne 1 ] && [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$CB" -eq 256 ]; }; then
       local RV
       RV=$(residency_probe)
       if [ "$RV" = "CPU" ]; then echo "0"; return 0; fi
       if [ "$RV" = "STALL" ]; then log "  STALL at $CB (residency) — aborting" >&2; return 2; fi
     fi
-    local CPF
+    # §38 Change G: median-of-3 sized prefill probes when the first probe completed
+    # in under 5 s (a fast probe → sample the median of three on the SAME warm
+    # instance; no restart between them). Only fast probes pay the 2 extra probes.
+    local CPF T0 T1
+    T0=$(date +%s)
     CPF=$(prefill_probe_sized "$CTX")
+    T1=$(date +%s)
     if [ "$CPF" = "0" ] || [ -z "$CPF" ]; then echo "0"; return 0; fi
+    if [ $((T1 - T0)) -lt 5 ]; then
+      local CPF2 CPF3
+      CPF2=$(prefill_probe_sized "$CTX")
+      if [ "$CPF2" = "0" ] || [ -z "$CPF2" ]; then CPF2=""; fi
+      CPF3=$(prefill_probe_sized "$CTX")
+      if [ "$CPF3" = "0" ] || [ -z "$CPF3" ]; then CPF3=""; fi
+      CPF=$(python3 -c "
+vals=[]
+for v in ['$CPF','$CPF2','$CPF3']:
+    try: vals.append(float(v))
+    except Exception: pass
+print('0' if not vals else ('%.1f'%sorted(vals)[len(vals)//2]))
+" 2>/dev/null || echo 0)
+      log "  median-of-3 prefill (first probe <5s): ${CPF} t/s" >&2
+    fi
     echo "$CPF"
     return 0
   }
 
-  # Refinement runs for ALL modes (plan §32.1#1). The prefill curve is not flat
-  # where it matters on simple non-MTP models (lfm 8K/16K/32K rose to 2112/2176/
-  # 3008) or CPU-compute (gpt-oss rises to 2048, falls at 4096). Change A only
-  # skips residency and decode samples on simple models (batch-independent), not
-  # prefill refinement; discover_measure_candidate applies Change A internally.
+  # ── Phase B refinement — Change G: unconditional golden-section to 64 (§38) ──
+  # Supersedes Change E's noise-stopping rules (keep this structure; the policy is
+  # now: always refine the bracket around the Change C pick down to 64-token
+  # granularity, cheap because memory is monotonic in batch). Refinement runs for
+  # ALL modes: the prefill curve is not flat where it matters on simple non-MTP
+  # models (lfm 8K/16K/32K rose to 2112/2176/3008) or CPU-compute (gpt-oss rises
+  # to 2048, falls at 4096). Change A still only skips residency and decode
+  # samples on simple models (batch-independent), not prefill refinement.
 
-    # ── Rule 2: ceiling edge — best is the top measured point (PICK==HIGHPASS) and
-    # the next rung above failed OOM/SPILL. Bisect between the best (lower) and the
-    # failed rung (upper); resolution scales with the value. Stop on the noise gate.
-    # If PICK is interior (not the top PASS point), this does not fire — rule 1
-    # applies (plan §32.1#2).
-    if [ "$PICK" -eq "$HIGHPASS" ] \
-       && [ -n "$CEIL_FAIL_B" ] \
+  # find_measured $batch: echo the stored prefill of an already-measured PASS
+  # point (ladder rung or refinement), or nothing if it was never measured.
+  find_measured() {
+    local q=$1 i
+    for i in "${!REFINE_B[@]}"; do
+      if [ "${REFINE_B[$i]}" -eq "$q" ]; then echo "${REFINE_P[$i]}"; return 0; fi
+    done
+    for i in "${!PASS_B[@]}"; do
+      if [ "${PASS_B[$i]}" -eq "$q" ]; then echo "${PASS_P[$i]}"; return 0; fi
+    done
+    return 0
+  }
+
+  # Measure one golden candidate in the MAIN shell. It returns its result through
+  # the global GOLD_RES (not stdout) so the REFINE_B[]/REFINE_P[]/POINTS/PICK
+  # bookkeeping survives — a $( )-wrapped function would run in a subshell and lose
+  # those mutations. GOLD_RES = "0" when the candidate failed (OOM/CPU-spill/probe
+  # failure → caller makes it the new upper bound). Exits on STALL.
+  GOLD_RES=""
+  golden_probe() {
+    local CB=$1 SK=$2 MF
+    GOLD_RES=""
+    MF=$(discover_measure_candidate "$CB" "$SK") || { log "  STALL at $CB — aborting"; exit 1; }
+    if [ "$MF" = "0" ] || [ -z "$MF" ]; then
+      log "  golden $CB failed (OOM/CPU-spill/probe) — becomes new upper bound" >&2
+      echo "$CB FAIL" >> "$POINTS"
+      GOLD_RES="0"; return 0
+    fi
+    REFINE_B+=("$CB"); REFINE_P+=("$MF")
+    echo "$CB PASS $MF" >> "$POINTS"
+    if python3 -c "exit(0 if float('$MF') > float('$PICK_PF') else 1)" 2>/dev/null; then
+      log "  golden $CB (${MF} t/s) > best pick $PICK (${PICK_PF} t/s) — adopt as pick" >&2
+      PICK=$CB; PICK_PF=$MF
+    fi
+    GOLD_RES=$MF
+    return 0
+  }
+
+  # ── Bracket determination ──
+  # BLO = nearest measured PASS strictly below PICK (256 if none); BHI = nearest
+  # measured PASS strictly above PICK if one exists; else, at a ceiling edge
+  # (PICK==HIGHPASS with an OOM/SPILL rung above), BHI = that failed rung; else
+  # BHI = BLO (nothing above to resolve → the search is a no-op / skip).
+  local BLO=0 BHI=0 PB B_IDX
+  for B_IDX in "${!PASS_B[@]}"; do
+    PB=${PASS_B[$B_IDX]}
+    if [ "$PB" -lt "$PICK" ] && [ "$PB" -gt "$BLO" ]; then BLO=$PB; fi
+    if [ "$PB" -gt "$PICK" ] && { [ "$BHI" -eq 0 ] || [ "$PB" -lt "$BHI" ]; }; then BHI=$PB; fi
+  done
+  [ "$BLO" -eq 0 ] && BLO=256
+  if [ "$BHI" -eq 0 ]; then
+    if [ "$PICK" -eq "$HIGHPASS" ] && [ -n "$CEIL_FAIL_B" ] \
        && { [ "$CEIL_FAIL_R" = "OOM" ] || [ "$CEIL_FAIL_R" = "SPILL" ]; } \
        && [ "$CEIL_FAIL_B" -gt "$PICK" ]; then
-      log "  ceiling edge: refining between pick=$PICK and ${CEIL_FAIL_B} ($CEIL_FAIL_R)"
-      local ELO=$PICK ELO_PF=$PICK_PF EHI="$CEIL_FAIL_B" ESTEPS=0
-      while [ "$ESTEPS" -lt 6 ]; do
-        local EGAP=$((EHI - ELO))
-        local ESTOP=$(python3 -c "print(max(64, round(0.06*$ELO)))")
-        [ "$EGAP" -le "$ESTOP" ] && break
-        local EMID=$(( (ELO + EHI) / 2 )); EMID=$(( EMID / 64 * 64 ))
-        [ "$EMID" -le "$ELO" ] && EMID=$(( ELO + 64 ))
-        [ "$EMID" -ge "$EHI" ] && EMID=$(( EHI - 64 ))
-        [ "$EMID" -le "$ELO" ] || [ "$EMID" -ge "$EHI" ] && break
-        log ""; log "  Edge refine: testing $EMID (between $ELO/$EHI)..."
-        local EMF
-        EMF=$(discover_measure_candidate "$EMID") || { log "  STALL at $EMID — aborting"; exit 1; }
-        if [ "$EMF" = "0" ]; then log "  edge $EMID failed (OOM/CPU/probe) — tighten ceiling to $EMID"; EHI=$EMID; ESTEPS=$((ESTEPS+1)); continue; fi
-        REFINE_B+=("$EMID"); REFINE_P+=("$EMF")
-        echo "$EMID PASS $EMF" >> "$POINTS"
-        # Midpoint far below the lower bound -> the peak is not at the ceiling.
-        if python3 -c "exit(0 if float($EMF) < float($ELO_PF) * (1 - $PREFILL_NOISE) else 1)" 2>/dev/null; then
-          log "  edge $EMID ($EMF t/s) far below $ELO ($ELO_PF) — peak not at ceiling; interior refine applies from $ELO"
-          break
-        fi
-        if python3 -c "exit(0 if float($EMF) > float($ELO_PF) else 1)" 2>/dev/null; then
-          log "  edge better — $ELO → $EMID ($EMF t/s)"
-          if python3 -c "exit(0 if float($EMF) > float($PICK_PF) else 1)" 2>/dev/null; then PICK=$EMID; PICK_PF=$EMF; fi
-          ELO=$EMID; ELO_PF=$EMF
-        else
-          EHI=$EMID
-        fi
-        ESTEPS=$((ESTEPS + 1))
-      done
+      BHI=$CEIL_FAIL_B          # ceiling edge: upper bound is the failed rung
+    else
+      BHI=$BLO                  # nothing above to resolve → skip
     fi
+  fi
 
-    # ── Rule 1: interior peak — best has a PASS point both below and above. Probe
-    # the midpoint toward whichever neighbour measured the HIGHER prefill (the
-    # peak leans that way, plan §32.2#3); move best only if it beats by >
-    # PREFILL_NOISE; stop when the bracket is small.
-    # Find nearest PASS rung below (LO) and above (HI) of PICK, with their prefill.
-    local LO_NEIGH=0 HI_NEIGH=0 LO_PF="" HI_PF="" PB
-    for idx in "${!PASS_B[@]}"; do
-      PB=${PASS_B[$idx]}
-      if [ "$PB" -lt "$PICK" ] && [ "$PB" -gt "$LO_NEIGH" ]; then LO_NEIGH=$PB; LO_PF=${PASS_P[$idx]}; fi
-      if [ "$PB" -gt "$PICK" ] && { [ "$HI_NEIGH" -eq 0 ] || [ "$PB" -lt "$HI_NEIGH" ]; }; then HI_NEIGH=$PB; HI_PF=${PASS_P[$idx]}; fi
+  if [ "$BHI" -le "$BLO" ]; then
+    log "  no bracket above/below — skip refinement (lo=$BLO hi=$BHI)"
+  else
+    log ""; log "  golden-section refinement: bracket [$BLO, $BHI] → 64-token granularity (Change G)"
+    # Golden-section maximisation of prefill over [GS_LO, GS_HI], candidates
+    # rounded to 64 and any point already measured is reused (never re-probed).
+    # Endpoints are measured PASS rungs except when BHI is the failed ceiling rung
+    # — its value is never compared, only used to bound the search (memory is
+    # monotonic in batch, so a point above a spill/fail also fails). Residency is
+    # skipped on an interior probe whenever the current upper bound is itself a
+    # measured PASS (nothing in a PASS/PASS bracket can spill); it runs only while
+    # the active upper bound is a failed (unmeasured) rung and the model is not
+    # SIMPLE_NONMTP and not MODE=CPU.
+    local GS_LO=$BLO GS_HI=$BHI GS_STEPS=0 GSW GA GB FGA FGB UPPER_MEAS SKRES
+    while [ $((GS_HI - GS_LO)) -gt 64 ] && [ "$GS_STEPS" -lt 14 ]; do
+      GS_STEPS=$((GS_STEPS + 1))
+      GSW=$((GS_HI - GS_LO))
+      GA=$(( GS_LO + GSW * 382 / 1000 )); GA=$(( GA / 64 * 64 ))   # interior, ~0.382
+      GB=$(( GS_HI - GSW * 382 / 1000 )); GB=$(( GB / 64 * 64 ))   # interior, ~0.618
+      [ "$GA" -le "$GS_LO" ] && GA=$(( GS_LO + 64 ))
+      [ "$GB" -ge "$GS_HI" ] && GB=$(( GS_HI - 64 ))
+      if [ "$GB" -le "$GA" ]; then
+        log "  golden: bracket [$GS_LO, $GS_HI] can't admit a new interior pair — stop"
+        break
+      fi
+      # Residency policy for interior probes this step.
+      UPPER_MEAS=$(find_measured "$GS_HI")
+      SKRES=1
+      if [ "$SIMPLE_NONMTP" -eq 0 ] && [ "$MODE" != "CPU" ] && [ -z "$UPPER_MEAS" ]; then
+        SKRES=0
+      fi
+      log ""; log "  golden step $GS_STEPS: bracket [$GS_LO, $GS_HI] (a=$GA b=$GB, residency=${SKRES})"
+      FGA=$(find_measured "$GA")
+      if [ -z "$FGA" ]; then
+        golden_probe "$GA" "$SKRES"
+        FGA=$GOLD_RES
+        if [ "$FGA" = "0" ] || [ -z "$FGA" ]; then
+          log "  golden GA=$GA failed — upper bound → $GA"
+          GS_HI=$GA; continue
+        fi
+      else
+        log "  golden: reuse GA=$GA (${FGA} t/s)" >&2
+      fi
+      FGB=$(find_measured "$GB")
+      if [ -z "$FGB" ]; then
+        golden_probe "$GB" "$SKRES"
+        FGB=$GOLD_RES
+        if [ "$FGB" = "0" ] || [ -z "$FGB" ]; then
+          log "  golden GB=$GB failed — upper bound → $GB"
+          GS_HI=$GB; continue
+        fi
+      else
+        log "  golden: reuse GB=$GB (${FGB} t/s)" >&2
+      fi
+      # Keep the sub-bracket that CONTAINS the better interior point (max search):
+      # better at GA (left) → the max is in [GS_LO, GB], so hi=GB; else lo=GA.
+      if python3 -c "exit(0 if float('$FGA') >= float('$FGB') else 1)" 2>/dev/null; then
+        GS_HI=$GB
+      else
+        GS_LO=$GA
+      fi
+      log "  golden: GA=$GA=${FGA} t/s GB=$GB=${FGB} t/s → bracket [$GS_LO, $GS_HI]" >&2
     done
-    # fold in refinement points as nearer neighbours
-    for idx in "${!REFINE_B[@]}"; do
-      PB=${REFINE_B[$idx]}
-      if [ "$PB" -lt "$PICK" ] && [ "$PB" -gt "$LO_NEIGH" ]; then LO_NEIGH=$PB; LO_PF=${REFINE_P[$idx]}; fi
-      if [ "$PB" -gt "$PICK" ] && { [ "$HI_NEIGH" -eq 0 ] || [ "$PB" -lt "$HI_NEIGH" ]; }; then HI_NEIGH=$PB; HI_PF=${REFINE_P[$idx]}; fi
-    done
-    # Only interior if both sides have a measured PASS point.
-    if [ "$LO_NEIGH" -gt 0 ] && [ "$HI_NEIGH" -gt 0 ]; then
-      log "  interior peak: refining toward the higher-prefill neighbour of $PICK (lo=$LO_NEIGH hi=$HI_NEIGH)"
-      local ISTEPS=0
-      while [ "$ISTEPS" -lt 4 ]; do
-        # Choose direction by data: probe between PICK and the neighbour with the
-        # higher measured prefill (prefer the higher one on a tie).
-        local DIR_NEIGH DIR_PF OPP_NEIGH
-        if [ -z "$LO_PF" ]; then DIR_NEIGH=$HI_NEIGH; DIR_PF=$HI_PF; OPP_NEIGH=$LO_NEIGH
-        elif [ -z "$HI_PF" ]; then DIR_NEIGH=$LO_NEIGH; DIR_PF=$LO_PF; OPP_NEIGH=$HI_NEIGH
-        elif python3 -c "exit(0 if float('$HI_PF') >= float('$LO_PF') else 1)" 2>/dev/null; then
-          DIR_NEIGH=$HI_NEIGH; DIR_PF=$HI_PF; OPP_NEIGH=$LO_NEIGH
-        else
-          DIR_NEIGH=$LO_NEIGH; DIR_PF=$LO_PF; OPP_NEIGH=$HI_NEIGH
-        fi
-        local GAP=$(( DIR_NEIGH > PICK ? DIR_NEIGH - PICK : PICK - DIR_NEIGH ))
-        local STOPG=$(python3 -c "print(max(256, round(0.06*$PICK)))")
-        [ "$GAP" -le "$STOPG" ] && break
-        local IMID=$(( (PICK + DIR_NEIGH) / 2 )); IMID=$(( IMID / 64 * 64 ))
-        if [ "$DIR_NEIGH" -gt "$PICK" ]; then
-          [ "$IMID" -le "$PICK" ] && IMID=$(( PICK + 64 ))
-          [ "$IMID" -ge "$DIR_NEIGH" ] && IMID=$(( DIR_NEIGH - 64 ))
-          { [ "$IMID" -le "$PICK" ] || [ "$IMID" -ge "$DIR_NEIGH" ]; } && break
-        else
-          [ "$IMID" -ge "$PICK" ] && IMID=$(( PICK - 64 ))
-          [ "$IMID" -le "$DIR_NEIGH" ] && IMID=$(( DIR_NEIGH + 64 ))
-          { [ "$IMID" -ge "$PICK" ] || [ "$IMID" -le "$DIR_NEIGH" ]; } && break
-        fi
-        log ""; log "  Interior refine: testing $IMID (toward ${DIR_NEIGH})..."
-        local IMF PREV_PF=$PICK_PF
-        IMF=$(discover_measure_candidate "$IMID") || { log "  STALL at $IMID — aborting"; exit 1; }
-        if [ "$IMF" = "0" ]; then log "  interior $IMID failed (OOM/CPU/probe) — stop"; break; fi
-        REFINE_B+=("$IMID"); REFINE_P+=("$IMF")
-        echo "$IMID PASS $IMF" >> "$POINTS"
-        # Adopt a higher-measured point (pick = best over ladder + refine,
-        # §30.2b rule 3 / Change C). PREFILL_NOISE only gates whether to keep
-        # searching further, not whether to adopt a genuinely higher point.
-        if python3 -c "exit(0 if float($IMF) > float($PICK_PF) else 1)" 2>/dev/null; then
-          log "  interior $IMID ($IMF t/s) > best $PICK ($PICK_PF) — adopt as pick"
-          PICK=$IMID; PICK_PF=$IMF
-        fi
-        # Keep searching only if this step was a real (noise-clearing) improvement
-        # over the best at the start of the step; otherwise the curve is flat/noisy
-        # in this direction — stop.
-        if ! python3 -c "exit(0 if float($IMF) > float($PREV_PF) * (1 + $PREFILL_NOISE) else 1)" 2>/dev/null; then
-          log "  interior $IMID ($IMF t/s) within noise of step-start best $PREV_PF — stop"
-          break
-        fi
-        ISTEPS=$((ISTEPS + 1))
-      done
-    fi
+  fi
 
   log "  after refinement: pick=$PICK (${PICK_PF} t/s)"
 
