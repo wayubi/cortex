@@ -2513,12 +2513,14 @@ cmd_mtp_discover() {
     local N=$1 P=$2 LABEL=$3
     set_key spec-draft-n-max "$N" >/dev/null 2>&1
     set_key spec-draft-p-min "$P" >/dev/null 2>&1
-    restart
+    # restart and log write to stdout via log(); when this function is captured in
+    # $(... ) (run_ph1) that would pollute the result line, so send them to stderr.
+    restart >&2
     local RESULT DR
     RESULT=$(decode_sample "n_max=$N p_min=$P ($LABEL)")
     DR=$?
     if [ "$DR" -eq 2 ]; then
-      log "  STALL during $LABEL (n_max=$N p_min=$P) — network/HF fetch"
+      log "  STALL during $LABEL (n_max=$N p_min=$P) — network/HF fetch" >&2
       return 2
     fi
     local SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH
@@ -2526,7 +2528,7 @@ cmd_mtp_discover() {
     mtp_add_sample "$N" "$P" "$SPEED" "$TOKENS" "$PLACEMENT" "$ACCEPT" "$QUALITY" "$OOM" "$MEANLEN"
     # degeneracy is diagnostic only — WARN, never a gate.
     if [ -n "$QUALITY" ] && python3 -c "exit(0 if float('$QUALITY') > 0.15 else 1)" 2>/dev/null; then
-      log "  WARN: n_max=$N p_min=$P degeneracy=${QUALITY} > 0.15 (diagnostic, not a gate)"
+      log "  WARN: n_max=$N p_min=$P degeneracy=${QUALITY} > 0.15 (diagnostic, not a gate)" >&2
     fi
     echo "$SPEED|$TOKENS|$PLACEMENT|$OOM"
     return 0
@@ -2535,6 +2537,9 @@ cmd_mtp_discover() {
   # run_ph1: measure n_max $1 at p_ref and remember its validity.
   run_ph1() {
     local NM=$1 R SP TK PL OO DR
+    # discover_measure sends all progress to stderr, so stdout is exactly the
+    # "SPEED|TOKENS|PLACEMENT|OOM" result line; capture it directly so $? still
+    # reflects discover_measure's exit code (2 = STALL).
     R=$(discover_measure "$NM" "$P_REF" "phase-1 n_max=$NM")
     DR=$?
     if [ "$DR" -eq 2 ]; then mtp_die_stall "STALL measuring n_max=$NM at p_min=$P_REF"; fi
