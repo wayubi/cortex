@@ -1,10 +1,10 @@
 {
   "model": "lfm-2.5-8b-a1b-q4-4k-think",
   "ctx": 4096,
-  "batch": 1024,
-  "ubatch": 1024,
+  "batch": 3520,
+  "ubatch": 3520,
   "placement": "GPU",
-  "bench_date": "2026-09-08T07:13:08.859710",
+  "bench_date": "2026-09-08T13:01:05.704515",
   "bench_method": "bench_model.sh v2",
   "config": {
     "temp": "0.2",
@@ -21,7 +21,7 @@
     "quant": "UD-Q4_K_XL",
     "reasoning": "off",
     "ctx": "4096",
-    "batch": "1024"
+    "batch": "3520"
   },
   "bench": {
     "max_tokens": 3840,
@@ -29,15 +29,15 @@
     "decode_prompt_tokens": 102,
     "model_file_size_gb": 4.98,
     "build_info": "b1-3737e41",
-    "wall_time_s": 28
+    "wall_time_s": 30
   },
   "speed": {
-    "prefill_t_s": 6552.97,
-    "prefill_ms": 459.94,
-    "prefill_ms_per_tok": 0.1526,
-    "decode_t_s": 140.6,
-    "decode_ms": 27304.31,
-    "decode_ms_per_tok": 7.1124
+    "prefill_t_s": 6668.33,
+    "prefill_ms": 451.99,
+    "prefill_ms_per_tok": 0.15,
+    "decode_t_s": 138.04,
+    "decode_ms": 27810.41,
+    "decode_ms_per_tok": 7.2442
   },
   "request": {
     "prefill_prompt_tokens": 3014,
@@ -64,7 +64,7 @@
     "tuned_n_max": null,
     "tuned_p_min": null,
     "tuning_samples": [],
-    "tuning_written_at": "2026-09-08T07:07:11.524127",
+    "tuning_written_at": "2026-09-08T12:54:41.386579",
     "configured_n_max": null,
     "configured_p_min": null,
     "drafter": "none"
@@ -75,35 +75,79 @@
       {
         "batch": 256,
         "status": "PASS",
-        "prefill": 4574.97
+        "prefill": 4555.2
       },
       {
         "batch": 512,
         "status": "PASS",
-        "prefill": 4983.56
+        "prefill": 5822.9
       },
       {
         "batch": 1024,
         "status": "PASS",
-        "prefill": 5504.09
+        "prefill": 6483.1
       },
       {
         "batch": 2048,
         "status": "PASS",
-        "prefill": 5144.65
+        "prefill": 6431.7
       },
       {
         "batch": 4096,
         "status": "PASS",
-        "prefill": 5521.2
+        "prefill": 6511.0
+      },
+      {
+        "batch": 2816,
+        "status": "REFINE",
+        "prefill": 6298.4
+      },
+      {
+        "batch": 3264,
+        "status": "REFINE",
+        "prefill": 6619.1
+      },
+      {
+        "batch": 3584,
+        "status": "REFINE",
+        "prefill": 6655.9
+      },
+      {
+        "batch": 3520,
+        "status": "REFINE",
+        "prefill": 6698.4
+      },
+      {
+        "batch": 3776,
+        "status": "REFINE",
+        "prefill": 6672.8
+      },
+      {
+        "batch": 3456,
+        "status": "REFINE",
+        "prefill": 6657.9
+      },
+      {
+        "batch": 3648,
+        "status": "REFINE",
+        "prefill": 6592.8
       }
     ],
-    "best_prefill": 5521.2,
-    "pick": 1024,
-    "pick_rule": "smallest PASS batch within 0.03 of best prefill",
+    "best_prefill": 6511.0,
+    "pick": 3520,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      2816,
+      3264,
+      3456,
+      3520,
+      3584,
+      3648,
+      3776
+    ],
     "ceiling_coarse": "4096 PASS (not probed higher)",
     "ladder_break": "0",
-    "written_at": "2026-09-08T07:12:29.761244"
+    "written_at": "2026-09-08T13:00:21.223530"
   },
   "hardware": {
     "gpu": {
@@ -129,20 +173,20 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 97.8,
-      "avg_gpu_util_pct": 66.8,
-      "avg_gpu_mem_util_pct": 62.5,
+      "avg_cpu_pct": 98.6,
+      "avg_gpu_util_pct": 66.0,
+      "avg_gpu_mem_util_pct": 61.5,
       "cpu_stddev_pct": 2.2,
-      "peak_vram_mib": 5385,
-      "peak_power_w": 147.53,
+      "peak_vram_mib": 5667,
+      "peak_power_w": 146.2,
       "peak_temp_c": 64,
       "peak_clocks_sm_mhz": 1957,
       "peak_clocks_mem_mhz": 7301,
-      "final_vram_mib": 5385,
-      "final_temp_c": 61,
-      "final_power_w": 64.39,
-      "ram_used_mib": 41564,
-      "rss_mib": 872,
+      "final_vram_mib": 5667,
+      "final_temp_c": 60,
+      "final_power_w": 48.91,
+      "ram_used_mib": 45835,
+      "rss_mib": 939,
       "sample_count": 12
     }
   }

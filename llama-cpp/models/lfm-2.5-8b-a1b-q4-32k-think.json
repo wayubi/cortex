@@ -1,10 +1,10 @@
 {
   "model": "lfm-2.5-8b-a1b-q4-32k-think",
   "ctx": 32768,
-  "batch": 2048,
-  "ubatch": 2048,
+  "batch": 2304,
+  "ubatch": 2304,
   "placement": "GPU",
-  "bench_date": "2026-09-08T07:34:57.534756",
+  "bench_date": "2026-09-08T13:23:37.128498",
   "bench_method": "bench_model.sh v2",
   "config": {
     "temp": "0.2",
@@ -21,7 +21,7 @@
     "quant": "UD-Q4_K_XL",
     "reasoning": "off",
     "ctx": "32768",
-    "batch": "2048"
+    "batch": "2304"
   },
   "bench": {
     "max_tokens": 4000,
@@ -29,25 +29,25 @@
     "decode_prompt_tokens": 102,
     "model_file_size_gb": 4.98,
     "build_info": "b1-3737e41",
-    "wall_time_s": 8
+    "wall_time_s": 26
   },
   "speed": {
-    "prefill_t_s": 6641.43,
-    "prefill_ms": 3621.36,
-    "prefill_ms_per_tok": 0.1506,
-    "decode_t_s": 135.4,
-    "decode_ms": 7215.86,
-    "decode_ms_per_tok": 7.3857
+    "prefill_t_s": 6779.88,
+    "prefill_ms": 3547.41,
+    "prefill_ms_per_tok": 0.1475,
+    "decode_t_s": 139.96,
+    "decode_ms": 24428.98,
+    "decode_ms_per_tok": 7.1451
   },
   "request": {
     "prefill_prompt_tokens": 24051,
     "decode_prompt_tokens": 102,
     "max_tokens": 4000,
-    "completion_tokens": 978,
-    "total_tokens": 1080,
+    "completion_tokens": 3420,
+    "total_tokens": 3522,
     "cached_tokens": 0,
     "cache_n": 0,
-    "predicted_n": 978,
+    "predicted_n": 3420,
     "finish_reason": "stop",
     "truncated": false,
     "degeneracy": 0.0
@@ -64,7 +64,7 @@
     "tuned_n_max": null,
     "tuned_p_min": null,
     "tuning_samples": [],
-    "tuning_written_at": "2026-09-08T07:27:18.834402",
+    "tuning_written_at": "2026-09-08T13:16:30.857141",
     "configured_n_max": null,
     "configured_p_min": null,
     "drafter": "none"
@@ -75,45 +75,90 @@
       {
         "batch": 256,
         "status": "PASS",
-        "prefill": 4517.15
+        "prefill": 4509.81
       },
       {
         "batch": 512,
         "status": "PASS",
-        "prefill": 5666.39
+        "prefill": 5823.56
       },
       {
         "batch": 1024,
         "status": "PASS",
-        "prefill": 6381.82
+        "prefill": 6702.78
       },
       {
         "batch": 2048,
         "status": "PASS",
-        "prefill": 6720.07
+        "prefill": 6916.11
       },
       {
         "batch": 4096,
         "status": "PASS",
-        "prefill": 6609.34
+        "prefill": 6662.47
       },
       {
         "batch": 8192,
         "status": "PASS",
-        "prefill": 5673.49
+        "prefill": 5733.82
       },
       {
-        "batch": 16384,
-        "status": "PASS",
-        "prefill": 4785.98
+        "batch": 2176,
+        "status": "REFINE",
+        "prefill": 6969.99
+      },
+      {
+        "batch": 2880,
+        "status": "REFINE",
+        "prefill": 6917.15
+      },
+      {
+        "batch": 1728,
+        "status": "REFINE",
+        "prefill": 6860.58
+      },
+      {
+        "batch": 2112,
+        "status": "REFINE",
+        "prefill": 6947.87
+      },
+      {
+        "batch": 2432,
+        "status": "REFINE",
+        "prefill": 6836.48
+      },
+      {
+        "batch": 1984,
+        "status": "REFINE",
+        "prefill": 6829.54
+      },
+      {
+        "batch": 2240,
+        "status": "REFINE",
+        "prefill": 6952.2
+      },
+      {
+        "batch": 2304,
+        "status": "REFINE",
+        "prefill": 7054.04
       }
     ],
-    "best_prefill": 6720.07,
-    "pick": 2048,
-    "pick_rule": "smallest PASS batch within 0.03 of best prefill",
-    "ceiling_coarse": "16384 PASS (not probed higher)",
+    "best_prefill": 6916.11,
+    "pick": 2304,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      1728,
+      1984,
+      2112,
+      2176,
+      2240,
+      2304,
+      2432,
+      2880
+    ],
+    "ceiling_coarse": "8192 PASS (not probed higher)",
     "ladder_break": "2",
-    "written_at": "2026-09-08T07:34:35.781621"
+    "written_at": "2026-09-08T13:22:56.800601"
   },
   "hardware": {
     "gpu": {
@@ -139,21 +184,21 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 98.3,
-      "avg_gpu_util_pct": 59.3,
-      "avg_gpu_mem_util_pct": 56.6,
-      "cpu_stddev_pct": 3.8,
-      "peak_vram_mib": 5709,
-      "peak_power_w": 140.42,
+      "avg_cpu_pct": 97.5,
+      "avg_gpu_util_pct": 66.7,
+      "avg_gpu_mem_util_pct": 62.6,
+      "cpu_stddev_pct": 4.8,
+      "peak_vram_mib": 5751,
+      "peak_power_w": 146.17,
       "peak_temp_c": 62,
       "peak_clocks_sm_mhz": 1957,
       "peak_clocks_mem_mhz": 7301,
-      "final_vram_mib": 5709,
-      "final_temp_c": 60,
-      "final_power_w": 112.71,
-      "ram_used_mib": 42099,
-      "rss_mib": 1086,
-      "sample_count": 3
+      "final_vram_mib": 5751,
+      "final_temp_c": 58,
+      "final_power_w": 60.56,
+      "ram_used_mib": 45118,
+      "rss_mib": 1107,
+      "sample_count": 10
     }
   }
 }
