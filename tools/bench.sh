@@ -29,11 +29,21 @@ LOG_FILE="$LOG_DIR/bench_$(date +%Y%m%d-%H%M).log"
 DOCKER_LOG="cortex-llama-cpp-1"
 # smpbo and nbytes_shared added in commit 18415cf — grep pattern for server crash/error markers
 OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error: out of memory|cuMemCreate|GGML_ASSERT|nbytes_shared|smpbo"
-ESSAY="Write a detailed 1000-word essay explaining transformers and MoE"
 POLL_MIN_SAMPLES=3
 POLL_MAX_SAMPLES=80
 MAX_BATCH=16384          # batch search cap: never probe above min(ctx, MAX_BATCH)
 MTP_TIE_NATS=0.25        # mtpverify: gap below this (nats) at the divergence token = a near-tie, premise holds
+# Decode measurement (§5): speed samples use a natural-stop prompt (NO ignore_eos)
+# so a looping / forced decode cannot inflate t/s or acceptance. A sample shorter
+# than MIN_DECODE_TOKENS is SHORT (retried once with the LONG prompt, then ignored).
+MIN_DECODE_TOKENS=512
+DECODE_PROMPT="Write a comprehensive technical report on the history of computing. Cover these twelve eras in order, with a heading and at least 250 words each: mechanical calculators, Babbage and Lovelace, Hollerith and tabulation, relay computers, ENIAC and the stored program, transistors, integrated circuits, minicomputers, microprocessors, personal computers, the web, mobile and cloud. Finish with a 200-word conclusion."
+DECODE_PROMPT_LONG="Write a comprehensive technical report on the history of computing. Cover these twelve eras in order, with a heading and at least 400 words each: mechanical calculators, Babbage and Lovelace, Hollerith and tabulation, relay computers, ENIAC and the stored program, transistors, integrated circuits, minicomputers, microprocessors, personal computers, the web, mobile and cloud. Finish with a 200-word conclusion. Do not summarise; write every section in full."
+PREFILL_TOL=0.03          # discover: pick = smallest batch within this fraction of best prefill
+DECODE_CLIFF=0.70         # discover: decode at pick below this fraction of the 256 baseline = spill cliff
+DECODE_WARN=0.90          # discover: below this: WARN only
+MTP_TIE=0.05              # MTP tuning: candidates within 5% are a tie → smaller value wins
+THOROUGH=0
 
 # Shared per-model state (set before each engine call)
 MODEL=""
@@ -1731,99 +1741,167 @@ with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
   rm -f "$SNAP"
 }
 
-# ── MTP tuning decode test (essay + placement polling) ──────
+# ── Natural-stop decode sample (§5) ─────────────────────────
+# A speed/quality sample that lets the model stop at EOS (NO ignore_eos), so a
+# looping forced decode cannot inflate t/s or acceptance. Polls placement exactly
+# as run_decode_test does. Retries once with DECODE_PROMPT_LONG if the model
+# stops short of MIN_DECODE_TOKENS, then tags the sample SHORT (callers treat
+# SHORT as missing — never as a batch/MTP failure).
+# Echoes (stdout, pipe-delimited):
+#   SPEED|ACCEPT|PLACEMENT|AVG_CPU|QUALITY|OOM|TOKENS|MEANLEN|FINISH
+#   SPEED   decode t/s (timings.predicted_per_second)
+#   ACCEPT  draft acceptance rate (numeric; '' when not MTP / not parseable)
+#   PLACEMENT GPU|CPU|AMBIGUOUS
+#   AVG_CPU averaged llama CPU %
+#   QUALITY 8-gram degeneracy on the natural-stop text
+#   OOM     0/1
+#   TOKENS  completion_tokens (0 → sample is SHORT)
+#   MEANLEN mean draft length (numeric; '' when not MTP)
+#   FINISH  finish_reason (stop|length)
+# Caller must set MODEL and have a warm (post-restart) server. rc 2 = STALL.
+decode_sample() {
+  local LABEL=${1:-decode}
+  local CTX=$(read_ctx)
+  local MAX_TOK=$(python3 -c "print(max(256, min(4000, $CTX - 256)))")
+  # progress to stderr (stdout is reserved for the pipe-delimited result)
+  plog() { echo "$1" | tee -a "$LOG_FILE" >&2; }
+
+  local PROMPT="$DECODE_PROMPT"
+  local ATTEMPT=0
+  while :; do
+    ATTEMPT=$((ATTEMPT + 1))
+    plog ""; plog "=== DECODE SAMPLE: $LABEL (attempt $ATTEMPT) ==="
+    export DECODE_PROMPT_VAL="$PROMPT"
+    python3 -c "
+import json, os
+payload = {'model':'$MODEL','messages':[{'role':'user','content':os.environ['DECODE_PROMPT_VAL']}],'max_tokens':$MAX_TOK}
+with open('/tmp/decode_payload.json','w') as f: json.dump(payload, f)
+"
+    fire_request /tmp/decode_payload.json /tmp/decode_out.json "decode" "$(adaptive_timeout $MAX_TOK)"
+    local RC=$?
+    if [ "$RC" -eq 2 ]; then
+      plog "  STALL — model never served (network/HF fetch)"
+      return 2
+    fi
+    local PID=$FIRE_PID
+
+    plog "  Polling CPU/GPU until request completes (max $((POLL_MAX_SAMPLES * 2))s)..."
+    local CPU_SAMPLES=()
+    for i in $(seq 1 $POLL_MAX_SAMPLES); do
+      local TOP CPU GPU
+      TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
+      CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
+      GPU=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
+      [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
+      [ $((i % 20)) -eq 0 ] && plog "    ...${i}x2s (CPU ${CPU}% GPU ${GPU}%)"
+      sleep 2
+      if [ "$i" -ge "$POLL_MIN_SAMPLES" ] && ! kill -0 $PID 2>/dev/null; then
+        plog "    Request complete after ~$((i*2))s — stopping poll"
+        break
+      fi
+    done
+    wait $PID 2>/dev/null || true
+
+    # Averages (skip first 10 samples as warmup if enough were collected)
+    local CPU_SUM=0 CPU_CNT=0 AVG_CPU=0 AVG_START=0
+    [ "${#CPU_SAMPLES[@]}" -gt 10 ] && AVG_START=10
+    for idx in $(seq $AVG_START $((${#CPU_SAMPLES[@]} - 1))); do
+      [ -z "${CPU_SAMPLES[$idx]:-}" ] && continue
+      CPU_SUM=$(echo "$CPU_SUM + ${CPU_SAMPLES[$idx]}" | bc 2>/dev/null || echo 0)
+      CPU_CNT=$((CPU_CNT + 1))
+    done
+    [ "$CPU_CNT" -gt 0 ] && AVG_CPU=$(echo "scale=1; $CPU_SUM / $CPU_CNT" | bc)
+
+    local PLACEMENT
+    if (( $(echo "$AVG_CPU < 100" | bc -l) )); then PLACEMENT="GPU"
+    elif (( $(echo "$AVG_CPU > 200" | bc -l) )); then PLACEMENT="CPU"
+    else PLACEMENT="AMBIGUOUS"; fi
+
+    local OOM=$(oom_count_since_mark)
+    local RESULT
+    RESULT=$(python3 -c "
+import json
+try:
+    d = json.load(open('/tmp/decode_out.json'))
+    if 'choices' not in d or not d['choices']: print('FAIL'); exit()
+    ch = d['choices'][0]
+    t = d.get('timings', {})
+    u = d.get('usage', {})
+    text = ch['message']['content']
+    ct = u.get('completion_tokens', 0) or 0
+    spd = t.get('predicted_per_second', 0)
+    # 8-gram degeneracy, computed after stripping heading lines (lines starting with '#')
+    lines = [ln for ln in text.split('\n') if not ln.lstrip().startswith('#')]
+    words = ('\n'.join(lines)).split()
+    deg = 0.0
+    if len(words) >= 8:
+        ng = [' '.join(words[i:i+8]) for i in range(len(words)-7)]
+        from collections import Counter
+        c = Counter(ng)
+        deg = round(sum(v for v in c.values() if v > 1) / len(ng), 4)
+    print('%s|%s|%s' % (('%.1f'%spd) if spd else '0', ct, ch.get('finish_reason') or ''))
+except Exception as e:
+    print('FAIL')
+" 2>/dev/null)
+
+    if [ "$RESULT" = "FAIL" ] || [ -z "$RESULT" ]; then
+      plog "  Decode response parse failed (model error / 500)"
+      echo "0||$PLACEMENT|${AVG_CPU:-0}|0|$OOM|0||length"
+      return 0
+    fi
+    local SPEED TOKENS FINISH
+    IFS='|' read -r SPEED TOKENS FINISH <<< "$RESULT"
+    # If valid length (>= MIN_DECODE_TOKENS) or OOM, stop; else retry once with the long prompt.
+    if [ "$OOM" -gt 0 ] || [ "${TOKENS:-0}" -ge "$MIN_DECODE_TOKENS" ] || [ "$ATTEMPT" -ge 2 ]; then
+      local QUALITY ACCEPT MEANLEN
+      QUALITY=$(python3 -c "
+import json
+try:
+    d=json.load(open('/tmp/decode_out.json'))
+    text=d['choices'][0]['message']['content']
+except: print('?'); exit()
+lines=[ln for ln in text.split('\n') if not ln.lstrip().startswith('#')]
+words=(' '.join(lines)).split()
+if len(words)<8: print('0'); exit()
+ng=[' '.join(words[i:i+8]) for i in range(len(words)-7)]
+from collections import Counter
+c=Counter(ng); print(round(sum(v for v in c.values() if v>1)/len(ng),4))
+")
+      # acceptance parse: 'draft acceptance = X (a accepted / g generated), mean len = L'
+      local ACCEPT MEANLEN
+      ACCEPT=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -oE "draft acceptance = [0-9.]+" | tail -1 | awk '{print $4}')
+      MEANLEN=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -oE "mean len = [0-9.]+" | tail -1 | awk '{print $4}')
+      local SHORT_TAG=""
+      [ "${TOKENS:-0}" -lt "$MIN_DECODE_TOKENS" ] && SHORT_TAG=" (SHORT: ${TOKENS} tokens < $MIN_DECODE_TOKENS)"
+      plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-?} | placement=$PLACEMENT (cpu ${AVG_CPU}%) | degeneracy=${QUALITY:-?} | tokens=${TOKENS:-0} | finish=$FINISH | OOM=$OOM$SHORT_TAG"
+      echo "$SPEED|${ACCEPT:-}|$PLACEMENT|${AVG_CPU:-0}|${QUALITY:-0}|$OOM|${TOKENS:-0}|${MEANLEN:-}|${FINISH:-}"
+      return 0
+    fi
+    plog "  Sample short (${TOKENS} tokens < $MIN_DECODE_TOKENS) — retrying with the longer prompt"
+    PROMPT="$DECODE_PROMPT_LONG"
+  done
+}
+
+# ── MTP tuning decode test (thin wrapper over decode_sample) ──
+# Keeps the historical SPEED|ACCEPT|PLACEMENT|AVG_CPU|QUALITY|OOM shape so
+# existing cmd_mtp callers parse unchanged, appends TOKENS and MEANLEN.
 run_decode_test() {
   local LABEL=$1
   local CTX=$(read_ctx)
-  local DECODE_MAX=$(python3 -c "print(max(256, min(4000, $CTX - 64)))")
   # progress to stderr (stdout is reserved for the pipe-delimited result)
   plog() { echo "$1" | tee -a "$LOG_FILE" >&2; }
   plog ""; plog "=== TEST: $LABEL ==="
-
-  python3 -c "
-import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':'$ESSAY'}],'max_tokens':${DECODE_MAX},'ignore_eos':True}
-with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
-"
-  fire_request /tmp/mtp_payload.json /tmp/mtp_out.json "mtp-tune" "$(adaptive_timeout $DECODE_MAX)"
+  local RESULT
+  RESULT=$(decode_sample "$LABEL")
   local RC=$?
   if [ "$RC" -eq 2 ]; then
     plog "  STALL — model never served (network/HF fetch)"
     return 2
   fi
-  local PID=$FIRE_PID
-
-  # Placement poll: until request completes (min 3 samples), capped at 160s
-  plog "  Polling CPU/GPU until request completes (max $((POLL_MAX_SAMPLES * 2))s)..."
-  local CPU_SAMPLES=()
-  for i in $(seq 1 $POLL_MAX_SAMPLES); do
-    local TOP CPU GPU
-    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
-    CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
-    GPU=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
-    [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
-    [ $((i % 20)) -eq 0 ] && plog "    ...${i}x2s (CPU ${CPU}% GPU ${GPU}%)"
-    sleep 2
-    if [ "$i" -ge "$POLL_MIN_SAMPLES" ] && ! kill -0 $PID 2>/dev/null; then
-      plog "    Request complete after ~$((i*2))s — stopping poll"
-      break
-    fi
-  done
-  wait $PID 2>/dev/null || true
-
-  # Averages (skip first 10 samples as warmup if enough were collected)
-  local CPU_SUM=0 CPU_CNT=0 AVG_CPU=0
-  local AVG_START=0
-  [ "${#CPU_SAMPLES[@]}" -gt 10 ] && AVG_START=10
-  for idx in $(seq $AVG_START $((${#CPU_SAMPLES[@]} - 1))); do
-    [ -z "${CPU_SAMPLES[$idx]:-}" ] && continue
-    CPU_SUM=$(echo "$CPU_SUM + ${CPU_SAMPLES[$idx]}" | bc 2>/dev/null || echo 0)
-    CPU_CNT=$((CPU_CNT + 1))
-  done
-  [ "$CPU_CNT" -gt 0 ] && AVG_CPU=$(echo "scale=1; $CPU_SUM / $CPU_CNT" | bc)
-
-  # Classify
-  local PLACEMENT
-  if (( $(echo "$AVG_CPU < 100" | bc -l) )); then PLACEMENT="GPU"
-  elif (( $(echo "$AVG_CPU > 200" | bc -l) )); then PLACEMENT="CPU"
-  else PLACEMENT="AMBIGUOUS"; fi
-
-  local OOM=$(oom_count_since_mark)
-
-  local SPEED ACCEPT QUALITY
-  SPEED=$(python3 -c "
-import json
-try:
-    d = json.load(open('/tmp/mtp_out.json'))
-    if 'choices' in d:
-        t = d.get('timings',{})
-        print(f\"{t.get('predicted_per_second',0):.1f}\")
-    else: print('0')
-except: print('0')
-" 2>/dev/null)
-  ACCEPT=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -oE "draft acceptance = [0-9.]+" | tail -1 | awk '{print $3}')
-  QUALITY=$(python3 -c "
-import json
-try:
-    d = json.load(open('/tmp/mtp_out.json'))
-    text = d['choices'][0]['message']['content']
-except:
-    print('?'); exit()
-words = text.split()
-if len(words) < 8:
-    print('0'); exit()
-ngrams = [' '.join(words[i:i+8]) for i in range(len(words)-7)]
-total = len(ngrams)
-if total == 0:
-    print('0'); exit()
-from collections import Counter
-counts = Counter(ngrams)
-dup = sum(v for v in counts.values() if v > 1)
-print(round(dup/total, 4))
-")
-
-  plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-?} | placement=$PLACEMENT (cpu ${AVG_CPU}%) | degeneracy=${QUALITY:-?} | OOM=$OOM"
-  echo "$SPEED|$ACCEPT|$PLACEMENT|$AVG_CPU|$QUALITY|$OOM"
+  local SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH
+  IFS='|' read -r SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
+  plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-?} | placement=$PLACEMENT (cpu ${AVGCPU:-0}%) | degeneracy=${QUALITY:-?} | tokens=${TOKENS:-0} | OOM=$OOM"
+  echo "$SPEED|$ACCEPT|$PLACEMENT|$AVGCPU|$QUALITY|$OOM|$TOKENS|$MEANLEN|$FINISH"
 }
 
 # ── SUBCOMMAND: mtpcheck ────────────────────────────────────
