@@ -2641,17 +2641,18 @@ print(rank[0] if rank else '')
 
 # ── SUBCOMMAND: mtp (dispatcher) ────────────────────────────
 # Decides which tuner runs. This step keeps the DEFAULT on the OLD path
-# (cmd_mtp_thorough). BENCH_DISCOVER=1 forces the discover tuner; --thorough /
-# THOROUGH=1 is the old path explicitly. Step E flips the default to discover.
+# Dispatcher. Default is DISCOVER; --thorough / THOROUGH=1 selects the old
+# exhaustive tuner (cmd_mtp_thorough). BENCH_DISCOVER=1 is a deprecated alias for
+# discover (kept for backward compatibility with the Step-C/D env).
 cmd_mtp() {
   if ! grep -q "spec-type.*draft-mtp" <(read_section); then
     echo "  ERROR: $MODEL has no spec-type=draft-mtp — run 'bench.sh mtpcheck $MODEL' first"
     exit 1
   fi
-  if [ "${BENCH_DISCOVER:-0}" -eq 1 ] && [ "${THOROUGH:-0}" -ne 1 ]; then
-    cmd_mtp_discover
-  else
+  if [ "${THOROUGH:-0}" -eq 1 ]; then
     cmd_mtp_thorough
+  else
+    cmd_mtp_discover
   fi
 }
 
@@ -2977,18 +2978,17 @@ cmd_bisect_thorough() {
 # the shared cmd_bisect_test_batch (used by BOTH bisect routes). Otherwise dispatch
 # between the discover-mode ladder (plan §4, cmd_bisect_discover) and the legacy
 # exhaustive search (cmd_bisect_thorough).
-# For THIS commit discover stays behind the temporary env BENCH_DISCOVER=1
-# (plan §11 step 2): normal runs keep the old exhaustive path until step 4 flips
-# the default. THOROUGH=1 also forces the old path.
+# Default is DISCOVER; --thorough / THOROUGH=1 selects the old exhaustive path.
+# BENCH_DISCOVER=1 is a deprecated alias for discover.
 cmd_bisect() {
   if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
     cmd_bisect_test_batch "$2"
     return
   fi
-  if [ "${BENCH_DISCOVER:-0}" -eq 1 ]; then
-    cmd_bisect_discover "$@"
-  else
+  if [ "${THOROUGH:-0}" -eq 1 ]; then
     cmd_bisect_thorough "$@"
+  else
+    cmd_bisect_discover "$@"
   fi
 }
 
@@ -4226,6 +4226,11 @@ for arg in "$@"; do
     *)             MAIN_ARGS+=("$arg") ;;
   esac
 done
+# Env fallbacks: BENCH_THOROUGH=1 (and BENCH_DISCOVER, deprecated, is the old
+# discover selector and is now the default, so it is ignored).
+if [ "${THOROUGH:-0}" -eq 0 ] && [ "${BENCH_THOROUGH:-0}" -eq 1 ]; then
+  THOROUGH=1
+fi
 # Replace "$@" with filtered args for downstream parsing
 set -- "${MAIN_ARGS[@]+"${MAIN_ARGS[@]}"}"
 
@@ -4272,9 +4277,17 @@ if [ "$#" -eq 0 ]; then
     esac
   fi
 
+  # Search depth: discover (fast, default) vs thorough (exhaustive legacy search).
+  read -r -p "Search depth? [D]iscover / [t]horough: " DEPTH_INPUT
+  case "${DEPTH_INPUT:-D}" in
+    [tT]|[tT][hH][oO][rR][oO][uU][gG][hH]) THOROUGH=1; log "  Search depth: THOROUGH (legacy exhaustive)" ;;
+    *)                                      THOROUGH=0; log "  Search depth: discover (fast)" ;;
+  esac
+
   lshow "=== MASTER PLAN ==="
   lshow "  models: $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)"
   lshow "  steps: mtpcheck bisect mtp bench (full suite)"
+  if [ "$THOROUGH" -eq 1 ]; then lshow "  depth: thorough"; else lshow "  depth: discover"; fi
   lshow "  log: $LOG_FILE"
 
   echo ""
