@@ -3117,7 +3117,36 @@ cmd_bisect_test_batch() {
 # instance. Reuses prefill_probe's body approach — log-parsed 'prompt eval time',
 # overflow-shrink retry, OOM check.
 # Echoes prefill_t_s to stdout; "0" on OOM/stall/parse-fail. Progress → stderr.
+# §39.2#1 (Change G): the SAME measurement rule applies to every point in the JSON
+# — a ladder rung and a refinement candidate are measured identically. So the
+# "first probe under 5 s → median of three" policy lives HERE (in the one function
+# both the ladder and discover_measure_candidate call), not only in the refinement
+# path. Every sized-prefill value recorded for a batch is therefore a median when
+# the probe is fast, never a single high-noise sample that could out-rank a median.
 prefill_probe_sized() {
+  local CTX=${1:-65536} RAW0 T0 RAW1 RAW2
+  T0=$(date +%s)
+  RAW0=$(prefill_probe_sized_raw "$CTX")
+  if [ "$RAW0" = "0" ] || [ -z "$RAW0" ] || [ $(( $(date +%s) - T0 )) -ge 5 ]; then
+    echo "${RAW0:-0}"
+    return 0
+  fi
+  RAW1=$(prefill_probe_sized_raw "$CTX")
+  RAW2=$(prefill_probe_sized_raw "$CTX")
+  local MED
+  MED=$(python3 -c "
+vals=[]
+for v in ['$RAW0','$RAW1','$RAW2']:
+    try:
+        f=float(v)
+        if f>0: vals.append(f)
+    except Exception: pass
+print('%.1f' % sorted(vals)[len(vals)//2])
+" 2>/dev/null || echo "$RAW0")
+  log "  prefill-sized: median-of-3 (probe <5s) → ${MED} t/s" >&2
+  echo "$MED"
+}
+prefill_probe_sized_raw() {
   local CTX=${1:-65536}
   local PROBE_TOKENS
   PROBE_TOKENS=$(python3 -c "print(int(min(int($CTX * 0.75), 16384)))")
@@ -3418,29 +3447,11 @@ print(' '.join(out))
       if [ "$RV" = "CPU" ]; then echo "0"; return 0; fi
       if [ "$RV" = "STALL" ]; then log "  STALL at $CB (residency) — aborting" >&2; return 2; fi
     fi
-    # §38 Change G: median-of-3 sized prefill probes when the first probe completed
-    # in under 5 s (a fast probe → sample the median of three on the SAME warm
-    # instance; no restart between them). Only fast probes pay the 2 extra probes.
-    local CPF T0 T1
-    T0=$(date +%s)
+    # §39.2#1: prefill_probe_sized now does the <5s median-of-3 itself (the SAME
+    # rule the ladder uses), so every batch is measured identically.
+    local CPF
     CPF=$(prefill_probe_sized "$CTX")
-    T1=$(date +%s)
     if [ "$CPF" = "0" ] || [ -z "$CPF" ]; then echo "0"; return 0; fi
-    if [ $((T1 - T0)) -lt 5 ]; then
-      local CPF2 CPF3
-      CPF2=$(prefill_probe_sized "$CTX")
-      if [ "$CPF2" = "0" ] || [ -z "$CPF2" ]; then CPF2=""; fi
-      CPF3=$(prefill_probe_sized "$CTX")
-      if [ "$CPF3" = "0" ] || [ -z "$CPF3" ]; then CPF3=""; fi
-      CPF=$(python3 -c "
-vals=[]
-for v in ['$CPF','$CPF2','$CPF3']:
-    try: vals.append(float(v))
-    except Exception: pass
-print('0' if not vals else ('%.1f'%sorted(vals)[len(vals)//2]))
-" 2>/dev/null || echo 0)
-      log "  median-of-3 prefill (first probe <5s): ${CPF} t/s" >&2
-    fi
     echo "$CPF"
     return 0
   }
@@ -3496,7 +3507,12 @@ print('0' if not vals else ('%.1f'%sorted(vals)[len(vals)//2]))
   # BLO = nearest measured PASS strictly below PICK (256 if none); BHI = nearest
   # measured PASS strictly above PICK if one exists; else, at a ceiling edge
   # (PICK==HIGHPASS with an OOM/SPILL rung above), BHI = that failed rung; else
-  # BHI = BLO (nothing above to resolve → the search is a no-op / skip).
+  # PICK is the top measured rung with nothing above (ladder ended at/below cap
+  # with the best at the top) — §39.2#2: refine DOWN in [BLO, PICK], because the
+  # true prefill peak can sit between the lower rung and the cap at a non-rung
+  # (lfm 4K: pick 4096 = cap, peak actually ~3K, bracket [2048, 4096] must be
+  # searched). Exception: if BLO >= PROBE_TOKENS the whole bracket is a single
+  # ubatch of the same prompt and measures identically — skip and log why.
   local BLO=0 BHI=0 PB B_IDX
   for B_IDX in "${!PASS_B[@]}"; do
     PB=${PASS_B[$B_IDX]}
@@ -3509,8 +3525,11 @@ print('0' if not vals else ('%.1f'%sorted(vals)[len(vals)//2]))
        && { [ "$CEIL_FAIL_R" = "OOM" ] || [ "$CEIL_FAIL_R" = "SPILL" ]; } \
        && [ "$CEIL_FAIL_B" -gt "$PICK" ]; then
       BHI=$CEIL_FAIL_B          # ceiling edge: upper bound is the failed rung
+    elif [ "$BLO" -ge "$PROBE_TOKENS" ]; then
+      log "  top-rung pick=$PICK, whole bracket [${BLO}, ${PICK}] is single-ubatch (BLO ${BLO} >= probe ${PROBE_TOKENS}) — skip refinement"
+      BHI=$BLO
     else
-      BHI=$BLO                  # nothing above to resolve → skip
+      BHI=$PICK                 # top rung, nothing above: refine [BLO, PICK]
     fi
   fi
 
