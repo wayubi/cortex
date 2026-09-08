@@ -2539,6 +2539,7 @@ cmd_mtp_discover() {
     DR=$?
     if [ "$DR" -eq 2 ]; then mtp_die_stall "STALL measuring n_max=$NM at p_min=$P_REF"; fi
     IFS='|' read -r SP TK PL OO <<< "$R"
+    SP=${SP:-0}; TK=${TK:-0}; OO=${OO:-1}; PL=${PL:-SHORT}
     if [ "$OO" -eq 0 ] && [ "$PL" != "CPU" ] && [ "$TK" -ge "$MIN_DECODE_TOKENS" ]; then
       log "  n_max=$NM: PASS (${SP} t/s, ${TK} tokens, $PL)"
     else
