@@ -993,6 +993,33 @@ print(f'{p:.1f}|{d:.1f}|${AVG_CPU:-0}')
 GPU_ACTIVE_PCT=25
 GPU_CPU_MAX=150           # cpu < this + GPU active => GPU-resident (plan §30.2 Change B)
 RESID_MIN_FLOOR_SAMPLES=10   # 20s @2s before early-kill verdicts are allowed (belt-and-suspenders)
+
+# ── Binary placement classifier (plan §37 Change F) ─────────
+# One classifier shared by residency_probe, decode_sample and cmd_bench so the
+# published record never says AMBIGUOUS. A GPU-resident llama.cpp keeps exactly
+# one host thread busy feeding the GPU, so its process CPU sits at ~100% and
+# wobbles to 105-110; that is not compute on the CPU. GPU utilisation is direct
+# evidence of where the matrix work runs, so it decides the 150-200% band.
+# Echoes one of: GPU | CPU (never AMBIGUOUS).
+classify_placement() {
+  local AVG_CPU=$1 AVG_GPU=$2
+  if python3 -c "exit(0 if float('$AVG_CPU') > 200 else 1)" 2>/dev/null; then
+    echo "CPU"; return 0
+  fi
+  if python3 -c "exit(0 if float('$AVG_CPU') < $GPU_CPU_MAX else 1)" 2>/dev/null \
+     && python3 -c "exit(0 if float('$AVG_GPU') > $GPU_ACTIVE_PCT else 1)" 2>/dev/null; then
+    echo "GPU"; return 0
+  fi
+  # 150-200% CPU: decide by the GPU — busy means a host thread plus sampling (GPU);
+  # idle means the compute is on the CPU.
+  if python3 -c "exit(0 if float('$AVG_GPU') > $GPU_ACTIVE_PCT else 1)" 2>/dev/null; then
+    echo "GPU"
+  else
+    echo "CPU"
+  fi
+  return 0
+}
+
 residency_probe() {
   # stdout is reserved for the single verdict (GPU|CPU|AMBIGUOUS); all progress
   # logs go to stderr so command-substitution captures stay clean.
@@ -1014,7 +1041,7 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
   fi
   local R_PID=$FIRE_PID
 
-  local R_CPU_SUM=0 R_CPU_CNT=0 R_GPU_SEEN=0
+  local R_CPU_SUM=0 R_CPU_CNT=0 R_GPU_SUM=0 R_GPU_CNT=0 R_GPU_SEEN=0
   local R_CPU=0 R_GPU=0 R_TEMP=0 R_CPU_CONSEC=0 R_GPU_CONSEC=0
   local i
   for i in $(seq 1 40); do
@@ -1026,6 +1053,7 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
     R_TEMP=$(echo "$STATS" | cut -d',' -f2 | tr -d ' ')
 
     [ -n "$R_CPU" ] && [ "$R_CPU" != "0.0" ] && { R_CPU_SUM=$(echo "$R_CPU_SUM + $R_CPU" | bc 2>/dev/null || echo 0); R_CPU_CNT=$((R_CPU_CNT + 1)); }
+    [ -n "$R_GPU" ] && [ "$R_GPU" != "0" ] && { R_GPU_SUM=$(echo "$R_GPU_SUM + $R_GPU" | bc 2>/dev/null || echo 0); R_GPU_CNT=$((R_GPU_CNT + 1)); }
     { [ -n "$R_GPU" ] && [ "$R_GPU" -gt "$GPU_ACTIVE_PCT" ] 2>/dev/null; } && R_GPU_SEEN=1
 
     # CPU-spill: definitive regardless of GPU (only all-cores >200% proves it)
@@ -1058,19 +1086,15 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
   done
   wait $R_PID 2>/dev/null || true
 
-  # Fallback: classify from the full window average
-  local R_AVG=0
+  # Fallback: classify from the full window averages via the shared binary
+  # classifier (plan §37 Change F) — never AMBIGUOUS.
+  local R_AVG=0 R_GAVG=0
   [ "$R_CPU_CNT" -gt 0 ] && R_AVG=$(echo "scale=1; $R_CPU_SUM / $R_CPU_CNT" | bc)
-  if [ "$(echo "$R_AVG > 200" | bc -l)" = "1" ]; then
-    log "  residency: CPU (avg ${R_AVG}%)" >&2
-    echo "CPU"; return 0
-  fi
-  if [ "$(echo "$R_AVG <= $GPU_CPU_MAX" | bc -l)" = "1" ] && [ "$R_GPU_SEEN" -eq 1 ]; then
-    log "  residency: GPU (avg cpu ${R_AVG}%, gpu active)" >&2
-    echo "GPU"; return 0
-  fi
-  log "  residency: AMBIGUOUS (avg cpu ${R_AVG}%)" >&2
-  echo "AMBIGUOUS"; return 0
+  [ "$R_GPU_CNT" -gt 0 ] && R_GAVG=$(echo "scale=1; $R_GPU_SUM / $R_GPU_CNT" | bc)
+  local R_PL
+  R_PL=$(classify_placement "$R_AVG" "$R_GAVG")
+  log "  residency: $R_PL (avg cpu ${R_AVG}%, avg gpu ${R_GAVG}%)" >&2
+  echo "$R_PL"; return 0
 }
 
 # Find the largest GPU-resident batch when the ceiling is CPU-spilled (e.g. a
@@ -1822,13 +1846,14 @@ with open('/tmp/decode_payload.json','w') as f: json.dump(payload, f)
     local PID=$FIRE_PID
 
     plog "  Polling CPU/GPU until request completes (max $((POLL_MAX_SAMPLES * 2))s)..."
-    local CPU_SAMPLES=()
+    local CPU_SAMPLES=() GPU_SAMPLES=()
     for i in $(seq 1 $POLL_MAX_SAMPLES); do
       local TOP CPU GPU
       TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
       CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
       GPU=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
       [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
+      [ -n "$GPU" ] && [ "$GPU" != "0" ] && GPU_SAMPLES+=("$GPU")
       [ $((i % 20)) -eq 0 ] && plog "    ...${i}x2s (CPU ${CPU}% GPU ${GPU}%)"
       sleep 2
       if [ "$i" -ge "$POLL_MIN_SAMPLES" ] && ! kill -0 $PID 2>/dev/null; then
@@ -1847,11 +1872,16 @@ with open('/tmp/decode_payload.json','w') as f: json.dump(payload, f)
       CPU_CNT=$((CPU_CNT + 1))
     done
     [ "$CPU_CNT" -gt 0 ] && AVG_CPU=$(echo "scale=1; $CPU_SUM / $CPU_CNT" | bc)
+    local GPU_SUM=0 GPU_CNT=0 AVG_GPU=0
+    for idx in $(seq $AVG_START $((${#GPU_SAMPLES[@]} - 1))); do
+      [ -z "${GPU_SAMPLES[$idx]:-}" ] && continue
+      GPU_SUM=$(echo "$GPU_SUM + ${GPU_SAMPLES[$idx]}" | bc 2>/dev/null || echo 0)
+      GPU_CNT=$((GPU_CNT + 1))
+    done
+    [ "$GPU_CNT" -gt 0 ] && AVG_GPU=$(echo "scale=1; $GPU_SUM / $GPU_CNT" | bc)
 
     local PLACEMENT
-    if (( $(echo "$AVG_CPU < 100" | bc -l) )); then PLACEMENT="GPU"
-    elif (( $(echo "$AVG_CPU > 200" | bc -l) )); then PLACEMENT="CPU"
-    else PLACEMENT="AMBIGUOUS"; fi
+    PLACEMENT=$(classify_placement "$AVG_CPU" "$AVG_GPU")
 
     local OOM=$(oom_count_since_mark)
     local RESULT
@@ -4033,11 +4063,9 @@ print(f'{statistics.stdev(vals):.1f}')
   RAM=$(free -m | awk '/Mem:/ {print $3}')
   RSS=$(ps aux 2>/dev/null | grep llama-server | grep -v grep | grep -v models-preset | awk '{print int($6/1024)}' | head -1)
 
-  # Classify placement
+  # Classify placement (shared binary classifier, plan §37 Change F)
   local PLACEMENT
-  if (( $(echo "$AVG_CPU < 100" | bc -l) )); then PLACEMENT="GPU"
-  elif (( $(echo "$AVG_CPU > 200" | bc -l) )); then PLACEMENT="CPU"
-  else PLACEMENT="AMBIGUOUS"; fi
+  PLACEMENT=$(classify_placement "$AVG_CPU" "$AVG_GPU")
 
   # Extract speed + request signals (prefill from phase A, decode from phase B)
   local SPEED
