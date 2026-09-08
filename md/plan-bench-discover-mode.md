@@ -944,3 +944,64 @@ re-benchmark shows how close context siblings' picks land.
 Reviewed `a0e2ff5`: the stale-status warning is appended to `$LOG_FILE` and still written to stderr, inside a try block so a log write failure cannot interrupt the JSON write. That was the last open item. `bash -n` clean, working tree clean.
 
 **The implementation meets the plan. No further review items.** The handover in §27.3 stands: family heads with `--no-inherit --strict`, siblings inherit, confirm the residency streaming effect on the first slow-decode ladder, sibling seeding deferred.
+
+---
+
+## 30. Post-catalogue-start corrections (2026-09-08, from the user's first real runs)
+
+The user reports two problems from the 07:04 lfm suite run and the 07:39 gemma run: it is still slow, and it picks a smaller batch than the best-measured rung. Both are examined against the logs below. The speed complaint is correct for small non-MTP models; the pick complaint is a preference the default should follow.
+
+### 30.1 Speed: discover is slower than the 09-05 pipeline on small non-MTP models
+
+| model | discover today (bisect start → bench start) | 09-05 pipeline (same models, `bench_20260905-1427.log`) |
+|---|---|---|
+| lfm 4K | 5.3 min | 3.2 min |
+| lfm 8K | 5.9 min | 3.8 min |
+| lfm 16K | 6.4 min | 3.7 min |
+| lfm 32K | 7.3 min | 10.0 min |
+
+Discover wins on the 64K MTP model it was designed around (ornith: 52 → 18 min) and on 32K, and loses on the three small models. Per-rung cost on lfm 8K is about 43 s, of which the residency probe is about 25 s (its 20 s minimum floor plus the kill), the restart about 10 s, and the prefill probe itself 1 to 2 s. On top of that each model pays a decode baseline at rung 256 (~50 s) and a decode sample at the pick (~50 s). For a model with no MTP draft and no `override-tensor`, none of those three measurements can change the answer: there is no draft to spill, and decode does not depend on batch. They exist for the MTP and CPU-offload classes.
+
+**Change A — non-MTP shortcut.** In `cmd_bisect_discover`, when the section has no `spec-type = draft-mtp` and no `override-tensor`: run `residency_probe` at rung 256 only (to set MODE), skip it on later rungs, skip `DEC_BASE`, and skip the pick decode sample and cliff check. Saturation, long-decode and the OOM gates stay. Expected: lfm-class ladders drop from ~45 s to ~15–20 s per rung and lose ~100 s of decode samples, so roughly 5–7 min → 3–3.5 min per model, at or below the 09-05 pipeline. This applies to about 40 of the 73 entries (GLM, gpt-oss non-MTP, lfm, qwen non-MTP, llama3).
+
+**Change B — residency `AMBIGUOUS` is costing 80 s per rung on gemma.** In the 07:39 run three of six rungs returned `AMBIGUOUS (avg cpu 100.6% / 104.9% / 101.8%)`. The GPU rule requires `cpu < 100`, gemma's decode idles one core at 100–105%, so the early-kill never triggers and the probe runs its full 40-sample window (80 s) instead of ~25 s. A real draft spill measures 270 to 1600% (every documented case). Raise the GPU threshold to `cpu < 150` with GPU utilisation active, both in the early-kill rule and the fallback average, keep `> 200` as CPU. Saves ~55 s on each such rung, about 3 min on that ladder.
+
+### 30.2 The pick: 1024 versus 2048 — the user is right, and the earlier author statement was wrong
+
+Correction: the author's first reply claimed the previous pipeline had chosen 1024/1024/1024/2048 for the lfm family. That was read from `models.ini` and the JSON files at HEAD *after* the user's 07:38 commit of today's results. Git history (`64789c1`, 2026-09-05, and every `models.ini` commit from 09-06 to 09-07) shows the previous picks were **1024, 2112, 2176, 3008**. Discover replaced three of them with smaller values. Measured cost, from the bench records at the same 75%-ctx prompt:
+
+| model | previous batch → prefill | discover batch → prefill | prefill change |
+|---|---|---|---|
+| lfm 4K | 1024 → 6697 t/s | 1024 → 6553 t/s | same batch; −2% is day-to-day noise |
+| lfm 8K | 2112 → 6907 t/s | 1024 → 6828 t/s | −1.1% |
+| lfm 16K | 2176 → 7112 t/s | 1024 → 6830 t/s | −4.0% |
+| lfm 32K | 3008 → 6675 t/s | 2048 → 6641 t/s | −0.5% |
+
+(Decode is 7–8% lower in every new record including the same-batch 4K one; that is the natural-stop measurement replacing the forced 4000-token one, not a batch effect.)
+
+So the "smallest within 3%" rule gave up 1 to 4% prefill on this family for headroom that these models do not need. The ladder itself had the right answer each time: 2048 was the best-measured rung on 8K, 16K and 32K, matching the previous picks (2112, 2176) to within the ladder's granularity. The tie-break, not the search, produced the regression.
+
+**Change C — default `PREFILL_TOL=0`.** The pick becomes the best-measured rung (2048 on lfm 8K and 16K, 4096 on lfm 4K, 2048 on 32K). Keep the constant so anyone who wants headroom can set it back to 0.03; document both in `AGENTS.md`. Note the consequence honestly: on a flat plateau the best-measured rung is noise-selected and may differ between runs. That is acceptable because the candidates are equivalent within measurement.
+
+### 30.2b Resolution between rungs
+
+The user notes discover no longer resolves to 64 tokens. Deliberate: adjacent 64-steps in the 16:45 golden-section run differed by up to 3% in either direction, which is single-probe noise, so the old 2112 and 2176 picks are not distinguishable from 2048. The one case the doubling ladder genuinely cannot see is a peak *between* rungs on a curve that is not flat: lfm 32K's previous pick of 3008 (6675 t/s at bench against 6641 at 2048) and gpt-oss (rises to 2048, falls at 4096; previous pick 2112) both have that shape.
+
+**Change D (superseded by E below).** A fixed single midpoint pass is too coarse where it matters: between 4096 and 8192 one midpoint still leaves 2048-wide gaps, and the user's point is that the old 64-token bisect existed to resolve exactly those ranges.
+
+**Change E — noise-aware refinement, with resolution that scales with the value.** After the ladder, classify the best-measured rung and refine accordingly. Every refinement step is one restart plus the cheap rung measurements (tiny probe → residency, per Change A → sized prefill); no saturation per step.
+
+1. **Interior peak** (PASS rungs on both sides of the best): test the midpoint toward each neighbour, rounded to 64. Move toward the better side and repeat only while the new point beats the current best by more than `PREFILL_NOISE=0.03`. Stop when the gap is ≤ `max(256, 6% of current best)`. Typically 2 steps, at most 4. Rationale: inside a flat or falling range every point measures the same within noise, so finer steps only pick the sample that landed high.
+2. **Ceiling edge** (best is the top PASS rung and the next rung failed with OOM/SPILL): bisect between them. Stop when the gap is ≤ `max(64, 6% of the lower bound)`: a 256/512 edge resolves to 64 (small-ceiling MoE class, where 448 vs 256 is a real 75% difference on the steep part of the curve), a 4096/8192 edge to about 256 to 512 (where further steps no longer move prefill). If a midpoint's prefill measures more than `PREFILL_NOISE` below the lower bound, the peak is not at the ceiling: stop bisecting and apply rule 1 from the lower bound. At most 5 to 6 steps.
+3. **Pick** = best-measured point across ladder and refinement (Change C). **Confirm** as today (saturation + long-decode + cliff check for MTP). On a confirm failure at a refined point, step down through the refinement points below it, largest first, at most twice; then fall back to the top ladder rung below and confirm that; then fail the model.
+4. Record every refinement point in the JSON ladder list with `status: REFINE` and the rule that produced it.
+
+Cost: zero extra restarts on a flat curve, about 1 to 2 minutes on an interior peak, at most about 4 minutes when the ceiling is the optimum. This restores the old resolution exactly where it was producing information (memory-limited ceilings) without the saturation test per step that made the old bisect cost 25 minutes on a 64K model.
+
+### 30.3 Optional hardening seen in the same run
+
+The MTP tuner switches p_min away from 0.7 when one sample beats the reference by more than 5%. With ±5% single-sample noise that will occasionally fire on a fluke. Require a confirming second sample of the candidate before switching (one extra run only when a candidate appears to win). Not urgent; the 07:39 run ended up keeping 0.7 correctly.
+
+### 30.4 Acceptance for A–C and E
+
+Re-run `bench.sh --no-inherit --strict all` on the four lfm models and on `gemma-4-12b-q4-qat-mtp-16k`. Expect: lfm bisect ≤ 5 min each with residency logged once per model; gemma ladder with no `AMBIGUOUS` verdicts and no 80 s residency windows; picks equal to the best-measured point including refinement (lfm 8K/16K/32K within one refinement step of the previous 2112/2176/3008). Add one ceiling-edge model: `qwen-3.6-35b-a3b-q4-mtp-64k` (previous pick 448 between rungs 256 and 512) must resolve its edge to 64 and land within 64 of a value that passes saturation. No change to the ornith-class budget except the AMBIGUOUS saving.
