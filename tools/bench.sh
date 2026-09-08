@@ -1892,7 +1892,7 @@ c=Counter(ng); print(round(sum(v for v in c.values() if v>1)/len(ng),4))
       MEANLEN=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -oE "mean len = [0-9.]+" | tail -1 | awk '{print $4}')
       local SHORT_TAG=""
       [ "${TOKENS:-0}" -lt "$MIN_DECODE_TOKENS" ] && SHORT_TAG=" (SHORT: ${TOKENS} tokens < $MIN_DECODE_TOKENS)"
-      plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-?} | placement=$PLACEMENT (cpu ${AVG_CPU}%) | degeneracy=${QUALITY:-?} | tokens=${TOKENS:-0} | finish=$FINISH | OOM=$OOM$SHORT_TAG"
+      plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-n/a} | placement=$PLACEMENT (cpu ${AVG_CPU}%) | degeneracy=${QUALITY:-?} | tokens=${TOKENS:-0} | finish=$FINISH | OOM=$OOM$SHORT_TAG"
       echo "$SPEED|${ACCEPT:-}|$PLACEMENT|${AVG_CPU:-0}|${QUALITY:-0}|$OOM|${TOKENS:-0}|${MEANLEN:-}|${FINISH:-}"
       return 0
     fi
@@ -1919,7 +1919,7 @@ run_decode_test() {
   fi
   local SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH
   IFS='|' read -r SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
-  plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-?} | placement=$PLACEMENT (cpu ${AVGCPU:-0}%) | degeneracy=${QUALITY:-?} | tokens=${TOKENS:-0} | OOM=$OOM"
+  plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-n/a} | placement=$PLACEMENT (cpu ${AVGCPU:-0}%) | degeneracy=${QUALITY:-?} | tokens=${TOKENS:-0} | OOM=$OOM"
   echo "$SPEED|$ACCEPT|$PLACEMENT|$AVGCPU|$QUALITY|$OOM|$TOKENS|$MEANLEN|$FINISH"
 }
 
@@ -2458,8 +2458,11 @@ else:
 "
 }
 
-# Phase-1 winner with the §6.2 tie rule: pick the highest-mean n_max; if the
-# runner-up mean is within MTP_TIE of the best, pick the smaller of the two.
+# Phase-1 winner with the §6.2 tie rule (plan §25#3): pick the smallest n_max
+# whose mean is within MTP_TIE of the best mean. Unlike a best-vs-runner-up test,
+# this considers every measured candidate, so a low n_max that is within tolerance
+# (e.g. n_max=2 when 4 is best but 2 is within 5%) is preferred for draft-buffer
+# headroom, independent of measurement order.
 mtp_phase1_winner() {
   MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS MTP_TIE="$MTP_TIE" python3 -c '
 import os, sys
@@ -2471,17 +2474,17 @@ for ln in open(os.environ["MTP_SAMP"]):
     try: tps = float(p[2]); tok = int(p[3]); oom = int(p[7])
     except Exception: continue
     if oom or p[4] == "CPU" or tok < int(os.environ["MTP_MIN"]): continue
-    rows.append((p[0], tps))
+    rows.append((int(p[0]), tps))
 agg = {}
 for nm, t in rows: agg.setdefault(nm, []).append(t)
 rank = sorted(((nm, sum(l) / len(l)) for nm, l in agg.items()), key=lambda x: -x[1])
 if not rank:
     sys.exit(1)
-best = rank[0]
-if len(rank) > 1 and rank[1][1] >= best[1] * (1 - float(os.environ["MTP_TIE"])):
-    print(min(int(best[0]), int(rank[1][0])))
-else:
-    print(int(best[0]))
+best_mean = rank[0][1]
+threshold = best_mean * (1 - float(os.environ["MTP_TIE"]))
+# smallest n_max whose mean >= threshold
+winner = min((nm for nm, m in rank if m >= threshold), key=lambda x: (int(x), ))
+print(winner)
 '
 }
 
@@ -3087,7 +3090,10 @@ import json
 filler = 'The history of computing is long and complex. '
 n = $PROBE_CHARS
 prompt = (filler * ((n // len(filler)) + 1))[:n]
-payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
+# cache_prompt:false so no prefix of the prompt is served from the slot's prompt
+# cache (measure_ratio runs a filler prefix just before rung 256); otherwise the
+# log-parsed throughput is a few-token figure, not the full probe (plan §25#2).
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True,'cache_prompt':False}
 with open('/tmp/pp_sized.json','w') as f: json.dump(payload, f)
 "
     fire_request /tmp/pp_sized.json /tmp/pp_sized_out.json "prefill-sized" "$(adaptive_timeout 1)"
@@ -3730,9 +3736,10 @@ except: print(0)
 
   # ── Phase A: PREFILL (75%-ctx prompt, max_tokens=1) ─────────
   # Phase B decode uses the natural-stop DECODE_PROMPT (see below); max_tokens is
-  # only a safety cap so the decode window fits even on small-ctx models.
-  local DECODE_MAX_TOKENS=$((CTX - 150))
-  [ "$DECODE_MAX_TOKENS" -gt 4000 ] && DECODE_MAX_TOKENS=4000
+  # only a safety cap so the decode window fits even on small-ctx models. Match
+  # decode_sample's formula max(256, min(4000, ctx-256)) (plan §25#4).
+  local DECODE_MAX_TOKENS
+  DECODE_MAX_TOKENS=$(python3 -c "print(max(256, min(4000, $CTX - 256)))")
 
   python3 -c "
 import json
@@ -3954,21 +3961,36 @@ def load_val(flag):
     block = load_logs[max(0, m.start() - 2000):m.start()]
     m2 = re.search(re.escape(flag) + r'\s*\n[^\n]*load:\s*(\S+)', block)
     return m2.group(1) if m2 else None
+def _num(x):
+    # load_val returns the raw string; coerce to int/float so n_max_loaded and
+    # p_min_loaded match the numeric configured_n_max/p_min types (plan §25#6).
+    if x is None: return None
+    try: return int(x)
+    except ValueError: pass
+    try: return float(x)
+    except ValueError: return x
 print(json.dumps({
     'acceptance': float(acc.group(1)) if acc else None,
     'draft_accepted': int(acc.group(2)) if acc else None,
     'draft_generated': int(acc.group(3)) if acc else None,
     'draft_mean_len': float(acc.group(4)) if acc else None,
-    'n_max_loaded': load_val(r'--spec-draft-n-max'),
-    'p_min_loaded': load_val(r'--draft-p-min'),
+    'n_max_loaded': _num(load_val(r'--spec-draft-n-max')),
+    'p_min_loaded': _num(load_val(r'--draft-p-min')),
 }))
 ")
 
   log ""
   log "=== RESULTS ==="
+  # Write the speed/request summary to BOTH the log file and stdout (plan §25#5:
+  # previously it went to stdout only, so a run's published figures were absent
+  # from the log). Single python appends to $LOG_FILE and echoes to stdout.
   python3 -c "
-import json; d=json.loads('''$SPEED''')
-for k,v in d.items(): print(f'  {k}: {v}')
+import json
+d=json.loads('''$SPEED''')
+out=''
+for k,v in d.items(): out += f'  {k}: {v}\n'
+open('$LOG_FILE','a').write(out)
+print(out, end='')
 "
   log "  placement: $PLACEMENT (avg_cpu: ${AVG_CPU}%, avg_gpu: ${AVG_GPU}%)"
 
@@ -3976,7 +3998,7 @@ for k,v in d.items(): print(f'  {k}: {v}')
 
   # Write JSON
   python3 - << PYEOF
-import json, datetime, os
+import json, datetime, os, sys
 speed = json.loads('''$SPEED''')
 meta = json.loads('''$META''')
 mtp = json.loads('''$MTP''')
@@ -4000,6 +4022,19 @@ _mtp_tuning = {
     'tuning_samples': status.get('samples') if status and status.get('samples') is not None else [],
     'tuning_written_at': status.get('written_at') if status else None,
 }
+
+# Stale-status guard (plan §25#1): if the status file says "ok" but the tuned
+# values do not match what the ini/server actually loaded (configured_n_max /
+# configured_p_min), the tune is not in effect for this record (e.g. models.ini
+# was reverted, or a newer tune superseded the status file). Relabel it "stale"
+# but keep the tuned values for reference, and surface it on stderr via the log.
+if _mtp_tuning['tuning_status'] == 'ok':
+    _cn = meta['mtp'].get('n_max'); _cp = meta['mtp'].get('p_min')
+    _tn = _mtp_tuning['tuned_n_max']; _tp = _mtp_tuning['tuned_p_min']
+    if (_tn is not None and _tn != _cn) or (_tp is not None and _tp != _cp):
+        _mtp_tuning['tuning_status'] = 'stale'
+        _mtp_tuning['tuning_reason'] = 'status ok but tuned n_max/p_min (%s/%s) != configured (%s/%s)' % (_tn, _tp, _cn, _cp)
+        sys.stderr.write('[bench] WARNING: mtp tuning_status %s (tuned %s/%s != loaded %s/%s)\n' % (_mtp_tuning['tuning_status'], _tn, _tp, _cn, _cp))
 
 # Merge the §4.5 discover-ladder result (/tmp/discover_<model>.json) if present.
 # cmd_bisect_discover writes it; a thorough or bench-only run has none → discover={}.
@@ -4062,8 +4097,16 @@ data = {
 
 with open('$JSON_FILE', 'w') as f:
     json.dump(data, f, indent=2)
-print("JSON written to $JSON_FILE")
 PYEOF
+
+  # Verify the JSON was actually written and is newer than this run's start
+  # (plan §25#5): a failed/partial write must not reach '=== DONE ===' as a pass.
+  if [ ! -f "$JSON_FILE" ] || [ ! -s "$JSON_FILE" ] \
+     || [ "$(stat -c %Y "$JSON_FILE" 2>/dev/null || echo 0)" -lt "$REQUEST_START" ]; then
+    log "  ERROR: JSON not written or stale at $JSON_FILE — failing bench"
+    return 1
+  fi
+  log "  JSON written to $JSON_FILE"
 
   log "=== DONE: $MODEL ==="
 }
