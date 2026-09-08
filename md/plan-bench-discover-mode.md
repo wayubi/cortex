@@ -936,3 +936,11 @@ No further §27 items remain. Handover stands: run family heads with
 gemma ladder that residency `stream: true` removed the `prefill-sized: still
 running (30x2s)` waits; §8 sibling seeding stays deferred until that
 re-benchmark shows how close context siblings' picks land.
+
+---
+
+## 29. Author sign-off (2026-09-08)
+
+Reviewed `a0e2ff5`: the stale-status warning is appended to `$LOG_FILE` and still written to stderr, inside a try block so a log write failure cannot interrupt the JSON write. That was the last open item. `bash -n` clean, working tree clean.
+
+**The implementation meets the plan. No further review items.** The handover in §27.3 stands: family heads with `--no-inherit --strict`, siblings inherit, confirm the residency streaming effect on the first slow-decode ladder, sibling seeding deferred.
