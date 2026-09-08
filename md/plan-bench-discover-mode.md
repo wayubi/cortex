@@ -35,7 +35,7 @@ Per family head, `discover` mode must produce the same three settings the curren
 | GPU-resident, MTP | ≤ 11 | 2 (saturation + long-decode, same restart) | 15 to 20 min |
 | GPU-resident, non-MTP | ≤ 10 | 2 | 12 to 18 min |
 | CPU-compute (`override-tensor=exps=CPU`, gpt-oss) | ≤ 9 | 2 | 12 to 18 min |
-| MTP tuning (all MTP classes) | ≤ 8 decode runs | 0 | 8 to 12 min |
+| MTP tuning (all MTP classes) | 6 to 8 decode runs typical, 10 worst case | 0 | 8 to 14 min |
 
 Today's numbers for comparison: 37 restarts, 12 full-context runs, 52 min for batch; 11 decode runs for MTP.
 
@@ -94,7 +94,7 @@ for B in rungs:
                               → CPU at first rung (B=256): MODE=CPU, continue this rung (do not break)
                               → CPU at a later rung:       record (B, SPILL); break
                               → GPU/AMBIGUOUS:             MODE=GPU (AMBIGUOUS counts as not-proven-CPU, same as today)
-    prefill = prefill_probe_sized(B, ctx)   # see 4.2
+    prefill = prefill_probe_sized(ctx)      # see 4.2 — same prompt length for every rung
                               → 0 with OOM marker: record (B, OOM); break
                               → 0 without marker:  record (B, STALL); exit 1
     record (B, PASS, prefill)
@@ -117,16 +117,16 @@ Both existing prefill probes have a flaw for this use:
 - `prefill_probe` caps at 32000 chars (~6400 tokens). Testing batch 8192 or 16384 with a 6400-token prompt never fills one ubatch, so the measurement says nothing about that batch.
 - `decode_guarded_probe` in prefill mode uses 75% of ctx, which at 198K to 256K is a 2.5 to 4 minute request per rung.
 
-Write one function, `prefill_probe_sized B CTX`, that reuses `prefill_probe`'s body (log-parsed `prompt eval time`, overflow-shrink retry, OOM check) with prompt size:
+Write one function, `prefill_probe_sized CTX`, that reuses `prefill_probe`'s body (log-parsed `prompt eval time`, overflow-shrink retry, OOM check) with a prompt size that is **the same for every rung of one model** (revised after review Q8, see §14):
 
 ```
-tokens = clamp( max(8192, 2 × B),  lower = 1024,  upper = floor(0.75 × ctx) )
-chars  = tokens × CHARS_PER_TOK   (call measure_ratio once at rung 256; fallback 4.0)
+PROBE_TOKENS = min( floor(0.75 × ctx), 16384 )      # computed once per model, before the ladder
+chars        = PROBE_TOKENS × CHARS_PER_TOK          # measure_ratio once at rung 256; fallback 4.0
 ```
 
-At least two full ubatches are processed whenever ctx allows it. When `2 × B > 0.75 × ctx` (small-ctx models at their top rungs) log `under-exercised` next to the measurement; the smallest-within-tolerance rule (§4.3) resolves those ties toward the smaller batch, which is the right answer there anyway.
+Why one length: prefill t/s falls with prompt length (attention cost grows with position), so probing a bigger batch with a longer prompt would bias the ranking against it. With a fixed length the rungs are compared on identical work. 16384 tokens fully exercises every rung up to 8192 (two or more ubatches) and runs rung 16384 as a single ubatch, which is labelled `single-ubatch` in the log but ranked normally. On models with ctx ≤ 21K the length is 75% of ctx for every rung, which is the largest realistic prompt for that model, so the ranking reflects real use; rungs at or above that length are labelled `single-ubatch` too.
 
-`prefill_probe`'s existing warm-up (one untimed request, then the timed one) must be preserved: the first request after a restart includes model load and would otherwise dominate.
+No separate warm-up request: `tiny_probe` already ran on this server instance immediately before, so the model is loaded and the CUDA graphs are warm. (`prefill_probe`'s untimed warm-up request stays for `--thorough`, which calls the old function.)
 
 ### 4.3 Phase B — select
 
@@ -150,12 +150,20 @@ saturation_test ctx            → rc 0 PASS; rc 2 exit 1 (STALL); any other rc 
 long_decode_check              → rc 0 PASS; rc 2 exit 1; rc 1 → step down
 if MODE == GPU:
     DEC_PICK = decode_sample()  # §5; runs on the same server instance
-    cliff check:
-        if DEC_PICK.placement == CPU  or  DEC_PICK.tps < DEC_BASE.tps × DECODE_CLIFF (0.70):
-            log "decode cliff at PICK (base X t/s @256, pick Y t/s, cpu Z%)" ; step down
-        elif DEC_PICK.tps < DEC_BASE.tps × 0.90:
-            log WARN (no CPU signature; keep PICK)     # noise band, never a failure
+    cliff check (revised after review Q3, see §14):
+        if DEC_PICK.placement == CPU:                       # definitive signature → step down
+            log "draft/KV spill at PICK (cpu Z%)"; step down
+        elif DEC_BASE is SHORT or DEC_PICK is SHORT:        # no usable speed pair
+            log "cliff speed check skipped (SHORT sample); placement GPU at PICK"   # keep PICK
+        elif DEC_PICK.tps < DEC_BASE.tps × DECODE_CLIFF (0.70):
+            DEC_PICK2 = decode_sample()                     # one re-sample, same instance
+            if mean(DEC_PICK.tps, DEC_PICK2.tps) < DEC_BASE.tps × DECODE_CLIFF: step down
+            else: log WARN "first sample slow, re-sample recovered"
+        elif DEC_PICK.tps < DEC_BASE.tps × DECODE_WARN (0.90):
+            log WARN (no CPU signature; keep PICK)          # noise band, never a failure
 ```
+
+`DEC_BASE` stays a single sample: the cliff threshold is a 30% drop, and a genuine spill is a 3 to 4x drop with a CPU signature that the first branch catches on its own. `decode_sample` already retries once with the longer prompt before returning `SHORT`, so no extra retry is needed here.
 
 **Step down:** move PICK to the next lower PASS rung from the ladder (or the lower edge-refinement point), restart, and repeat Phase C. Maximum 2 step-downs, then fail the model with the existing "inspect logs; re-run" message and restore the original batch via the existing EXIT trap. This bounds the worst case at 3 confirm restarts.
 
@@ -243,7 +251,24 @@ Run count: 7 to 8 decode runs, each ~70 to 100 s on a 9B, so 8 to 12 minutes. To
 
 Keep the existing EXIT-trap restore of the original `n_max`/`p_min` on failure. Failures now are only: STALL, every candidate rejected by placement/OOM, or every sample SHORT.
 
-**Always include the ini's current `n_max` in the candidate set.** The batch ladder (§4) validated residency at whatever `n_max` was in the ini (ornith has 3, gemma has 4). Measuring that value guarantees at least one candidate passes the placement gate, so "every candidate rejected" cannot happen except through noise. If the ini value is 3, Phase 1 measures {2, 3, 4} and skips the 5-vs-3 branch unless 4 beats 3 by more than 5%.
+**Always include the ini's current `n_max` in the candidate set** (precise rule, revised after review Q6, see §14). The batch ladder (§4) validated residency at whatever `n_max` was in the ini (ornith has 3, gemma has 4), so that value is guaranteed to pass the placement gate. Let `cur` = the ini value (`mtpcheck` writes 2 when absent). Then:
+
+```
+Phase 1  n_max, all at p_ref = 0.7:
+    S = sorted(dedup{2, 4, cur})            # 2 or 3 values
+    measure every value in S                (2 or 3 runs)
+    b = best tps among valid samples (placement GPU, oom 0, not SHORT)
+    if b+1 ∉ S and b+1 ≤ 6: measure b+1     (≤ 1 run)
+    if b-1 ∉ S and b-1 ≥ 2: measure b-1     (≤ 1 run)
+    re-measure the best and the runner-up once (2 runs); rank on the mean of their two samples
+    WIN_NMAX = best mean; if runner-up mean ≥ best × (1 - MTP_TIE): WIN_NMAX = the smaller of the two
+Phase 2  p_min at WIN_NMAX:
+    reference = WIN_NMAX's samples at p_ref (always exists, Phase 1 runs at 0.7)
+    P = dedup{0.5, 0.9, ini p_min} minus 0.7  (2 or 3 runs)
+    WIN_PMIN = fastest; if within MTP_TIE of the 0.7 reference, keep 0.7
+```
+
+Run count: 6 to 8 typical, 10 worst case (`cur` ∉ {2,4}, both neighbours untested, ini p_min ∉ {0.5,0.7,0.9}). `n_max` is bounded to [2, 6]: 1 disables speculation in effect, and `AGENTS.md` records no gains above 6 on any family.
 
 ### 6.4 MTP failure must be visible downstream (fixes the 16:45 misreport)
 
@@ -258,7 +283,7 @@ Today a failed `cmd_mtp` restores the pre-run values, then `cmd_bench` runs anyw
    `cmd_mtpcheck` writes `{"status":"not_mtp"}` when the model is not MTP-capable, so `cmd_bench` can always distinguish "not applicable" from "tuning failed" from "tuning never ran".
 2. **`cmd_bench` merges it into the JSON** under `mtp`: add `tuning_status` (`ok` / `failed` / `stall` / `not_mtp` / `not_run`), `tuning_reason`, `tuned_n_max`, `tuned_p_min`, `tuning_samples`. Rename the existing `n_max_confirmed` / `p_min_confirmed` to `n_max_loaded` / `p_min_loaded`, because that is what they are. `tools/gen_metrics.sh` reads `configured_n_max` / `configured_p_min` only, so the rename breaks no consumer; grep the repo for the old names before renaming.
 3. **Orchestrator behaviour on `mtp` FAIL.** The batch result is valid independently of MTP, so `cmd_bench` still runs by default, but the record must say what it measured: the verdict table already shows `mtp FAIL`; the JSON now carries `tuning_status: failed` and `tuned_n_max: null`. Add a `--strict` flag (global, next to `--thorough`) that skips `bench` when `mtp` failed and marks the verdict `SKIPPED (mtp failed)`, for runs whose purpose is to produce publishable records. Apply the same rule in both `reset_parent_full` and the main loop of `run_full_suite`.
-4. **`inherit_json` must not spread unvalidated MTP values.** Copy `spec-draft-n-max` / `p-min` to siblings only when the parent JSON has `tuning_status == "ok"`. Otherwise leave the sibling's own values alone and log `MTP values NOT inherited (parent tuning_status=<x>)`. Batch and the rest of the JSON still inherit. Parent JSONs written before this change have no `tuning_status`; treat missing as `ok` for backward compatibility and log that assumption.
+4. **`inherit_json` must not spread unvalidated MTP values.** Copy `spec-draft-n-max` / `p-min` to siblings only when the parent JSON has `tuning_status == "ok"`. Otherwise leave the sibling's own values alone and log `MTP values NOT inherited (parent tuning_status=<x>)`. Batch and the rest of the JSON still inherit. Parent JSONs written before this change have no `tuning_status`; treat missing as `unknown` (MTP values **not** inherited, batch still inherited) and log `parent JSON predates tuning_status; re-run 'bench.sh mtp <parent>' to stamp it`. (Revised after review Q7: the old `n_max_confirmed` field cannot prove tuning succeeded, so it must not be trusted for propagation.)
 
 In discover mode the degeneracy false-failure that triggered the 16:45 misreport no longer exists (§6.1), and §6.2's "always include the ini's n_max" rule makes placement rejection of every candidate effectively impossible. Part 1 to 4 are still required so that the remaining failure modes (STALL, all samples SHORT) are recorded truthfully.
 
@@ -319,9 +344,10 @@ THOROUGH=0
 
 ## 11. Implementation order and acceptance checks
 
-Work in this order; each step must pass its check before the next.
+Work in this order; each step must pass its check before the next. Land each step as its own commit; the default stays on the old path until step 4 flips it, so a half-landed branch never changes what a normal run does.
 
-1. **§5 decode measurement + acceptance parse fix.** Check: `bench.sh mtp <one small MTP model, e.g. gemma-4-12b-q4-qat-mtp-16k>` with the *current* sweep prints a numeric `acc=` and `tokens=` on every line and no result has `finish_reason=length` unless the cap was hit.
+0. **§6.3 `mtpverify`, run as a premise test** (added after review Q1). Implement the subcommand, then run it on `gemma-4-12b-q4-qat-mtp-16k` and `qwen-3.5-9b-q4-mtp-16k` with request-level `temperature: 0`, `seed: 42`, `max_tokens: 1024`, MTP off then on, same prompt, and compare token ids. Pass criterion: the first 200 tokens are identical on both models. A later divergence is expected numerical drift between batched verification and single-token decode and does not fail the test; log the divergence index. If either model diverges inside the first 200 tokens, stop and report before implementing §6: the fallback design is to keep a degeneracy gate but measured on natural-stop output with two samples per config and no single-sample confirm failures. The llama.cpp source is not in this repo (the Dockerfile clones master at build time); the acceptance rule lives in `common/sampling.cpp`, function `common_sampler_sample_and_accept_n`, for anyone who wants to read it.
+1. **§5 decode measurement + acceptance parse fix.** These are bug fixes and apply to `--thorough` too: thorough mode preserves the old *search*, not the old broken measurement. Check: `bench.sh mtp <one small MTP model, e.g. gemma-4-12b-q4-qat-mtp-16k>` with the *current* sweep prints a numeric `acc=` and `tokens=` on every line and no result has `finish_reason=length` unless the cap was hit. Also record the degeneracy of every clean run with the new `DECODE_PROMPT`: if clean structured output scores above 0.05, the metric is picking up section scaffolding, and the fix is to strip heading lines (lines starting with `#`) before the 8-gram count, not to raise the WARN threshold.
 2. **§4 `cmd_bisect_discover` behind a temporary env `BENCH_DISCOVER=1`.** Check on three models, one per class, counting `Restarting llama-cpp` lines in the log:
    - `lfm-2.5-8b-a1b-q4-4k-think` (small ctx, non-MTP): ≤ 7 restarts, saturation PASS, pick ≤ 4096.
    - `gemma-4-12b-q4-qat-mtp-16k` (dense MTP): ≤ 11 restarts, pick GPU-resident, saturation and long-decode PASS. Pick expected in the 512 to 2048 band (current value 1408).
@@ -365,3 +391,27 @@ These were raised during a code review of the plan. The reviewing agent did **no
 **Q8 (§2 / §4 small-ctx under-exercising).** For a 4K-ctx model, top-rung `prefill_probe_sized` is clamped to `floor(0.75 × ctx) ≈ 3072` tokens < `2 × B`. If prefill is still rising at the ceiling (the "ceiling is optimum" MoE class), under-exercising the top rung could mis-rank it. Confirm the under-exercised handling does not mis-rank a genuinely still-rising ceiling.
 
 **Q9 (scope sizing).** This plan splits `cmd_bisect` (~310 lines) and `cmd_mtp` (~180 lines) into discover/thorough variants and adds `decode_sample`, `prefill_probe_sized`, status plumbing across four-plus functions, `--thorough` / `--strict` flags, JSON schema changes, and the AGENTS.md rewrite — roughly 400–600 changed/new lines in a 3146-line file. Confirm full implementation is intended in one pass (per the review) rather than a staged landing behind a temporary env, and that `--thorough` is expected to also absorb the §5 decode measurement + acceptance-parse fixes (i.e. its decode basis changes too, not purely preserved).
+
+---
+
+## 14. Answers to the §13 review questions (2026-09-07)
+
+Where an answer changed the plan, the section above is already revised and marked "revised after review Qn".
+
+**Q1 — `mtpverify` as a gating step 0: yes.** Added as step 0 in §11 with a concrete pass criterion (first 200 tokens identical at temperature 0, seed 42, on both named models) and a concrete fallback if it fails (degeneracy gate retained, but measured on natural-stop output with two samples per config and no single-sample confirm failure). It costs two restarts per model. Note the criterion deliberately ignores late divergence: batched verification and single-token decode use different kernels, and a near-tied logit can flip a token late in a greedy run without any change in output distribution.
+
+**Q2 — structured prompt versus degeneracy: one prompt, calibrate the metric, do not raise the threshold.** The metric counts repeated 8-word spans. Twelve sections on twelve different eras share headings shorter than eight words and little else, so clean output should stay under 0.05. The check in §11 step 1 now records degeneracy on clean runs with the new prompt; if scaffolding does register, the fix is to strip heading lines before counting. A separate non-enumerative prompt would reintroduce the short-stop problem and double the run count for a diagnostic that is no longer a gate.
+
+**Q3 — single-sample baseline and SHORT handling: tightened.** §4.4 now steps down on the CPU placement signature alone (definitive), re-samples once before stepping down on a speed-only drop below 70%, and skips the speed comparison (keeping the placement check) when either sample is SHORT. The baseline stays one sample because the threshold is wide and the definitive signal does not depend on it. `decode_sample` already retries once with the longer prompt before reporting SHORT.
+
+**Q4 — early break leaves the ceiling unbounded: acceptable, and it cannot block edge refinement.** The break fires only after two PASS rungs measured *below* the best, which means the best rung is not the top PASS rung. Edge refinement triggers only when the pick *is* the top PASS rung and the next rung failed, which requires the ladder to have ended on a failure, not a break. The two conditions are mutually exclusive. When the ladder breaks early the result block reports `ceiling(coarse) ≥ <last PASS rung> (not probed higher)`; the coarse ceiling is informational and nothing downstream consumes it. Running to CAP regardless would cost 3 to 5 extra restarts on the flat-plateau models that are the common case. On the 64K log specifically the break would not even have fired: 4096 was only 2.1% below the best, so the ladder reaches the 16384 spill anyway.
+
+**Q5 — same-instance saturation then long-decode: safe, and the script already relies on it.** llama.cpp server keeps the slot's KV between requests and, on a new request, reuses only the longest common prefix with the cached tokens; everything after it is discarded and the new prompt is processed from that point. A long-decode essay prompt shares only the chat-template prefix with the filler saturation prompt, so it starts from a near-empty context. Two existing code paths depend on exactly this: `saturation_test` runs its sizing probes and its Phase 2 request on one instance (the in-code comment on `SAT_PREFILL_TPS` describes the LCP reuse), and `cmd_bench` runs its 75%-ctx prefill then its decode on one instance; the 16:45 log shows that decode completing normally with `cache_n: 0` after a 49K-token prefill. The flash-attention VMM pool grown during saturation is retained, which makes the subsequent long-decode a slightly *stricter* memory test than a fresh restart would be, which is the safe direction. Implementer verification: after the confirm step, grep the server log for the long-decode request's `n_past` (or `prompt processing progress ... n_past = N`) and confirm N is the template-prefix length, not ~ctx. The source is not pinned in this repo (the Dockerfile clones master), so this is verified by behaviour, not by reading the build's code.
+
+**Q6 — candidate-set construction: specified.** §6.2 now gives the exact rule: `S = dedup{2, 4, cur}` at `p_ref = 0.7`, then the untested neighbours of the best within [2, 6], then one re-sample of best and runner-up. `cur` is always measured at 0.7 so its sample doubles as the Phase 2 reference. Phase 2 tests `dedup{0.5, 0.9, ini p_min}` minus 0.7. Worst case is 10 runs, typical 6 to 8.
+
+**Q7 — old JSONs: treat as `unknown`, do not inherit MTP values.** Agreed and changed in §6.4 part 4. The old field only proves what the server loaded. Batch still inherits. The log line tells the operator how to stamp the parent (`bench.sh mtp <parent>`).
+
+**Q8 — small-ctx under-exercising: it does not mis-rank, and the question exposed a bigger fairness problem that is now fixed.** On a 4K model every rung is now probed with the same 3072-token prompt, so batch 4096 and batch 2048 are compared on identical work; if the single 3072-token ubatch is genuinely faster than 2048 + 1024, rung 4096 wins on merit, and if they tie, the smaller batch wins on the tolerance rule. The bigger problem was in the original §4.2: scaling the prompt with the batch (8K tokens at 4096, 16K at 8192, 32K at 16384) would have penalised large batches because prefill t/s falls with prompt length. §4.2 now uses one prompt length per model, `min(0.75 × ctx, 16384)` tokens, and drops the separate warm-up request because `tiny_probe` already warmed the instance.
+
+**Q9 — scope and landing: staged, six commits, and `--thorough` does absorb the measurement fixes.** §11 already staged the work (discover behind `BENCH_DISCOVER=1` until step 4 flips the default); it now says so explicitly and asks for one commit per step so a partial branch never changes a normal run. The §5 decode fixes and the acceptance parse are bug fixes, not search-strategy choices: `--thorough` keeps the golden-section search, the 64-token bisect and the shortlist gate, but measures decode without forced tokens like everything else. Preserving the loop-inflated decode numbers in thorough mode would preserve the defect this plan exists to remove. Estimated size is about 450 to 600 changed or new lines; no existing function is deleted in this pass.
