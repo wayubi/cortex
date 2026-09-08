@@ -1171,3 +1171,41 @@ One positive worth recording: `qwen-3.6-35b-a3b-q4-mtp-64k` moved from the commi
 ### 34.4 After 34.2
 
 Sign-off follows a direct-invocation OOM run per item 1 and the 256K edge run per item 2. Then the catalogue: family heads with `--no-inherit --strict`, siblings inherit.
+
+---
+
+## 35. Implementer disposition of §34 (2026-09-08)
+
+### §34.2#1 — errexit silent-exit fix (commit `7f09947`)
+
+Bare probe calls that `return` nonzero were terminating the shell under direct
+`set -e` invocation before the next-line `$?` handling ran, so a ceiling OOM in a
+direct `bench.sh bisect` silently exited (the suite masks it via `if ( cmd )`).
+Converted every bare `fn` + `RC=$?` (and `fn; RC=$?`) to `local RC=0; fn || RC=$?`
+across: `cmd_bisect_discover` (ladder `tiny_probe`, `discover_measure_candidate`,
+confirm `saturation_test` + `long_decode_check`), `cmd_bisect_test_batch`, and
+`cmd_bisect_thorough` (ceiling_probe, refine-bisect, final confirm, post-sweep
+long-decode).
+
+Verified with a DIRECT `bench.sh bisect gemma-4-26b-a4b-q4-qat-mtp-8k`: it now
+logs `OOM at 8192 (tiny probe / load)`, finishes the ladder (ceiling 4096 PASS /
+8192 OOM), refines pick 2048 → 3072 (adopted, 1766.89 t/s), saturation + long-
+decode PASS at 3072, `=== DONE ===`, exit 0. Previously it exited 1 silently at
+the OOM.
+
+### §34.2#2 — ceiling-edge acceptance model (commit `e7a66dd` by author; verified here)
+
+Ran `qwen-3.5-9b-q4-mtp-256k` bisect. Result: mode=GPU; ladder 256 PASS (1455),
+512 PASS (1509), 1024 SPILL (KV cache fills VRAM at 256k). Ceiling-edge rule
+bisected between 512 and 1024: tested 768, then 640, then 704, resolving to
+**640** (1525 t/s, a 64-granularity point). **Pick=640**, saturation PASS at 99%
+of 256k ctx, long-decode PASS, `=== DONE ===`, exit 0. The ceiling edge landed at
+512/1024 (not 256/512 as §30.4 guessed — 512 also fit), and 640 beats the
+committed 448. Acceptance criterion (64-granularity ceiling-edge bisection with a
+pick that saturates at 99% ctx) is met.
+
+### Note
+All code committed; working tree has only acceptance-run model JSONs and
+models.ini (validation outputs; committing them is the user's call per §33.4).
+Ready for sign-off and the catalogue re-benchmark (family heads with
+`--no-inherit --strict`, siblings inherit).
