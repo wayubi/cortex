@@ -3185,6 +3185,19 @@ cmd_bisect_discover() {
   local PROBE_TOKENS
   PROBE_TOKENS=$(python3 -c "print(int(min(int($CTX * 0.75), 16384)))")
 
+  # Change A (§30.2): a "simple" non-MTP model has no draft to spill and no
+  # override-tensor (CPU expert offload), so decode is batch-independent. Its
+  # residency can only say GPU (or CPU if it is a genuine CPU-compute model — the
+  # rung-256 probe still sets MODE), and neither DEC_BASE nor the pick decode
+  # sample / cliff check can change the batch answer. Skip residency after rung
+  # 256 and skip the decode baseline + pick decode-sample/cliff for these models.
+  # Saturation, long-decode and the OOM gates are unchanged.
+  local SIMPLE_NONMTP=0
+  if ! grep -q "spec-type.*draft-mtp" <(read_section) \
+     && ! grep -q "override-tensor" <(read_section); then
+    SIMPLE_NONMTP=1
+  fi
+
   # ── Phase A: one ladder, three measurements per rung ──
   log ""; log "=== DISCOVER LADDER (cap=$CAP, prefill probe ~${PROBE_TOKENS} tokens) ==="
   local POINTS=/tmp/discover_points.txt
@@ -3218,8 +3231,10 @@ cmd_bisect_discover() {
     fi
     log "  Tiny PASS @ $B"
 
-    # Residency (skipped entirely once MODE=CPU).
-    if [ "$MODE" != "CPU" ]; then
+    # Residency (skipped entirely once MODE=CPU). Change A: a simple non-MTP
+    # model runs residency once at rung 256 to set MODE; later rungs skip it
+    # (no draft to spill, so the verdict cannot change).
+    if [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$B" -eq 256 ]; }; then
       local R_V
       R_V=$(residency_probe)
       if [ "$R_V" = "STALL" ]; then
@@ -3271,7 +3286,8 @@ cmd_bisect_discover() {
     echo "$B PASS $PF" >> "$POINTS"
 
     # Decode baseline at the first GPU rung (256), after the prefill measurement.
-    if [ "$B" -eq 256 ] && [ "$MODE" = "GPU" ]; then
+    # Change A: skipped for simple non-MTP models (decode is batch-independent).
+    if [ "$B" -eq 256 ] && [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 0 ]; then
       if ! DEC_BASE=$(decode_sample "256-baseline"); then
         log "  STALL during 256 decode baseline — aborting discover"
         exit 1
@@ -3436,8 +3452,10 @@ print(' '.join(out))
 
     # Decode-cliff check (GPU mode only). CPU placement → step down (definitive);
     # SHORT either side → keep; <0.70 → re-sample once then decide; <0.90 → WARN.
+    # Change A: skipped for simple non-MTP models (decode is batch-independent;
+    # the cliff check only guards MTP draft / KV spill, which these cannot have).
     local CONFIRM_OK=1
-    if [ "$MODE" = "GPU" ]; then
+    if [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 0 ]; then
       local DEC_PICK
       if ! DEC_PICK=$(decode_sample "pick-confirm"); then
         log "  STALL during pick decode sample — aborting"; exit 1
