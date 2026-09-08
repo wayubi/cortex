@@ -3390,14 +3390,19 @@ print(' '.join(out))
     return 0
   }
 
-  # Refine only when it can change the answer: skip simple non-MTP (flat prefill,
-  # Change A) and MODE=CPU (no spill ceiling / no draft).
-  if [ "$SIMPLE_NONMTP" -eq 0 ] && [ "$MODE" != "CPU" ]; then
+  # Refinement runs for ALL modes (plan §32.1#1). The prefill curve is not flat
+  # where it matters on simple non-MTP models (lfm 8K/16K/32K rose to 2112/2176/
+  # 3008) or CPU-compute (gpt-oss rises to 2048, falls at 4096). Change A only
+  # skips residency and decode samples on simple models (batch-independent), not
+  # prefill refinement; discover_measure_candidate applies Change A internally.
 
-    # ── Rule 2: ceiling edge — best is the top measured point and the next rung
-    # above failed OOM/SPILL. Bisect between the best (lower) and the failed rung
-    # (upper); resolution scales with the value. Stop on the noise gate.
-    if [ -n "$CEIL_FAIL_B" ] \
+    # ── Rule 2: ceiling edge — best is the top measured point (PICK==HIGHPASS) and
+    # the next rung above failed OOM/SPILL. Bisect between the best (lower) and the
+    # failed rung (upper); resolution scales with the value. Stop on the noise gate.
+    # If PICK is interior (not the top PASS point), this does not fire — rule 1
+    # applies (plan §32.1#2).
+    if [ "$PICK" -eq "$HIGHPASS" ] \
+       && [ -n "$CEIL_FAIL_B" ] \
        && { [ "$CEIL_FAIL_R" = "OOM" ] || [ "$CEIL_FAIL_R" = "SPILL" ]; } \
        && [ "$CEIL_FAIL_B" -gt "$PICK" ]; then
       log "  ceiling edge: refining between pick=$PICK and ${CEIL_FAIL_B} ($CEIL_FAIL_R)"
@@ -3432,54 +3437,72 @@ print(' '.join(out))
       done
     fi
 
-    # ── Rule 1: interior peak — best has a PASS point both below and above. Test
-    # the midpoint toward the higher side, move up while it beats best by >
-    # PREFILL_NOISE, stop when the bracket is small. (Simplified: only search the
-    # ascending side toward a higher neighbour, which is where a real interior
-    # peak between doubling rungs can hide.)
-    # Find the ladder PASS rung immediately above PICK (a lower neighbour always
-    # exists since the ladder starts at 256 and PICK is not the lowest when we are
-    # interior). Refine only when PICK is not the top PASS rung AND is not at the
-    # ceiling (no OOM/SPILL directly above within one doubling step).
-    local HI_NEIGH=0
+    # ── Rule 1: interior peak — best has a PASS point both below and above. Probe
+    # the midpoint toward whichever neighbour measured the HIGHER prefill (the
+    # peak leans that way, plan §32.2#3); move best only if it beats by >
+    # PREFILL_NOISE; stop when the bracket is small.
+    # Find nearest PASS rung below (LO) and above (HI) of PICK, with their prefill.
+    local LO_NEIGH=0 HI_NEIGH=0 LO_PF="" HI_PF="" PB
     for idx in "${!PASS_B[@]}"; do
-      local PB=${PASS_B[$idx]}
-      if [ "$PB" -gt "$PICK" ] && { [ "$HI_NEIGH" -eq 0 ] || [ "$PB" -lt "$HI_NEIGH" ]; }; then HI_NEIGH=$PB; fi
+      PB=${PASS_B[$idx]}
+      if [ "$PB" -lt "$PICK" ] && [ "$PB" -gt "$LO_NEIGH" ]; then LO_NEIGH=$PB; LO_PF=${PASS_P[$idx]}; fi
+      if [ "$PB" -gt "$PICK" ] && { [ "$HI_NEIGH" -eq 0 ] || [ "$PB" -lt "$HI_NEIGH" ]; }; then HI_NEIGH=$PB; HI_PF=${PASS_P[$idx]}; fi
     done
-    if [ "$HI_NEIGH" -gt 0 ] && [ "$HI_NEIGH" -gt "$PICK" ]; then
-      # interior if there is also a PASS below PICK
-      local HAS_BELOW=0
-      for idx in "${!PASS_B[@]}"; do [ "${PASS_B[$idx]}" -lt "$PICK" ] && HAS_BELOW=1; done
-      if [ "$HAS_BELOW" -eq 1 ]; then
-        log "  interior peak: refining between pick=$PICK and next rung $HI_NEIGH"
-        local IBOT=$PICK IBOT_PF=$PICK_PF ITOP=$HI_NEIGH ISTEPS=0
-        while [ "$ISTEPS" -lt 4 ]; do
-          local IGAP=$((ITOP - IBOT))
-          local ISTOP=$(python3 -c "print(max(256, round(0.06*$PICK)))")
-          [ "$IGAP" -le "$ISTOP" ] && break
-          local IMID=$(( (IBOT + ITOP) / 2 )); IMID=$(( IMID / 64 * 64 ))
-          [ "$IMID" -le "$IBOT" ] && IMID=$(( IBOT + 64 ))
-          [ "$IMID" -ge "$ITOP" ] && IMID=$(( ITOP - 64 ))
-          [ "$IMID" -le "$IBOT" ] || [ "$IMID" -ge "$ITOP" ] && break
-          log ""; log "  Interior refine: testing $IMID (between $IBOT/$ITOP)..."
-          local IMF
-          IMF=$(discover_measure_candidate "$IMID") || { log "  STALL at $IMID — aborting"; exit 1; }
-          if [ "$IMF" = "0" ]; then log "  interior $IMID failed (OOM/CPU/probe) — stop"; break; fi
-          REFINE_B+=("$IMID"); REFINE_P+=("$IMF")
-          echo "$IMID PASS $IMF" >> "$POINTS"
-          if python3 -c "exit(0 if float($IMF) > float($IBOT_PF) * (1 + $PREFILL_NOISE) else 1)" 2>/dev/null; then
-            log "  interior $IMID ($IMF t/s) beats best $IBOT ($IBOT_PF) — move up"
-            if python3 -c "exit(0 if float($IMF) > float($PICK_PF) else 1)" 2>/dev/null; then PICK=$IMID; PICK_PF=$IMF; fi
-            IBOT=$IMID; IBOT_PF=$IMF
-          else
-            log "  interior $IMID ($IMF t/s) within noise of best $IBOT ($IBOT_PF) — stop"
-            break
-          fi
-          ISTEPS=$((ISTEPS + 1))
-        done
-      fi
+    # fold in refinement points as nearer neighbours
+    for idx in "${!REFINE_B[@]}"; do
+      PB=${REFINE_B[$idx]}
+      if [ "$PB" -lt "$PICK" ] && [ "$PB" -gt "$LO_NEIGH" ]; then LO_NEIGH=$PB; LO_PF=${REFINE_P[$idx]}; fi
+      if [ "$PB" -gt "$PICK" ] && { [ "$HI_NEIGH" -eq 0 ] || [ "$PB" -lt "$HI_NEIGH" ]; }; then HI_NEIGH=$PB; HI_PF=${REFINE_P[$idx]}; fi
+    done
+    # Only interior if both sides have a measured PASS point.
+    if [ "$LO_NEIGH" -gt 0 ] && [ "$HI_NEIGH" -gt 0 ]; then
+      log "  interior peak: refining toward the higher-prefill neighbour of $PICK (lo=$LO_NEIGH hi=$HI_NEIGH)"
+      local ISTEPS=0
+      while [ "$ISTEPS" -lt 4 ]; do
+        # Choose direction by data: probe between PICK and the neighbour with the
+        # higher measured prefill (prefer the higher one on a tie).
+        local DIR_NEIGH DIR_PF OPP_NEIGH
+        if [ -z "$LO_PF" ]; then DIR_NEIGH=$HI_NEIGH; DIR_PF=$HI_PF; OPP_NEIGH=$LO_NEIGH
+        elif [ -z "$HI_PF" ]; then DIR_NEIGH=$LO_NEIGH; DIR_PF=$LO_PF; OPP_NEIGH=$HI_NEIGH
+        elif python3 -c "exit(0 if float('$HI_PF') >= float('$LO_PF') else 1)" 2>/dev/null; then
+          DIR_NEIGH=$HI_NEIGH; DIR_PF=$HI_PF; OPP_NEIGH=$LO_NEIGH
+        else
+          DIR_NEIGH=$LO_NEIGH; DIR_PF=$LO_PF; OPP_NEIGH=$HI_NEIGH
+        fi
+        local GAP=$(( DIR_NEIGH > PICK ? DIR_NEIGH - PICK : PICK - DIR_NEIGH ))
+        local STOPG=$(python3 -c "print(max(256, round(0.06*$PICK)))")
+        [ "$GAP" -le "$STOPG" ] && break
+        local IMID=$(( (PICK + DIR_NEIGH) / 2 )); IMID=$(( IMID / 64 * 64 ))
+        if [ "$DIR_NEIGH" -gt "$PICK" ]; then
+          [ "$IMID" -le "$PICK" ] && IMID=$(( PICK + 64 ))
+          [ "$IMID" -ge "$DIR_NEIGH" ] && IMID=$(( DIR_NEIGH - 64 ))
+          { [ "$IMID" -le "$PICK" ] || [ "$IMID" -ge "$DIR_NEIGH" ]; } && break
+        else
+          [ "$IMID" -ge "$PICK" ] && IMID=$(( PICK - 64 ))
+          [ "$IMID" -le "$DIR_NEIGH" ] && IMID=$(( DIR_NEIGH + 64 ))
+          { [ "$IMID" -ge "$PICK" ] || [ "$IMID" -le "$DIR_NEIGH" ]; } && break
+        fi
+        log ""; log "  Interior refine: testing $IMID (toward ${DIR_NEIGH})..."
+        local IMF
+        IMF=$(discover_measure_candidate "$IMID") || { log "  STALL at $IMID — aborting"; exit 1; }
+        if [ "$IMF" = "0" ]; then log "  interior $IMID failed (OOM/CPU/probe) — stop"; break; fi
+        REFINE_B+=("$IMID"); REFINE_P+=("$IMF")
+        echo "$IMID PASS $IMF" >> "$POINTS"
+        if python3 -c "exit(0 if float($IMF) > float($PICK_PF) * (1 + $PREFILL_NOISE) else 1)" 2>/dev/null; then
+          log "  interior $IMID ($IMF t/s) beats best $PICK ($PICK_PF) — move toward it"
+          PICK=$IMID; PICK_PF=$IMF
+          # shift the neighbour on the direction side to the new best so the next
+          # midpoint stays bracketed toward the same side
+          if [ "$DIR_NEIGH" -gt "$PICK" ]; then HI_NEIGH=$PICK; HI_PF=$PICK_PF; else LO_NEIGH=$PICK; LO_PF=$PICK_PF; fi
+        else
+          # new point not better: tighten the far neighbour toward it (drop the
+          # searched neighbour past the new point) and stop on the noise side.
+          log "  interior $IMID ($IMF t/s) within noise of best $PICK ($PICK_PF) — stop"
+          break
+        fi
+        ISTEPS=$((ISTEPS + 1))
+      done
     fi
-  fi
 
   log "  after refinement: pick=$PICK (${PICK_PF} t/s)"
 
@@ -3622,7 +3645,11 @@ print(' '.join(out))
   set_batch "$PICK"
   log ""; log "=== RESULT ==="
   log "  batch=$PICK ubatch=$PICK ctx=$CTX"
-  log "  mode=$MODE_TXT  pick=$PICK (smallest within ${PREFILL_TOL} of best ${BEST_PREFILL} t/s)"
+  if python3 -c "exit(0 if float('$PREFILL_TOL') > 0 else 1)" 2>/dev/null; then
+    log "  mode=$MODE_TXT  pick=$PICK (smallest within ${PREFILL_TOL} of best ${BEST_PREFILL} t/s)"
+  else
+    log "  mode=$MODE_TXT  pick=$PICK (best measured, ${PICK_PF} t/s)"
+  fi
   if [ -n "$CEIL_FAIL_B" ]; then
     log "  ceiling(coarse)=${HIGHPASS} PASS / ${CEIL_FAIL_B} ${CEIL_FAIL_R}"
   else
