@@ -341,3 +341,27 @@ General checks at every step: `bash -n tools/bench.sh` clean; a killed run (Ctrl
 - Changing `saturation_test`, `long_decode_check`, `residency_probe`, `fire_request`, `wait_served`, the OOM grep, or the ini editing helpers.
 - Multi-stream / `parallel > 1` tuning. Everything here assumes `parallel = 1` as in `[*]`.
 - Re-tuning models that already have a JSON. This plan changes how new runs are done; it does not invalidate existing values.
+
+---
+
+## 13. Review questions for the author (2026-09-07)
+
+These were raised during a code review of the plan. The reviewing agent did **not** adopt any premise; the questions are technical / design clarifications. None of the plan's safety-gate changes are questioned.
+
+**Q1 (§6.3 as step 0 — premise test).** `mtpverify` does not exist yet and is a state-changing run. To empirically test whether `n_max` / `p_min` change output *before* committing to §6's "remove all quality gates," implement `mtpverify` first and run it on `gemma-4-12b-q4-qat-mtp-16k` and `qwen-3.5-9b-q4-mtp-16k`. If it shows divergence within the first ~200 tokens, §6's removal of quality gates is unsafe and needs a fallback plan that retains a placement + degeneracy gate. Should this be an explicit gating step 0 in §11?
+
+**Q2 (§5 prompt ↔ degeneracy tension).** `DECODE_PROMPT` is a structured "twelve eras, heading + 250 words each, in order" prompt. Structured / enumerated output may legitimately raise the 8-gram degeneracy ratio (repeated heading / transition patterns) even on clean generation, causing `WARN > 0.15` false positives. But a non-repetitive prompt tends to stop short, conflicting with the ≥1500-token natural-stop goal. Should degeneracy be measured on a separate, non-enumerative prompt, or is the structured prompt's diagnostic threshold expected to tolerate structural repetition?
+
+**Q3 (§4.4 single-sample decode baseline).** The cliff gate compares `DEC_PICK` to a **single** `DEC_BASE` sample at batch 256. §0 itself argues single samples are noise. Should `DEC_BASE` be averaged over two samples? And if `DEC_BASE` returns `SHORT` (missing), the entire cliff gate is silently skipped — is that acceptable, or should it force one retry before skipping?
+
+**Q4 (§4.1 break ↔ §4.3 tolerance interaction).** Both the "two consecutive rungs below `best × (1 − tol)` → break" and the pick rule use the 3% tolerance. On a genuinely flat plateau (the real 64K log: all rungs 1291–1364 t/s, within ~5%), the break can fire a few rungs after the plateau's peak, so the ladder never reaches an OOM/SPILL rung → `ceiling_info` is unknown and edge refinement (§4.3) cannot trigger. Is that acceptable, or should the ladder always run to CAP (or until OOM/SPILL) so the coarse ceiling is bounded even when prefill plateaus?
+
+**Q5 (§4.4 same-restart saturation → long-decode on one slot).** `saturation_test` fills ctx to ~99% and compacts; running `long_decode_check` on the **same** server instance / slot immediately after — will the saturated KV cache be reset between requests? If the slot retains ~full-context KV, the long-decode runs against a near-full context (unrepresentative, and may itself re-compact / OOM). Verify llama.cpp slot / cache-clear semantics; if not clean, the "one restart for saturation + long-decode + decode_sample" budget needs a slot reset or a reordering.
+
+**Q6 (§6.2 folding the ini's current n_max).** "Always include the ini's current n_max" — specify the candidate-set construction when the current value is not 2 / 3 / 4 (e.g. 5, or an even value). Precisely: measure `{2, cur, 4}` first (dedup), then adapt to `{cur−1, cur, cur+1}`? And does measuring `cur` mean at `p_min = 0.7` always (so its t/s doubles as the Phase-2 0.7 reference)?
+
+**Q7 (§6.4 inheritance backward-compat).** Treating missing `tuning_status` in *old* parent JSONs as `"ok"` for inheritance lets the old **unvalidated** `n_max_confirmed` (parsed from the load log — i.e. the 16:45 lie) propagate to siblings. Should old JSONs instead be treated as `"unknown"` (MTP values NOT inherited) since they cannot be verified as tuned? Batch and the rest of the JSON still inherit either way.
+
+**Q8 (§2 / §4 small-ctx under-exercising).** For a 4K-ctx model, top-rung `prefill_probe_sized` is clamped to `floor(0.75 × ctx) ≈ 3072` tokens < `2 × B`. If prefill is still rising at the ceiling (the "ceiling is optimum" MoE class), under-exercising the top rung could mis-rank it. Confirm the under-exercised handling does not mis-rank a genuinely still-rising ceiling.
+
+**Q9 (scope sizing).** This plan splits `cmd_bisect` (~310 lines) and `cmd_mtp` (~180 lines) into discover/thorough variants and adds `decode_sample`, `prefill_probe_sized`, status plumbing across four-plus functions, `--thorough` / `--strict` flags, JSON schema changes, and the AGENTS.md rewrite — roughly 400–600 changed/new lines in a 3146-line file. Confirm full implementation is intended in one pass (per the review) rather than a staged landing behind a temporary env, and that `--thorough` is expected to also absorb the §5 decode measurement + acceptance-parse fixes (i.e. its decode basis changes too, not purely preserved).
