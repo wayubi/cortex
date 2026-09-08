@@ -1,6 +1,6 @@
 # Plan: `bench.sh` discover mode — find practical settings with ~1/4 of the runs
 
-**Status:** 2026-09-07 — designed; step 0 (`mtpverify`) implemented and run; premise confirmed from llama.cpp source and by the OFF-only margin test on both models (§18); §6 proceeds; `cmd_mtpverify` needs the §18.4 fixes; remaining steps not implemented.
+**Status:** 2026-09-08 — implemented and reviewed (§23 to §25). Discover is the default; thorough behind `--thorough`. Three small fixes remain before the full re-benchmark (§25.4).
 **Audience:** an implementing agent. Function names are the anchors; the source has no stable line numbers. Read `tools/bench.sh` top to bottom once before touching anything.
 **Scope:** `tools/bench.sh` only, plus the matching doc updates in `AGENTS.md`. Every model in `llama-cpp/models.ini` must be supported (73 entries today; see §2 for the classes).
 
@@ -126,7 +126,7 @@ chars        = PROBE_TOKENS × CHARS_PER_TOK          # measure_ratio once at ru
 
 Why one length: prefill t/s falls with prompt length (attention cost grows with position), so probing a bigger batch with a longer prompt would bias the ranking against it. With a fixed length the rungs are compared on identical work. 16384 tokens fully exercises every rung up to 8192 (two or more ubatches) and runs rung 16384 as a single ubatch, which is labelled `single-ubatch` in the log but ranked normally. On models with ctx ≤ 21K the length is 75% of ctx for every rung, which is the largest realistic prompt for that model, so the ranking reflects real use; rungs at or above that length are labelled `single-ubatch` too.
 
-No separate warm-up request: `tiny_probe` already ran on this server instance immediately before, so the model is loaded and the CUDA graphs are warm. (`prefill_probe`'s untimed warm-up request stays for `--thorough`, which calls the old function.)
+No separate warm-up request: `tiny_probe` already ran on this server instance immediately before, so the model is loaded and the CUDA graphs are warm. The probe request sets `cache_prompt: false` so no part of the prompt is served from the slot's prompt cache (the `measure_ratio` request that precedes rung 256 uses a prefix of the same filler; see §25.2 #2). (`prefill_probe`'s untimed warm-up request stays for `--thorough`, which calls the old function.)
 
 ### 4.3 Phase B — select
 
@@ -261,7 +261,7 @@ Phase 1  n_max, all at p_ref = 0.7:
     if b+1 ∉ S and b+1 ≤ 6: measure b+1     (≤ 1 run)
     if b-1 ∉ S and b-1 ≥ 2: measure b-1     (≤ 1 run)
     re-measure the best and the runner-up once (2 runs); rank on the mean of their two samples
-    WIN_NMAX = best mean; if runner-up mean ≥ best × (1 - MTP_TIE): WIN_NMAX = the smaller of the two
+    WIN_NMAX = the smallest n_max whose mean ≥ best_mean × (1 - MTP_TIE)   # ties go to the smaller draft buffer (revised §25.2 #3)
 Phase 2  p_min at WIN_NMAX:
     reference = WIN_NMAX's samples at p_ref (always exists, Phase 1 runs at 0.7)
     P = dedup{0.5, 0.9, ini p_min} minus 0.7  (2 or 3 runs)
@@ -826,3 +826,47 @@ Reverting to the single-measure probe restored correct, repeatable picks (lfm �
 ### Overall state after §23
 
 Working tree and `models.ini` clean; `bash -n` clean. Required fixes (#1, #2) verified live. Recommended items #3, #4, #6 done; #5 reverted with a recorded rationale. The pipeline is ready for a full re-benchmark per §23.4 (family heads first with `--strict`, then siblings inherit).
+
+---
+
+## 25. Author review of the §24 disposition (2026-09-08)
+
+**Verdict: all §23.2 and §23.3 items are addressed, and the pipeline is complete per the plan. I independently re-ran the converted `cmd_bench` end to end, which the implementer had not done after the fix commit; it works. That run also produced a live example of the stale-status hazard, which needs one more small guard before records are published. Three further corrections, two of them to my own plan text, are below.**
+
+### 25.1 Independently verified
+
+| Item | How verified |
+|---|---|
+| §23.2 #1 `cmd_bench` natural stop | The two runs cited in §24 (22:39, 22:41) predate the fix commit `5b762e2` at 22:43, and the gemma JSON on disk was still the 11:29 record, so the fix was unverified. I ran `bench.sh --no-inherit bench gemma-4-12b-q4-qat-mtp-16k` at 06:36 today: `finish_reason: stop`, 2961 completion tokens, degeneracy 0.0, `JSON written`. Decode 55.7 t/s against 95.7 t/s in the old loop-inflated record, which is the size of the error the plan set out to remove. The JSON was then restored with `git checkout` to keep the tree at the committed state; the full re-benchmark will regenerate it |
+| §23.2 #2 `run_ph1` capture | 22:27 and 23:10 MTP runs log `n_max=N: PASS (t/s, tokens, GPU)` for every candidate |
+| §23.3 #3 `written_at`, fresh `not_run` from `mtpcheck` | In the diff; `tuning_written_at` present in the JSON I generated |
+| §23.3 #4 residency `stream: true` | In the diff. Only lfm ran afterwards, so the time saving on slow-decode models is not yet measured; check that `prefill-sized: still running (30x2s)` no longer appears on the next ornith or gemma ladder |
+| §23.3 #6 comments, usage, `--strict` in `AGENTS.md` | In the diff |
+| `bash -n`, clean tree | Yes |
+
+Note for future runs: `bench.sh bench <model>` in default inherit mode skips a family head that already has a JSON (`family head, already benched (skip)`). A deliberate re-bench needs `--no-inherit` or `--reset-parent`. Worth one line in the usage text.
+
+### 25.2 Findings
+
+1. **Stale status merged into a fresh record (live example).** The gemma JSON I generated carries `tuning_status: ok, tuned_n_max: 3, tuned_p_min: 0.7` from the 23:19 status file, while the ini the server actually loaded says `n_max 4, p_min 0.6` (`n_max_loaded: '4'`, `configured_n_max: 4`). The implementer applied the 23:10 winners and then reverted `models.ini` to the committed state, so the status file and the ini disagree, and the record now claims a tune that is not in effect. `written_at` makes it discoverable but not self-evident. Fix in `cmd_bench`: when the status says `ok` but `tuned_n_max` or `tuned_p_min` differs from the ini's configured values, write `tuning_status: stale` (keep the tuned values for reference) and log a warning. That closes the gap without touching the tuners. Required before publishing records.
+
+2. **The median-of-three regression was misdiagnosed, and the real cause matters elsewhere.** The server log for the 22:54 run shows the "slow" second and third probes evaluated 4 tokens each (`prompt eval time = 19.47 ms / 4 tokens`) against 2870 tokens for the first. An identical prompt re-sent to the same slot is served from the prompt cache, so the log-parsed throughput is a 4-token figure. This is llama.cpp's `cache_prompt` behaviour (default true; documented in `tools/server/README.md`), not a transient state, and a fresh instance is not required to avoid it. Two consequences:
+   - The single-shot `prefill_probe_sized` is already exposed to a smaller version of this at rung 256: `measure_ratio` sends a 2000-character prefix of the same filler immediately before, so about 400 tokens of the rung-256 probe come from cache. Add `'cache_prompt': False` to the sized probe's payload. It is a one-token change and makes every rung's measurement independent of what ran before it.
+   - With that field set, repeating the probe is valid again. Re-enable median-of-three for probes that complete in under 5 s if repeatability on small-ctx models is wanted; it is optional per §23.4.
+
+3. **Tie rule in §6.2 is worded too narrowly; correct the plan and the code together.** Two gemma runs picked different winners (n_max 2 at 21:49, 3 at 23:10) from candidates whose means all sat within 2% of each other. The 23:10 pick of 3 follows the plan text literally (best 4 at 52.9, runner-up 3 at 52.5, "the smaller of the two"), but n_max 2 at 52.35 was also within tolerance and is the value the tie rule is meant to prefer. Replace the rule with: `WIN_NMAX = the smallest n_max whose mean ≥ best_mean × (1 − MTP_TIE)`. Same intent, no more order dependence, and the same rule the batch pick already uses. This is a defect in my plan wording, not in the implementation.
+
+4. **`cmd_bench` decode cap on 4K models.** `DECODE_MAX_TOKENS = ctx − 150` was sized for the old 150-token filler prompt. `DECODE_PROMPT` is about 103 tokens plus template, so on a 4K model the cap lands at the context edge; `decode_sample` uses `ctx − 256`. Align to `ctx − 256`. Not yet exercised on a 4K model.
+
+5. **`cmd_bench` cannot fail loudly.** The speed and request lines and `JSON written` go to stdout only, never to the log file (this predates the refactor; the 16:45 log has the same gap), and a failing JSON write would still reach `=== DONE ===` and return 0 inside the `( cmd_bench ) ||` wrapper. Route those prints through `log`, and after the write check that the JSON file exists and is newer than the run's start, else `return 1`. Small, and it is what would have made the unverified state in 25.1 visible in the log.
+
+6. **Cosmetic.** `acc=?` on non-MTP models should print `n/a`; `n_max_loaded` is a string where `configured_n_max` is an int.
+
+### 25.3 Plan text corrections applied by this review
+
+- §6.2 Phase 1 tie rule: "smallest n_max whose mean is within `MTP_TIE` of the best mean" (finding 3).
+- §4.2: the sized probe sends `cache_prompt: false` (finding 2).
+
+### 25.4 State
+
+Complete per the plan. Before the full re-benchmark: apply findings 1, 3 and 4 (each is a few lines), then run family heads with `--no-inherit --strict` and let siblings inherit. Findings 2 (probe `cache_prompt`), 5 and 6 can ride along or follow.
