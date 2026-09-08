@@ -6,6 +6,7 @@
 #   ./tools/bench.sh                            # interactive: pick models, full suite, confirm
 #   ./tools/bench.sh all <models...>            # non-interactive full suite per model
 #   ./tools/bench.sh mtpcheck <models...>       # MTP capability check only (writes spec-type)
+#   ./tools/bench.sh mtpverify <models...>      # MTP-on vs off output check (premise test)
 #   ./tools/bench.sh bisect <model> [test-batch]
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
 #   ./tools/bench.sh bench <models...>          # full benchmark JSON record
@@ -1836,6 +1837,131 @@ cmd_mtpcheck() {
   return 0
 }
 
+# Remove a key (and its whole line) from the model's section in models.ini.
+# Used by mtpverify to clear spec-type (MTP-off) without disturbing siblings.
+del_key() {
+  local KEY=$1
+  python3 -c "
+import re, sys
+key='$KEY'; model='$MODEL'; ini='$INI'
+with open(ini) as f: content = f.read()
+m = re.search(r'(\['+re.escape(model)+r'\])(.*?)(?=\n\[|\Z)', content, re.DOTALL)
+if not m: print('ERROR: section not found'); sys.exit(1)
+section = m.group(2)
+kept = [ln for ln in section.split('\n') if not re.match(r'\s*'+re.escape(key)+r'\s*=', ln)]
+with open(ini, 'w') as f:
+    f.write(content[:m.start(2)] + '\n'.join(kept) + content[m.end(2):])
+print('  removed ' + key)
+"
+}
+
+# ── SUBCOMMAND: mtpverify (diagnostic, premise test) ────────
+# Not part of the suite. Empirically checks whether speculative decoding (MTP)
+# changes the sampled output distribution. Two restarts on the SAME model:
+#   run 1: spec-type removed (MTP off), run 2: spec-type=draft-mtp (MTP on).
+# Both requests use temperature=0, seed=42, logprobs=true, max_tokens=1024 and
+# the identical prompt. Token ids are read from logprobs.content[].id and the
+# index of the first differing token is printed.
+# Expected result: identical first ~200+ tokens (late divergence is numerical
+# drift between batched-verification and single-token decode and does not fail).
+cmd_mtpverify() {
+  local CTX=$(read_ctx)
+  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  log ""; log "=== MTP VERIFY: $MODEL ==="
+  local SNAP=/tmp/mtpverify_section_${MODEL}.snap
+  read_section > "$SNAP"
+  local ORIG_HAS_MTP=0
+  grep -q "spec-type.*draft-mtp" <(read_section) && ORIG_HAS_MTP=1
+
+  local PROMPT="Write a detailed technical report on the history of computing, covering its major eras in chronological order."
+  local MAX_TOK=1024
+
+  # ── Run 1: MTP off ──
+  log "  Run 1: MTP OFF (spec-type removed)"
+  del_key spec-type
+  restart
+  python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'''$PROMPT'''}],'max_tokens':$MAX_TOK,'temperature':0,'seed':42,'logprobs':True}
+with open('/tmp/mtpv_off_payload.json','w') as f: json.dump(payload, f)
+"
+  fire_request /tmp/mtpv_off_payload.json /tmp/mtpv_off.json "mtpverify-off" "$(adaptive_timeout $MAX_TOK)"
+  local RC=$?
+  if [ "$RC" -eq 2 ]; then
+    log "  STALL on MTP-off run — aborting (network/HF fetch)"
+    restore_section "$SNAP"
+    exit 1
+  fi
+  wait "$FIRE_PID" 2>/dev/null || true
+  local OOM_OFF=$(oom_count_since_mark)
+
+  # ── Run 2: MTP on ──
+  log "  Run 2: MTP ON (spec-type=draft-mtp)"
+  set_key spec-type draft-mtp
+  restart
+  python3 -c "
+import json
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'''$PROMPT'''}],'max_tokens':$MAX_TOK,'temperature':0,'seed':42,'logprobs':True}
+with open('/tmp/mtpv_on_payload.json','w') as f: json.dump(payload, f)
+"
+  fire_request /tmp/mtpv_on_payload.json /tmp/mtpv_on.json "mtpverify-on" "$(adaptive_timeout $MAX_TOK)"
+  local RC2=$?
+  if [ "$RC2" -eq 2 ]; then
+    log "  STALL on MTP-on run — aborting (network/HF fetch)"
+    restore_section "$SNAP"
+    exit 1
+  fi
+  wait "$FIRE_PID" 2>/dev/null || true
+  local OOM_ON=$(oom_count_since_mark)
+
+  # ── Restore original spec-type state ──
+  if [ "$ORIG_HAS_MTP" -eq 1 ]; then
+    set_key spec-type draft-mtp
+  else
+    del_key spec-type
+  fi
+
+  # ── Compare ──
+  python3 -c "
+import json
+def tokens(p):
+    try:
+        d = json.load(open(p))
+        if 'choices' not in d or not d['choices']: return None, None, None
+        ch = d['choices'][0]
+        lp = ch.get('logprobs', {})
+        ids = [t.get('id') for t in lp.get('content', [])] if isinstance(lp, dict) else None
+        t = d.get('timings', {})
+        spd = t.get('predicted_per_second', 0)
+        return ids, spd, ch
+    except Exception as e:
+        return None, None, None
+
+ids_off, spd_off, ch_off = tokens('/tmp/mtpv_off.json')
+ids_on,  spd_on,  ch_on  = tokens('/tmp/mtpv_on.json')
+
+if ids_off is None or ids_on is None:
+    print('  RESULT: could not parse token ids (off=%s on=%s)' % (ids_off is None, ids_on is None))
+else:
+    n = min(len(ids_off), len(ids_on))
+    diff = next((i for i in range(n) if ids_off[i] != ids_on[i]), None)
+    print('  off: %d tokens, %s t/s | on: %d tokens, %s t/s' % (len(ids_off), spd_off, len(ids_on), spd_on))
+    if diff is None:
+        if len(ids_off) == len(ids_on):
+            print('  RESULT: identical (all %d tokens match)' % n)
+        else:
+            print('  RESULT: identical over common prefix (%d tokens); lengths differ (%d vs %d) — later divergence' % (n, len(ids_off), len(ids_on)))
+    else:
+        print('  RESULT: first differing token index = %d (off=%s, on=%s)' % (diff, ids_off[diff], ids_on[diff]))
+        if diff >= 200:
+            print('  Premise holds: identical over first %d tokens; divergence is late numerical drift.' % diff)
+        else:
+            print('  WARNING: divergence within first 200 tokens — speculative decoding appears to change output.')
+"
+  log "  OOM: off=$OOM_OFF on=$OOM_ON (should be 0 both)"
+  log "  MTP verify complete. Original spec-type state restored."
+}
+
 # ── SUBCOMMAND: mtp (tuning only; capability pre-settled) ───
 # Empirically determines optimal n_max and p_min per model.
 # Phase 1: n_max sweep {2,3,4,5} at p_min=0.7 (speed axis).
@@ -3100,6 +3226,12 @@ case "$CMD" in
       fi
     done
     ;;
+  mtpverify)
+    for m in "$@"; do
+      MODEL=$m
+      ( cmd_mtpverify ) || { echo "  $m: mtpverify FAILED"; continue; }
+    done
+    ;;
   bisect)
     MODEL=$1
     shift
@@ -3134,10 +3266,11 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|bisect|mtp|bench] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|mtp|bench] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
+    echo "       bench.sh mtpverify <models...>              # MTP-on vs off output check (premise test)"
     echo "       bench.sh bisect <model> [test-batch]"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"

@@ -415,3 +415,47 @@ Where an answer changed the plan, the section above is already revised and marke
 **Q8 — small-ctx under-exercising: it does not mis-rank, and the question exposed a bigger fairness problem that is now fixed.** On a 4K model every rung is now probed with the same 3072-token prompt, so batch 4096 and batch 2048 are compared on identical work; if the single 3072-token ubatch is genuinely faster than 2048 + 1024, rung 4096 wins on merit, and if they tie, the smaller batch wins on the tolerance rule. The bigger problem was in the original §4.2: scaling the prompt with the batch (8K tokens at 4096, 16K at 8192, 32K at 16384) would have penalised large batches because prefill t/s falls with prompt length. §4.2 now uses one prompt length per model, `min(0.75 × ctx, 16384)` tokens, and drops the separate warm-up request because `tiny_probe` already warmed the instance.
 
 **Q9 — scope and landing: staged, six commits, and `--thorough` does absorb the measurement fixes.** §11 already staged the work (discover behind `BENCH_DISCOVER=1` until step 4 flips the default); it now says so explicitly and asks for one commit per step so a partial branch never changes a normal run. The §5 decode fixes and the acceptance parse are bug fixes, not search-strategy choices: `--thorough` keeps the golden-section search, the 64-token bisect and the shortlist gate, but measures decode without forced tokens like everything else. Preserving the loop-inflated decode numbers in thorough mode would preserve the defect this plan exists to remove. Estimated size is about 450 to 600 changed or new lines; no existing function is deleted in this pass.
+
+---
+
+## 15. Step 0 execution report: mtpverify premise test (2026-09-07)
+
+Status: **step 0 run; the premise test FAILED its gating criterion. Implementation of §6 is halted pending author review.**
+
+### 15.1 What was implemented
+
+`cmd_mtpverify` in `tools/bench.sh` (added alongside `cmd_mtpcheck`; dispatch `mtpverify`, usage text, header comment updated; `del_key` helper added). Behaviour matches §6.3: two restarts on the same model — run 1 removes `spec-type` (MTP off), run 2 sets `spec-type=draft-mtp` (MTP on) — same prompt, `temperature: 0`, `seed: 42`, `logprobs: true`, `max_tokens: 1024`. Token ids are read from `choices[0].logprobs.content[].id` (confirmed present in this llama.cpp build). Prints the first differing token index and a PASS/FAIL note against the 200-token criterion, plus both decode speeds and OOM counts. Original `spec-type` state is restored.
+
+Side effect found: `del_key` + `set_key` repositions the `spec-type` line within the section (functional no-op, but shows as a models.ini diff). The `mtpverify` runs were done on a model that already had `spec-type` present, and the models.ini was `git checkout`-restored afterwards to remove that cosmetic churn. A future clean-up could snapshot/restore the whole section instead of del+set (as `detect_mtp` does), avoiding the reposition.
+
+### 15.2 Test results (the data)
+
+Both runs: temperature 0, seed 42, max_tokens 1024, logprobs on. OOM = 0 both runs, both models.
+
+**gemma-4-12b-q4-qat-mtp-16k** (spec-draft-n-max=4, p_min=0.6, batch 1408):
+- decode: off 36.1 t/s, on 72.9 t/s
+- **first differing token index = 58**
+- OFF: `...The evolution of computing is characterized by a transition...`
+- ON:  `...The history of computing is characterized by a transition...`
+
+**qwen-3.5-9b-q4-mtp-16k** (spec-draft-n-max=2, p_min=0.7, batch 2048):
+- decode: off 44.6 t/s, on 53.1 t/s
+- **first differing token index = 34**
+- OFF: `...from Mechanical Origins to Quantum Frontiers...`
+- ON:  `...from Mechanical Roots to Quantum Frontiers...`
+
+### 15.3 Why this matters to the plan
+
+§6.1 removes all quality (degeneracy) gates from MTP tuning on the premise that *"MTP parameters cannot change output; output distribution is unchanged."* The §11 step-0 gating criterion the author set (Q1) is that **the first 200 tokens are identical** on both named models; a divergence inside 200 tokens means the premise is not upheld and §6 must not be implemented as written.
+
+Both models diverge well before 200 (tokens 58 and 34), each selecting a semantically different word early in the greedy decode. Because the test is deterministic (temperature 0, seed 42) and reproduces independently on two unrelated models, it is unlikely to be the "late numerical drift" the author described (which the criterion explicitly ignores). The implementer reads this as evidence that MTP does perturb the greedy argmax early — either a genuine effect on the sampling path or an early near-tied-logit flip that cascades — and therefore the "no quality gate" change in §6 is not safe to land on the current evidence.
+
+### 15.4 Halted / next steps for the author
+
+- §6 (`cmd_mtp_discover`, removal of quality gates, and §6.4 `tuning_status` plumbing) is **halted** pending author instruction.
+- The rest of the plan (§5 decode measurement + acceptance parse fix, §4 batch discover-mode, §7 flags, §4.5 JSON, §10 docs, §8 seeding) is **independent of the MTP-quality premise** and can proceed without the §6 conclusion.
+- Options the author may wish to direct:
+  1. Run more mtpverify probes (multiple prompts / seeds / n_max values) to confirm whether divergence is a robust early effect or a per-prompt near-tie cascade, before deciding §6.
+  2. Adopt the fallback already specified in Q1: keep a degeneracy gate, but measure it on natural-stop output with two samples per config and no single-sample confirm failure.
+  3. Proceed with the premise-independent steps (1, 2, 4, 5, 6) now while §6 is re-designed.
+- Open question for the author: does `temperature: 0` with `seed: 42` actually produce a deterministic greedy decode on this llama.cpp build, and could `logprobs`/sampling differ between the MTP-off and MTP-on server instances for a reason unrelated to output distribution (e.g. a different graph producing different numerical rounding)? If so, the test may be measuring numerical reproducibility rather than distribution change, and the criterion may be too strict for greedy sampling.
