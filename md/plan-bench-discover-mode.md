@@ -1241,3 +1241,23 @@ file. Default path unaffected.
 
 Pipeline signed off (§36). Next step is the catalogue re-benchmark: family heads
 with `--no-inherit --strict`, then siblings inherit.
+
+---
+
+## 37. Placement must be binary (2026-09-08)
+
+The first catalogue record (`lfm-2.5-8b-a1b-q4-4k-think`, 11:54) carries `placement: AMBIGUOUS` with `avg_cpu_pct: 100.2` and `avg_gpu_util_pct: 64.6`. The model is plainly GPU-resident; the label comes from two classifiers that Change B did not reach.
+
+**Why it says AMBIGUOUS.** `cmd_bench` and `decode_sample` still classify on the llama-server process CPU alone: under 100% is GPU, over 200% is CPU, anything between is AMBIGUOUS. A GPU-resident llama.cpp keeps exactly one host thread busy feeding the GPU, so its process CPU sits at 100% and wobbles to 105 or 110 during the run; 100.2% is that thread, not compute on the CPU. The residency probe was fixed in Change B (`GPU_CPU_MAX=150`); these two copies were not. The value is not used for any decision in either place (only a `CPU` verdict rejects anything), but it is written into the published record.
+
+**Change F — one binary classifier, shared by all three sites.** Replace the three copies with one function `classify_placement AVG_CPU AVG_GPU`:
+
+```
+CPU  if avg_cpu > 200                                    # all cores busy: compute on CPU
+GPU  if avg_cpu < GPU_CPU_MAX (150) and avg_gpu > GPU_ACTIVE_PCT (25)
+otherwise decide by the GPU: avg_gpu > GPU_ACTIVE_PCT → GPU, else → CPU
+```
+
+The residency probe keeps its early-kill logic but takes its final verdict from the same function, so `AMBIGUOUS` disappears everywhere. Rationale for the tie-break: the GPU utilisation is direct evidence of where the matrix work runs; process CPU between 150 and 200% with the GPU busy is a host thread plus sampling, and with the GPU idle it is compute. Record `avg_cpu_pct` and `avg_gpu_util_pct` as today so the basis stays visible.
+
+Acceptance: re-run the lfm 4K bench; expect `placement: GPU`. Grep the script for `AMBIGUOUS`; the only remaining hits should be comments.
