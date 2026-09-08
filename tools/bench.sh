@@ -752,9 +752,9 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
     # has begun (decode produces n_gen, not prompt-processing) → arm the stall timer.
     local WINDOW_LOGS
     WINDOW_LOGS=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)))
-    LAST_LINE_PP=$(echo "$WINDOW_LOGS" | grep -n "prompt processing" | tail -1 | cut -d: -f1)
-    LAST_LINE_LAUNCH=$(echo "$WINDOW_LOGS" | grep -n "launch_slot_.*processing task" | tail -1 | cut -d: -f1)
-    LAST_LINE_NGEN=$(echo "$WINDOW_LOGS" | grep -n "n_gen =" | tail -1 | cut -d: -f1)
+    LAST_LINE_PP=$(echo "$WINDOW_LOGS" | grep -n "prompt processing" | tail -1 | cut -d: -f1) || true
+    LAST_LINE_LAUNCH=$(echo "$WINDOW_LOGS" | grep -n "launch_slot_.*processing task" | tail -1 | cut -d: -f1) || true
+    LAST_LINE_NGEN=$(echo "$WINDOW_LOGS" | grep -n "n_gen =" | tail -1 | cut -d: -f1) || true
     [ -n "$LAST_LINE_NGEN" ] && NGEN_SEEN=1
     # Arm when the decode task is active: its launch is the most recent event (newer than
     # the last prompt-processing line) and no n_gen has appeared yet.
@@ -776,7 +776,7 @@ with open('/tmp/sat_payload.json','w') as f: json.dump(payload, f)
     # Decode-rate floor: parse latest tg from n_gen streaming lines (decode-only)
     local TG
     TG=$(echo "$WINDOW_LOGS" \
-         | grep "n_gen = " | tail -1 | grep -oE "tg =\s*[0-9.]+" | awk '{print $3}')
+         | grep "n_gen = " | tail -1 | grep -oE "tg =\s*[0-9.]+" | awk '{print $3}') || true
     if [ -n "$TG" ] 2>/dev/null; then
       if python3 -c "exit(0 if $TG < $DECODE_FLOOR else 1)" 2>/dev/null; then
         SLOW=$((SLOW + 1))
@@ -917,7 +917,7 @@ with open('/tmp/perf_decode_payload.json','w') as f: json.dump(payload, f)
   local CPU_SAMPLES=()
   for i in $(seq 1 40); do
     local TOP CPU
-    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
+    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
     CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
     [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
     if ! kill -0 $DEC_PID 2>/dev/null; then break; fi
@@ -983,7 +983,7 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
   local i
   for i in $(seq 1 40); do
     local TOP STATS
-    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
+    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
     R_CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
     STATS=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null)
     R_GPU=$(echo "$STATS" | cut -d',' -f1 | tr -d ' ')
@@ -1789,7 +1789,7 @@ with open('/tmp/decode_payload.json','w') as f: json.dump(payload, f)
     local CPU_SAMPLES=()
     for i in $(seq 1 $POLL_MAX_SAMPLES); do
       local TOP CPU GPU
-      TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
+      TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
       CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
       GPU=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
       [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
@@ -3409,7 +3409,7 @@ print(f'  Decode payload: {len(prompt)} chars, ~$DECODE_PROMPT_TOKENS tokens (ma
   local i
   for i in $(seq 1 $POLL_MAX_SAMPLES); do
     local TOP CPU GPUSTATS GPU MEM TEMP POWER VRAM CLOCK_SM CLOCK_MEM
-    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1)
+    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
     CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
     GPUSTATS=$(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,temperature.gpu,power.draw,memory.used,clocks.sm,clocks.mem --format=csv,noheader,nounits 2>/dev/null)
     GPU=$(echo "$GPUSTATS" | cut -d',' -f1 | tr -d ' ')
