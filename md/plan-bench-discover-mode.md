@@ -870,3 +870,26 @@ Note for future runs: `bench.sh bench <model>` in default inherit mode skips a f
 ### 25.4 State
 
 Complete per the plan. Before the full re-benchmark: apply findings 1, 3 and 4 (each is a few lines), then run family heads with `--no-inherit --strict` and let siblings inherit. Findings 2 (probe `cache_prompt`), 5 and 6 can ride along or follow.
+
+---
+
+## 26. Implementer disposition of the §25 review items (2026-09-08)
+
+All three required (§25.4) and the recommended/cosmetic §25 items are implemented in one commit (`f129b96`).
+
+| §25 item | Commit | Disposition |
+|---|---|---|
+| #1 stale-status guard (required) | `f129b96` | `cmd_bench` relabels `tuning_status` to `stale` when the status file says `ok` but `tuned_n_max`/`tuned_p_min` differ from the configured values the server loaded; keeps the tuned values for reference and logs a warning. Verified standalone: an `ok` file with tuned 3/0.7 against configured 4/0.6 → `tuning_status: stale`. |
+| #2 probe `cache_prompt:false` (recommended) | `f129b96` | Added `cache_prompt: false` to the `prefill_probe_sized` payload so no prefix is served from the slot prompt cache (measure_ratio precedes rung 256). This also un-blocked the misdiagnosed median-of-3; per §25.4 it can be re-enabled later if repeatability on small-ctx models is wanted (the implementer left it single-shot). |
+| #3 MTP tie rule (required) | `f129b96` | `mtp_phase1_winner` now returns the smallest n_max whose mean is within `MTP_TIE` of the best mean (not best-vs-runner-up). Matches §6.2 plan wording (already corrected by the author). |
+| #4 cmd_bench decode cap (required) | `f129b96` | `DECODE_MAX_TOKENS = max(256, min(4000, ctx-256))`, matching `decode_sample`. |
+| #5 cmd_bench fail loudly | `f129b96` | `=== RESULTS ===` figures are appended to the log file as well as stdout; after the JSON write, verify the file exists, is non-empty, and is newer than the run start, else `return 1` (no false `=== DONE ===`). |
+| #6 cosmetic | `f129b96` | `acc=` prints `n/a` on non-MTP; `n_max_loaded`/`p_min_loaded` coerced to int/float to match `configured_n_max`/`configured_p_min`. Verified on a fresh gemma bench: `n_max_loaded: 4` (int) == `configured_n_max: 4`. |
+
+Verified: a fresh `--no-inherit bench gemma-4-12b-q4-qat-mtp-16k` completes with
+natural-stop decode (finish=stop, 3037 tokens, deg 0.0, 52.9 t/s) and the type
+consistency is confirmed. models.ini and the gemma JSON were restored to their
+committed state after the run.
+
+The pipeline is complete per the plan and ready for the full re-benchmark:
+family heads with `--no-inherit --strict`, then let siblings inherit.
