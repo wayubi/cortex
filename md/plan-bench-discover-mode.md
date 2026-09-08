@@ -1431,3 +1431,33 @@ Measured costs on this model for the record: `off` 3.7 min, `coarse` 4.6 min, `6
 **Follow-up if a model ever needs it.** A ceiling-aware version (apply the headroom tie-break only when the pick is within a factor of two of the spill ceiling, otherwise take the fastest) is a few lines; not implemented until a model shows the need.
 
 **Docs.** `AGENTS.md` step 1 of the MTP method now says "within `MTP_TIE`, 2%" (updated with this change). Records already carry every candidate's samples, so what the rule chose against is visible per model.
+
+---
+
+## 45. CPU-compute MTP models: the placement gate rejects every candidate (2026-09-08)
+
+From the 15:07 gemma suite, model `gemma-4-26b-a4b-q4-qat-mtp-8k` (13.3 GB, CPU-compute on a 12 GB GPU).
+
+### 45.1 What the log shows
+
+- **Batch**: correct throughout. `CPU` at rung 256 set `MODE=CPU`, no residency probes afterwards, 8192 OOM'd at load, ceiling edge 4096/8192. Refinement bracketed [2048, 8192] with the failed rung as the upper bound, 5824 failed and tightened it, and the search settled on 3456 at 1825 t/s, 1.8% over the 4096 rung. Saturation and long-decode PASS at 3456. Bisect 13 min, 17 restarts. Bench prefill 1820 t/s against 1758 in the 09-07 record at 4096.
+- **MTP**: both Phase 1 candidates measured fine (n_max 2: 47.0 t/s, n_max 4: 44.4 t/s, natural stop, no OOM) and both were **rejected for `placement=CPU`**. The tuner failed, restored n_max 4, and the model was benched at 41.3 t/s decode with `tuning_status: failed`, the honest record. The 3 t/s the tune measured for n_max 2 was left on the table.
+
+### 45.2 Cause
+
+The MTP placement gate (§6.1) was designed for GPU-resident models, where a `CPU` verdict means the draft buffer at this n_max spilled off the GPU. On a model that is CPU-compute at every batch, `CPU` is the baseline, not a spill. §2 lists the class ("MoE with experts on CPU … MTP: some") but §6 never exempted it, and the batch ladder already knows the answer (`MODE=CPU`). Affected: gemma-4-26b-a4b at 4K/8K/16K and qwen-3.6-35b-a3b-mtp at every context, nine family heads plus siblings. For all of them MTP tuning will fail identically and the siblings will correctly refuse to inherit the failed values.
+
+### 45.3 Change J — placement gate relative to the model's baseline (required before the 35B family runs)
+
+- In `cmd_mtp_discover`, establish `BASE_PLACEMENT` before Phase 1: read `mode` from `/tmp/discover_${MODEL}.json` when it exists and is from this run (same day; the file carries `written_at`), otherwise from the first measured candidate, which is always the ini's own n_max (the value the batch ladder validated). If the baseline is `CPU`, the model is CPU-compute: reject candidates on OOM and SHORT only, never on placement. If the baseline is `GPU`, keep the current rule (a `CPU` candidate is a spill).
+- Apply the same baseline in `mtp_phase1_winner` and `mtp_mean_for` (the `p[4] == "CPU"` filters), otherwise the Python side silently drops every sample even when the shell side accepts them.
+- Log the baseline once: `placement baseline: CPU (CPU-compute model; placement is not a gate)`.
+- `cmd_mtp_thorough` has the same four gates; apply the same rule there for consistency.
+- Record `placement_baseline` in the status file and the JSON `mtp` block.
+
+Acceptance: `bench.sh --no-inherit mtp gemma-4-26b-a4b-q4-qat-mtp-8k` completes with `tuning_status: ok` and a winner (expected n_max 2 on the 15:07 numbers), and a GPU model (gemma-12b) still rejects a spilled candidate if one occurs. Then re-tune the gemma-26b heads so the siblings can inherit.
+
+### 45.4 Two smaller items from the same log
+
+1. **`mean_draft_len` is empty in every tuning sample.** The server prints `mean len =  3.00` with two spaces; `decode_sample` greps `mean len = [0-9.]+` with one. Use `mean len =\s*[0-9.]+`. The bench block parses it with a tolerant regex, which is why `draft_mean_len: 2.59` is present there.
+2. **CPU-compute probes are noisier than GPU probes.** Point 3392 measured 1564 t/s between neighbours at 1825 and 1786, a 13% outlier on a single timed sample (these probes take over 5 s, so no median). It did not affect the pick, but it could. Cheap guard: when a refinement point measures more than 5% below both of its measured neighbours, re-probe it once and keep the higher value. One extra probe only when triggered.
