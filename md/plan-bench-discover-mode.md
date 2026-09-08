@@ -1417,3 +1417,17 @@ Warm-up and medians ran in every mode (`warm-up done` on every point in `off` an
 Measured costs on this model for the record: `off` 3.7 min, `coarse` 4.6 min, `64` 6.7 to 7 min. `models.ini` restored to the committed state after the author's runs.
 
 **The discover pipeline is complete.** Sections 0 to 42 are the record; the remaining work is the catalogue itself (family heads with `--no-inherit --strict`, siblings inherit), which is already under way.
+
+---
+
+## 44. `MTP_TIE` lowered to 0.02 (2026-09-08, user direction)
+
+**Change I.** `MTP_TIE` in `tools/bench.sh` changes from 0.05 to 0.02. Applied directly by the author at the user's instruction.
+
+**Why.** The 5% band was set when MTP samples were single forced generations with 5 to 15% noise and when the batch pick was expected to sit near the spill ceiling, so ties went to the smaller n_max for draft-buffer headroom. Both premises have changed: samples are now two-sample means of natural-stop generations, and picks sit far below the ceiling (gemma-12b: 1664 against a ceiling above 8192). In the 13:52 run n_max 4 averaged 53.85 t/s against 51.95 for n_max 2, a consistent 3.5% across four tunes today, and the 5% band discarded it. At 2% the tie set on that run is n_max 4 alone.
+
+**Effect.** A consistent 2%+ decode gain now wins; differences under 2% still go to the smaller n_max (the noise floor after two-sample means). When 4 becomes the provisional best the sweep also measures 5, one extra run. The p_min rule keeps the same constant and stays asymmetric (switch away from 0.7 only when a candidate beats it by more than the band and holds on a second sample). The `mtpverify` margin threshold is a different constant (`MTP_TIE_NATS`) and is unchanged.
+
+**Follow-up if a model ever needs it.** A ceiling-aware version (apply the headroom tie-break only when the pick is within a factor of two of the spill ceiling, otherwise take the fastest) is a few lines; not implemented until a model shows the need.
+
+**Docs.** `AGENTS.md` step 1 of the MTP method now says "within `MTP_TIE`, 2%" (updated with this change). Records already carry every candidate's samples, so what the rule chose against is visible per model.
