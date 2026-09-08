@@ -615,3 +615,44 @@ For scale, the gemma OFF run has 11 positions in its first 200 tokens where the 
 - §6 (`cmd_mtp_discover`, no degeneracy gate, placement as the only hard gate) and §6.4 (status plumbing) proceed as written.
 - §6.1 gains one sentence for the docs: MTP output equals the target sampler's output by construction (`common_sampler_sample_and_accept_n`); observed token differences between MTP on and off are near-tie flips under kernel-level logit noise of about 0.1 nats, the same class of difference as changing `batch-size`.
 - The scratch checkout used for §18.1 lives outside the repo and is not a deliverable; anyone re-checking should read the three locations named above at the commit that the running image was built from.
+
+---
+
+## 19. Implementer progress report (Steps A–C) + a blocker for author review (2026-09-07, later)
+
+### 19.1 What is committed and verified
+
+| Step | Commit(s) | State |
+|---|---|---|
+| A — `mtpverify` §18.4 cleanup | `34750dd` | Done. OFF-only gate; both `gemma-4-12b-q4-qat-mtp-16k` and `qwen-3.5-9b-q4-mtp-16k` PASS end-to-end (gemma d=58 gap_off 0.097; qwen d=34 gap_off 0.055), matching §18.3. |
+| B — §5 decode measurement + `acc==` | `287c384`, `fb759ba` | Done. `decode_sample` natural-stop (no `ignore_eos`), heading-strip degeneracy, SHORT retry with `DECODE_PROMPT_LONG`; `acc==` parse fixed (`$3`→`$4`); `run_decode_test` now a wrapper. Verified by a full `mtp gemma` sweep: numeric `acc=` and `tokens=` on every line, degeneracy 0.0 throughout (no loop inflation), Phases 1/2/3 PASS. |
+| C — §4 `cmd_bisect_discover` | `0aec580` | Code done behind `BENCH_DISCOVER=1`. New `cmd_bisect_discover`, `cmd_bisect_thorough` (old body), `cmd_bisect_test_batch` (shared), `prefill_probe_sized`. Dispatcher routes a numeric test-batch → shared helper; else `BENCH_DISCOVER=1` → discover, else thorough. `bash -n` clean. |
+
+### 19.2 The discover ladder validates (on lfm-2.5-8b-a1b-q4-4k-think)
+
+Run with `BENCH_DISCOVER=1` on `lfm-2.5-8b-a1b-q4-4k-think` (ctx 4096), the ladder behaves exactly per §4.1–4.3:
+
+```
+ladder: 256=4611 512=5085 1024=5789 2048=5627 4096=5841
+mode=GPU  ceiling(coarse) ≥ 4096 PASS (not probed higher)
+best prefill=5841; pick=1024 (smallest within 0.03 of best)
+```
+
+The model is detected GPU at rung 256, the coarse ladder runs 256→4096, and the smallest-within-`PREFILL_TOL` pick (1024) equals the existing committed batch — a sane result. (prefill is flat within ~20% here and the 3% tolerance resolves to a low rung, as designed.)
+
+### 19.3 Blocker: `saturation_test` fails on tiny-ctx models during the Phase C confirm — pre-existing and out of scope (§12)
+
+The Phase C confirm (which calls the **unchanged** `saturation_test`) dies **silently with exit 1** on lfm at 4K ctx, right after the sizing probes converge, for **both** the discover confirm and the untouched thorough `test-batch` path. Evidence:
+
+- `saturation_test` is **byte-identical** to the pre-Step-A commit (`diff` of the function body is empty) — not a regression from steps A–C.
+- The server completes the saturation request fully (`usage` pt=4055 ct=41 finish=length, reaching ctx) — see `/tmp/sat_response.json`.
+- `bash -x` shows the Phase 2 watchdog runs once (task launched), then the EXIT trap fires `RC=1; restore_batch; exit 1` with no "Saturation: PASS/OOM/reject" log line and no bash error on stderr.
+- Affects `lfm-2.5-8b-a1b-q4-4k-think` (ctx 4096) reproducibly. Its benchmark JSON exists (2026-09-05, `bench_model.sh v2`), so it saturated before; something in the current server/log state or the 4K-ctx sizing edge is now failing it.
+
+Per §12, `saturation_test` is out of scope to modify, so the implementer stopped rather than patch it.
+
+### 19.4 Questions for the author
+
+1. **Is the `saturation_test` tiny-ctx failure known / expected, and is it in scope to fix?** It blocks the §11 step-2 acceptance model `lfm-2.5-8b-a1b-q4-4k-think`. If it is a real bug, who fixes it — the implementer (requires waiving §12) or the author? If it is expected (4K-ctx models should not be run through the 99%-ctx saturation confirm), how should the acceptance check proceed?
+2. **Suggested next validation** if the lfm-4K blocker stands: run discover on a normal-size model where saturation is known to work (`gemma-4-12b-q4-qat-mtp-16k` or `ornith-1.5-9b-q4-mtp-64k-think`) to validate the full discover confirm path end-to-end. Confirm that is acceptable in place of the lfm-4K acceptance.
+3. **Any review of `cmd_bisect_discover` / `cmd_bisect_thorough` / `cmd_bisect_test_batch` / `prefill_probe_sized`** (commit `0aec580`) before the implementer proceeds to Step D (`cmd_mtp_discover` + §6.4 status plumbing)?
