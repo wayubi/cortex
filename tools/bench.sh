@@ -3076,11 +3076,15 @@ prefill_probe_sized() {
   local PROBE_CHARS
   PROBE_CHARS=$(python3 -c "print(int($PROBE_TOKENS * $CPT))")
   [ "$PROBE_CHARS" -lt 16 ] && PROBE_CHARS=16
-  local MAX_ATTEMPTS=15 ATTEMPT=0
 
-  while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
-    ATTEMPT=$((ATTEMPT + 1))
-    python3 -c "
+  # One measured attempt. Echoes the parsed t/s to stdout, or "0" on OOM/stall/
+  # parse-fail. Sets $PP_WALL to the wall-clock seconds the request took (for the
+  # median-of-3 rule below). All progress → stderr.
+  pp_attempt() {
+    local MAX_ATTEMPTS=15 ATTEMPT=0
+    while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+      ATTEMPT=$((ATTEMPT + 1))
+      python3 -c "
 import json
 filler = 'The history of computing is long and complex. '
 n = $PROBE_CHARS
@@ -3088,45 +3092,71 @@ prompt = (filler * ((n // len(filler)) + 1))[:n]
 payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
 with open('/tmp/pp_sized.json','w') as f: json.dump(payload, f)
 "
-    fire_request /tmp/pp_sized.json /tmp/pp_sized_out.json "prefill-sized" "$(adaptive_timeout 1)"
-    local RC=$?
-    if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
+      local T0=$(date +%s)
+      fire_request /tmp/pp_sized.json /tmp/pp_sized_out.json "prefill-sized" "$(adaptive_timeout 1)"
+      local RC=$?
+      if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
+      local WATCH=0
+      while kill -0 $FIRE_PID 2>/dev/null; do
+        if [ "$(oom_count_since_mark)" -gt 0 ]; then kill $FIRE_PID 2>/dev/null; break; fi
+        WATCH=$((WATCH + 1))
+        [ $((WATCH % 10)) -eq 0 ] && log "    prefill-sized: still running (${WATCH}x2s)" >&2
+        sleep 2
+      done
+      wait $FIRE_PID 2>/dev/null || true
+      local T1=$(date +%s)
+      PP_WALL=$((T1 - T0))
 
-    local WATCH=0
-    while kill -0 $FIRE_PID 2>/dev/null; do
-      if [ "$(oom_count_since_mark)" -gt 0 ]; then kill $FIRE_PID 2>/dev/null; break; fi
-      WATCH=$((WATCH + 1))
-      [ $((WATCH % 10)) -eq 0 ] && log "    prefill-sized: still running (${WATCH}x2s)" >&2
-      sleep 2
-    done
-    wait $FIRE_PID 2>/dev/null || true
+      # Overflow → shrink and retry (mirrors saturation_test / prefill_probe).
+      if grep -q "exceeds the available context" /tmp/pp_sized_out.json 2>/dev/null; then
+        PROBE_CHARS=$((PROBE_CHARS * 9 / 10))
+        [ "$PROBE_CHARS" -lt 16 ] && PROBE_CHARS=16
+        log "    prefill-sized: overflow rejected (attempt $ATTEMPT) — shrinking to ${PROBE_CHARS} chars" >&2
+        continue
+      fi
+      local OOM=$(oom_count_since_mark)
+      if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
 
-    # Overflow → shrink and retry (mirrors saturation_test / prefill_probe).
-    if grep -q "exceeds the available context" /tmp/pp_sized_out.json 2>/dev/null; then
-      PROBE_CHARS=$((PROBE_CHARS * 9 / 10))
-      [ "$PROBE_CHARS" -lt 16 ] && PROBE_CHARS=16
-      log "    prefill-sized: overflow rejected (attempt $ATTEMPT) — shrinking to ${PROBE_CHARS} chars" >&2
-      continue
-    fi
-
-    local OOM=$(oom_count_since_mark)
-    if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
-
-    # Parse the "prompt eval time" summary line from LOG_MARK forward.
-    local PPMATCH
-    PPMATCH=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
-      | grep "prompt eval time" | tail -1 \
-      | grep -oE '[0-9]+\.?[0-9]* tokens per second' | awk '{print $1}')
-    if [ -n "$PPMATCH" ] && [ "$PPMATCH" != "0" ]; then
-      log "  prefill-sized: ${PPMATCH} t/s (~${PROBE_TOKENS} tokens, ${PROBE_CHARS} chars)" >&2
-      echo "$PPMATCH"
+      # Parse the "prompt eval time" summary line from LOG_MARK forward.
+      local PPMATCH
+      PPMATCH=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+        | grep "prompt eval time" | tail -1 \
+        | grep -oE '[0-9]+\.?[0-9]* tokens per second' | awk '{print $1}')
+      if [ -n "$PPMATCH" ] && [ "$PPMATCH" != "0" ]; then
+        echo "$PPMATCH"
+        return 0
+      fi
+      # Parse failed — no useful data, don't retry (model served but output unreadable).
+      echo "0"
       return 0
-    fi
-    # Parse failed — no useful data, don't retry (model served but output unreadable).
+    done
     echo "0"
+  }
+
+  # First measurement.
+  local V1 PP_WALL=99
+  V1=$(pp_attempt)
+  # Fast probe (sub-5s, e.g. the 3072-token probe on 4K ctx finishes in <1s) is
+  # noise-dominated; re-measure twice and return the median so the ladder pick is
+  # repeatable (plan §23.3#5).
+  if [ "$V1" != "0" ] && [ "$PP_WALL" -lt 5 ]; then
+    log "  prefill-sized: fast probe (${PP_WALL}s) — taking median of three" >&2
+    local V2 V3
+    V2=$(pp_attempt)
+    V3=$(pp_attempt)
+    local MED
+    MED=$(printf '%s\n' "$V1" "$V2" "$V3" | python3 -c "
+import sys
+vals=[float(x) for x in sys.stdin.read().split() if x!='0']
+print('%.2f'%sorted(vals)[len(vals)//2] if vals else '0')
+")
+    log "  prefill-sized: ${MED} t/s (median of $V1/$V2/$V3, ~${PROBE_TOKENS} tokens)" >&2
+    echo "$MED"
     return 0
-  done
-  echo "0"
+  fi
+  log "  prefill-sized: ${V1} t/s (~${PROBE_TOKENS} tokens, ${PROBE_CHARS} chars)" >&2
+  echo "$V1"
+  return 0
 }
 
 # ── SUBCOMMAND: bisect discover mode (plan §4, default when BENCH_DISCOVER=1) ──
