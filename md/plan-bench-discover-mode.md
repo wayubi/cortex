@@ -794,3 +794,35 @@ Step C is complete. Proceeding to Step D (`cmd_mtp_discover` + §6.4 status plum
 - **Step G (ctx-sibling seeding): defer.** Run the full re-benchmark with discover first. The ladder results across 64K, 128K and 256K siblings of the same weights will show whether their picks land close enough for seeding to save anything. Decide with that data.
 - **`PREFILL_TOL`: keep 3%.** The ornith drop from 8192 to 512 looks large but is not a regression. On the ladder 512 measured within 1% of the best rung; at full 64K context the confirm run measured 1308 t/s at 512 against 1353 t/s at the 16:45 pick of 1664, a 3% difference, and decode was identical (43.1 against 44.1 t/s at 256). The committed 8192 was never a measured optimum; it was the 16:45 ceiling-side value the user restored by hand. A smaller batch is the intended outcome of the tolerance rule, and it is what gives the MTP draft buffer its headroom. If a future workload shows a real cost from small batches it will be in the saturation prefill number, which the JSON now records.
 - **Full re-benchmark: yes, after 23.2.** Run family heads first with `--strict` so no JSON is published with a failed MTP tune, then let siblings inherit. The pipeline is otherwise ready.
+
+---
+
+## 24. Implementer disposition of the §23 author-review items (2026-09-07, later)
+
+All of §23.2 (required) and most of §23.3 (recommended) are implemented and verified. One §23.3 item (#5) was attempted, found to regress, and reverted with the finding recorded.
+
+### §23.2 — required (both done)
+
+| Item | Commit | Verification |
+|---|---|---|
+| #1 `cmd_bench` Phase B natural stop | `5b762e2` | Phase B now sends `DECODE_PROMPT` without `ignore_eos`; records `finish_reason=stop`, real `completion_tokens`, `degeneracy`, and `bench.decode_prompt_tokens` from the response. Verified on gemma-16k: finish=stop, completion 2812, deg 0.0, decode_t_s 53.39 (was loop-inflated). Also fixed a backtick in a heredoc comment that triggered a shell `syntax error near unexpected token` during the bench run. |
+| #2 `run_ph1` stdout capture bug | `a14e564` | `discover_measure` now sends `restart`/`log` to stderr so stdout is only the result line; `run_ph1` captures it directly. Verified: Phase 1 logs `n_max=N: PASS (t/s, tokens, GPU)` for every candidate (was always `rejected` with empty fields). |
+
+### §23.3 — recommended
+
+| Item | Commit / disposition | Verification |
+|---|---|---|
+| #3 stale status files | `df08d4d` | `cmd_mtpcheck` stamps a fresh `not_run` on MTP-capable models (still `not_mtp` on non-MTP); both the MTP status file and the discover file carry `written_at`, which `cmd_bench` copies (`mtp.tuning_written_at`). |
+| #4 residency `stream:true` | `475839f` | residency_probe never parses the response body, so SSE is harmless; lets the server abort on client disconnect. Verified the ladder still runs correctly. |
+| #5 small-ctx pick instability | **attempted `ee92bf7`, reverted `62baf75`** | See below. |
+| #6 stale comments/usage + AGENTS.md | `eaf2769` | Header/banner/footer no longer claim `BENCH_DISCOVER=1` selects discover; `--strict` and `written_at` documented in AGENTS.md Result recording. |
+
+### 23.3#5 finding (why the median-of-3 was reverted)
+
+The within-rung median-of-three **regressed** on lfm-4K: the 3072-token probe is bimodal, not Gaussian. The first sample after the per-rung restart+residency read ~4500 t/s (correct), but the two immediate back-to-back re-measures read 60–270 t/s — likely a transient state from re-probing a sub-second job on a warm instance without a fresh warmup. The median then picked the bad samples and the ladder chose batch 256 instead of ~1024.
+
+Reverting to the single-measure probe restored correct, repeatable picks (lfm → 1024 = the committed value). The cross-run pick instability fable noted (1024/4096/2048/1024/2048) is inherent to a sub-second measurement and is operationally fine per §23.4. **Recommendation:** if repeatability is wanted, the fix belongs in the probe's measurement (e.g. ensuring each probe runs on a freshly-warmed instance, or a longer probe) — not a median over bimodal samples on one instance. The implementer did not find a low-risk within-instance fix and chose not to ship a regression.
+
+### Overall state after §23
+
+Working tree and `models.ini` clean; `bash -n` clean. Required fixes (#1, #2) verified live. Recommended items #3, #4, #6 done; #5 reverted with a recorded rationale. The pipeline is ready for a full re-benchmark per §23.4 (family heads first with `--strict`, then siblings inherit).
