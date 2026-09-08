@@ -1461,3 +1461,24 @@ Acceptance: `bench.sh --no-inherit mtp gemma-4-26b-a4b-q4-qat-mtp-8k` completes 
 
 1. **`mean_draft_len` is empty in every tuning sample.** The server prints `mean len =  3.00` with two spaces; `decode_sample` greps `mean len = [0-9.]+` with one. Use `mean len =\s*[0-9.]+`. The bench block parses it with a tolerant regex, which is why `draft_mean_len: 2.59` is present there.
 2. **CPU-compute probes are noisier than GPU probes.** Point 3392 measured 1564 t/s between neighbours at 1825 and 1786, a 13% outlier on a single timed sample (these probes take over 5 s, so no median). It did not affect the pick, but it could. Cheap guard: when a refinement point measures more than 5% below both of its measured neighbours, re-probe it once and keep the higher value. One extra probe only when triggered.
+
+---
+
+## 46. Author sign-off on Change J (2026-09-08)
+
+**Accepted.** Commit `96cecff` implements §45.3 and both §45.4 items. Verified by inspection of all gate sites (four in each tuner, both Python filters, the runner-up pass) and by a live run of `bench.sh --no-inherit mtp gemma-4-26b-a4b-q4-qat-mtp-8k` (16:31 to 16:46):
+
+| | |
+|---|---|
+| baseline | `placement baseline: CPU (discover JSON mode, same-day)` |
+| Phase 1 | 2 → 43.9, 42.1; 4 → 39.2; 3 → 44.5, 44.9; all PASS with `placement=CPU`; winner n_max 3 (4.0% over 2, outside the 2% band) |
+| Phase 2 | 0.5 → 46.3 then 43.1 on confirmation, mean 44.7 against the 44.7 reference, kept 0.7; 0.9 → 45.9 |
+| result | `status: ok`, tuned 3 / 0.7, `placement_baseline: CPU` in the status file, ini updated; `mean_draft_len` now populated in every sample (2.24 to 2.57) |
+| time | 15 min for 8 runs; CPU-compute decode makes each sample about 110 s |
+
+The same model failed on every candidate two hours earlier with the identical measurements, which is the whole finding of §45.
+
+Notes:
+- The comment in the discover tuner says the first measured candidate is the ini's own n_max; the set is sorted, so it is the smallest candidate. Harmless for the baseline rule (a smaller n_max cannot spill where a larger one does not), but the comment should say "the smallest candidate".
+- The head's bench JSON on disk still carries `tuning_status: failed` from 16:11. Run `bench.sh --no-inherit bench gemma-4-26b-a4b-q4-qat-mtp-8k` to regenerate it with the ok status, after which the 8K siblings inherit the MTP values. The 4K and 16K heads and the 35B family will tune correctly on their first pass now.
+- `models.ini` carries this tune (n_max 3, p_min 0.7 for the 8K head) alongside the user's uncommitted suite results; the author did not revert it because it is a real result from the final code.
