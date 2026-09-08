@@ -2736,19 +2736,19 @@ cmd_bisect_thorough() {
     log ""; log "=== TESTING BATCH $TEST_BATCH ==="
     set_batch "$TEST_BATCH"; restart
     log ""; log "=== PHASE 1: TINY PROBE ==="
-    tiny_probe
-    local T_RC=$?
+    local T_RC=0
+    tiny_probe || T_RC=$?
     if [ "$T_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
     if [ "$T_RC" -ne 0 ]; then log "  FAIL"; exit 1; fi
     log "  PASS"
     log ""; log "=== PHASE 2: SATURATION ==="
-    saturation_test "$CTX"
-    local S_RC=$?
+    local S_RC=0
+    saturation_test "$CTX" || S_RC=$?
     if [ "$S_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
     if [ "$S_RC" -ne 0 ]; then log "  FAILED"; exit 1; fi
     log ""; log "=== PHASE 3: LONG-DECODE ==="
-    long_decode_check
-    local LD_RC=$?
+    local LD_RC=0
+    long_decode_check || LD_RC=$?
     if [ "$LD_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
     log ""; log "=== RESULT: batch=$TEST_BATCH ubatch=$TEST_BATCH ==="
     log "=== DONE ==="
@@ -2795,7 +2795,7 @@ cmd_bisect_thorough() {
     set_batch "$B"; restart
     log "  Tiny probe @ batch=$B..."
     local T_RC=0
-    tiny_probe; T_RC=$?
+    tiny_probe || T_RC=$?
     if [ "$T_RC" -eq 2 ]; then
       log "  STALL at $B (network/HF fetch — not an OOM ceiling)"
       log "  Aborting bisect: model can't cold-load. Re-run when huggingface.co is reachable."
@@ -2813,8 +2813,7 @@ cmd_bisect_thorough() {
         return 1
       fi
       log "  GPU-resident at $B — saturation-validating..."
-      saturation_test "$CTX"
-      S_RC=$?
+      saturation_test "$CTX" || S_RC=$?
       if [ "$S_RC" -eq 2 ]; then
         log "  STALL during saturation at $B (network/HF fetch)"
         exit 1
@@ -2900,7 +2899,7 @@ cmd_bisect_thorough() {
     log ""; log "  Testing batch=$MID (lo=$LO, hi=$HI, gap=$((HI-LO)))..."
     set_batch "$MID"; restart; log "  Tiny probe..."
     local T_RC=0
-    tiny_probe; T_RC=$?
+    tiny_probe || T_RC=$?
     if [ "$T_RC" -eq 2 ]; then
       log "  STALL at $MID (network/HF fetch) — aborting bisect"
       exit 1
@@ -2915,8 +2914,8 @@ cmd_bisect_thorough() {
         HI=$MID
       else
         log "  GPU-resident at $MID — running saturation..."
-        saturation_test "$CTX"
-        local S_RC=$?
+        local S_RC=0
+        saturation_test "$CTX" || S_RC=$?
         if [ "$S_RC" -eq 2 ]; then
           log "  STALL during saturation at $MID — aborting bisect"
           exit 1
@@ -2943,8 +2942,8 @@ cmd_bisect_thorough() {
   log ""; log "=== FINAL CONFIRM (batch=$VALIDATED) ==="
   set_batch "$VALIDATED"; restart
   PASS=0
-  saturation_test "$CTX"
-  local S_RC=$?
+  local S_RC=0
+  saturation_test "$CTX" || S_RC=$?
   if [ "$S_RC" -eq 2 ]; then
     log "  STALL during final-confirm saturation — aborting"
     exit 1
@@ -2997,8 +2996,8 @@ cmd_bisect_thorough() {
   # ── LONG-DECODE CHECK (on the final chosen batch, not the ceiling) ──
   log ""; log "=== LONG-DECODE CHECK (batch=$WIN) ==="
   set_batch "$WIN"; restart
-  long_decode_check
-  local LD_RC=$?
+  local LD_RC=0
+  long_decode_check || LD_RC=$?
   if [ "$LD_RC" -ne 0 ]; then
     log "  LONG-DECODE failed (rc=$LD_RC) on chosen batch $WIN — failing model"
     exit 1
@@ -3060,19 +3059,19 @@ cmd_bisect_test_batch() {
   log ""; log "=== TESTING BATCH $BATCH ==="
   set_batch "$BATCH"; restart
   log ""; log "=== PHASE 1: TINY PROBE ==="
-  tiny_probe
-  local T_RC=$?
+  local T_RC=0
+  tiny_probe || T_RC=$?
   if [ "$T_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
   if [ "$T_RC" -ne 0 ]; then log "  FAIL"; exit 1; fi
   log "  PASS"
   log ""; log "=== PHASE 2: SATURATION ==="
-  saturation_test "$CTX"
-  local S_RC=$?
+  local S_RC=0
+  saturation_test "$CTX" || S_RC=$?
   if [ "$S_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
   if [ "$S_RC" -ne 0 ]; then log "  FAILED"; exit 1; fi
   log ""; log "=== PHASE 3: LONG-DECODE ==="
-  long_decode_check
-  local LD_RC=$?
+  local LD_RC=0
+  long_decode_check || LD_RC=$?
   if [ "$LD_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
   log ""; log "=== RESULT: batch=$BATCH ubatch=$BATCH ==="
   log "=== DONE ==="
@@ -3226,8 +3225,8 @@ cmd_bisect_discover() {
     log ""; log "--- rung batch=$B ---"
     set_batch "$B"; restart
     log "  Tiny probe @ batch=$B..."
-    tiny_probe
-    local T_RC=$?
+    local T_RC=0
+    tiny_probe || T_RC=$?
     if [ "$T_RC" -eq 2 ]; then
       log "  STALL at $B (network/HF fetch — not an OOM ceiling)"
       log "  Aborting bisect: model can't cold-load. Re-run when huggingface.co is reachable."
@@ -3376,8 +3375,8 @@ print(' '.join(out))
   discover_measure_candidate() {
     local CB=$1
     set_batch "$CB" >&2; restart >&2
-    tiny_probe >&2
-    local TR=$?
+    local TR=0
+    tiny_probe >&2 || TR=$?
     if [ "$TR" -eq 2 ]; then log "  STALL measuring candidate $CB — aborting" >&2; return 2; fi
     if [ "$TR" -ne 0 ]; then echo "0"; return 0; fi
     if [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$CB" -eq 256 ]; }; then
@@ -3533,8 +3532,8 @@ print(' '.join(out))
     log "  Confirm restart @ pick=$PICK..."
     set_batch "$PICK"; restart
     log ""; log "  === SATURATION at $PICK ==="
-    saturation_test "$CTX"
-    local SC_RC=$?
+    local SC_RC=0
+    saturation_test "$CTX" || SC_RC=$?
     if [ "$SC_RC" -eq 2 ]; then log "  STALL during saturation — aborting"; exit 1; fi
     if [ "$SC_RC" -ne 0 ]; then
       if [ "$SC_RC" -eq 3 ]; then
@@ -3560,8 +3559,8 @@ print(' '.join(out))
     log "  saturation PASS at pick=$PICK"
 
     log ""; log "  === LONG-DECODE at $PICK ==="
-    long_decode_check
-    local LC_RC=$?
+    local LC_RC=0
+    long_decode_check || LC_RC=$?
     if [ "$LC_RC" -eq 2 ]; then log "  STALL during long-decode — aborting"; exit 1; fi
     if [ "$LC_RC" -ne 0 ]; then
       log "  long-decode FAIL at pick=$PICK — stepping down"
