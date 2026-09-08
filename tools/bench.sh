@@ -1381,8 +1381,8 @@ for b, t in data[:5]: print(f'    batch={b}  prefill={t} t/s')
   while read CONFIRM_BATCH CONFIRM_TPS; do
     log "  Confirm: saturation_test at batch=$CONFIRM_BATCH..." >&2
     set_batch "$CONFIRM_BATCH" >&2; restart >&2
-    saturation_test "$CTX" >&2
-    local C_RC=$?
+    local C_RC=0
+    saturation_test "$CTX" >&2 || C_RC=$?
     if [ "$C_RC" -eq 0 ]; then
       log "  Confirm PASS at batch=$CONFIRM_BATCH (${CONFIRM_TPS} t/s)" >&2
       CONFIRM_FOUND=1; break
@@ -1637,8 +1637,8 @@ for b, p in pts[:$SHORTLIST_SIZE]:
     [ "$CONFIRM_COUNT" -gt "$CONFIRM_MAX" ] && break
     log "  Confirm $CONFIRM_COUNT/$CONFIRM_MAX: saturation_test at batch=$CONFIRM_BATCH (${CONFIRM_PFC} t/s)..." >&2
     set_batch "$CONFIRM_BATCH" >&2; restart >&2
-    saturation_test "$CTX" >&2
-    local C_RC=$?
+    local C_RC=0
+    saturation_test "$CTX" >&2 || C_RC=$?
     if [ "$C_RC" -eq 0 ]; then
       log "  Confirm PASS at batch=$CONFIRM_BATCH (${CONFIRM_PFC} t/s)" >&2
       CONFIRM_FOUND=1; break
