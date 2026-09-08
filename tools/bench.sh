@@ -3341,7 +3341,10 @@ print(' '.join(out))
     exit 1
   fi
 
-  # ── Phase B: pick = smallest PASS batch within tolerance of the best prefill ──
+  # ── Phase B: pick = best PASS point; Change-E noise-aware refinement ──
+  # (§30.2b). PREFILL_TOL default 0 → best-measured rung; a user-set value keeps
+  # the smallest-within-tolerance rule. Refinement tracks extra points in
+  # REFINE_B[]/REFINE_P[] (for step-down + JSON), never in the ladder arrays.
   local THRESH
   THRESH=$(python3 -c "print(float($BEST_PREFILL) * (1 - $PREFILL_TOL))")
   PICK=0
@@ -3351,47 +3354,139 @@ print(' '.join(out))
     fi
   done
   [ "$PICK" -eq 0 ] && { PICK=${PASS_B[0]}; PICK_PF=${PASS_P[0]}; }
-  log "  best prefill=${BEST_PREFILL} t/s; pick=$PICK (smallest within ${PREFILL_TOL} of best)"
+  log "  best prefill=${BEST_PREFILL} t/s; pick=$PICK (TOL=$PREFILL_TOL)"
 
-  # Edge refinement (only case a non-power-of-two is tested): PICK is the highest
-  # PASS rung AND the next rung failed → optimum may lie between. ≤2 extra restarts.
-  local MID_FAIL="$CEIL_FAIL_B"
-  if [ "${#PASS_B[@]}" -gt 0 ] && [ "$PICK" -eq "$HIGHPASS" ] \
-     && [ -n "$CEIL_FAIL_B" ] && { [ "$CEIL_FAIL_R" = "OOM" ] || [ "$CEIL_FAIL_R" = "SPILL" ]; }; then
-    log "  PICK is the highest PASS rung and ${MID_FAIL} ${CEIL_FAIL_R} — refining the ceiling edge"
-    local EXTRA=0
-    while [ "$EXTRA" -lt 2 ]; do
-      local MID
-      MID=$(( (PICK + MID_FAIL) / 2 )); MID=$(( MID / 64 * 64 ))
-      [ "$MID" -le "$PICK" ] && MID=$(( PICK + 64 ))
-      if [ "$MID" -ge "$MID_FAIL" ]; then log "  midpoint clamped to edge — stop refining"; break; fi
-      log ""; log "  Edge refine: testing midpoint $MID (between $PICK and $MID_FAIL)..."
-      set_batch "$MID"; restart
-      log "  Tiny probe @ batch=$MID..."
-      tiny_probe
-      local MT_RC=$?
-      if [ "$MT_RC" -eq 2 ]; then log "  STALL at $MID — aborting"; exit 1; fi
-      if [ "$MT_RC" -ne 0 ]; then log "  midpoint $MID OOM — stop refining"; break; fi
-      if [ "$MODE" != "CPU" ]; then
-        local MR_V
-        MR_V=$(residency_probe)
-        if [ "$MR_V" = "CPU" ]; then log "  midpoint $MID CPU-spill — stop refining"; break; fi
-      fi
-      local MID_PF
-      MID_PF=$(prefill_probe_sized "$CTX")
-      if [ "$MID_PF" = "0" ] || [ -z "$MID_PF" ]; then log "  midpoint $MID probe failed — stop refining"; break; fi
-      log "  midpoint $MID prefill=${MID_PF} t/s"
-      # Keep mid only if it passes AND its prefill is strictly higher than PICK's.
-      if python3 -c "exit(0 if float('$MID_PF') > float('$PICK_PF') else 1)" 2>/dev/null; then
-        log "  midpoint better — PICK ${PICK} → ${MID}"
-        PICK=$MID; PICK_PF=$MID_PF
-        EXTRA=$((EXTRA + 1))
-      else
-        log "  midpoint not better — keeping PICK=$PICK"
-        break
-      fi
+  local REFINE_B=() REFINE_P=()
+
+  # Measure one candidate batch. Echoes its prefill t/s, or "0" if it is not a
+  # PASS (OOM / CPU-spill / probe failure). rc 2 = STALL (abort).
+  discover_measure_candidate() {
+    local CB=$1
+    set_batch "$CB"; restart
+    tiny_probe
+    local TR=$?
+    if [ "$TR" -eq 2 ]; then log "  STALL measuring candidate $CB — aborting"; return 2; fi
+    if [ "$TR" -ne 0 ]; then echo "0"; return 0; fi
+    if [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$CB" -eq 256 ]; }; then
+      local RV
+      RV=$(residency_probe)
+      if [ "$RV" = "CPU" ]; then echo "0"; return 0; fi
+      if [ "$RV" = "STALL" ]; then log "  STALL at $CB (residency) — aborting"; return 2; fi
+    fi
+    local CPF
+    CPF=$(prefill_probe_sized "$CTX")
+    if [ "$CPF" = "0" ] || [ -z "$CPF" ]; then echo "0"; return 0; fi
+    echo "$CPF"
+    return 0
+  }
+
+  # Refine only when it can change the answer: skip simple non-MTP (flat prefill,
+  # Change A) and MODE=CPU (no spill ceiling / no draft).
+  if [ "$SIMPLE_NONMTP" -eq 0 ] && [ "$MODE" != "CPU" ]; then
+
+    # ── Rule 2: ceiling edge — best is the top measured point and the next rung
+    # above failed OOM/SPILL. Bisect between the best (lower) and the failed rung
+    # (upper); resolution scales with the value. Stop on the noise gate.
+    if [ -n "$CEIL_FAIL_B" ] \
+       && { [ "$CEIL_FAIL_R" = "OOM" ] || [ "$CEIL_FAIL_R" = "SPILL" ]; } \
+       && [ "$CEIL_FAIL_B" -gt "$PICK" ]; then
+      log "  ceiling edge: refining between pick=$PICK and ${CEIL_FAIL_B} ($CEIL_FAIL_R)"
+      local ELO=$PICK ELO_PF=$PICK_PF EHI="$CEIL_FAIL_B" ESTEPS=0
+      while [ "$ESTEPS" -lt 6 ]; do
+        local EGAP=$((EHI - ELO))
+        local ESTOP=$(python3 -c "print(max(64, round(0.06*$ELO)))")
+        [ "$EGAP" -le "$ESTOP" ] && break
+        local EMID=$(( (ELO + EHI) / 2 )); EMID=$(( EMID / 64 * 64 ))
+        [ "$EMID" -le "$ELO" ] && EMID=$(( ELO + 64 ))
+        [ "$EMID" -ge "$EHI" ] && EMID=$(( EHI - 64 ))
+        [ "$EMID" -le "$ELO" ] || [ "$EMID" -ge "$EHI" ] && break
+        log ""; log "  Edge refine: testing $EMID (between $ELO/$EHI)..."
+        local EMF
+        EMF=$(discover_measure_candidate "$EMID") || { log "  STALL at $EMID — aborting"; exit 1; }
+        if [ "$EMF" = "0" ]; then log "  edge $EMID failed (OOM/CPU/probe) — tighten ceiling to $EMID"; EHI=$EMID; ESTEPS=$((ESTEPS+1)); continue; fi
+        REFINE_B+=("$EMID"); REFINE_P+=("$EMF")
+        echo "$EMID PASS $EMF" >> "$POINTS"
+        # Midpoint far below the lower bound -> the peak is not at the ceiling.
+        if python3 -c "exit(0 if float($EMF) < float($ELO_PF) * (1 - $PREFILL_NOISE) else 1)" 2>/dev/null; then
+          log "  edge $EMID ($EMF t/s) far below $ELO ($ELO_PF) — peak not at ceiling; interior refine applies from $ELO"
+          break
+        fi
+        if python3 -c "exit(0 if float($EMF) > float($ELO_PF) else 1)" 2>/dev/null; then
+          log "  edge better — $ELO → $EMID ($EMF t/s)"
+          if python3 -c "exit(0 if float($EMF) > float($PICK_PF) else 1)" 2>/dev/null; then PICK=$EMID; PICK_PF=$EMF; fi
+          ELO=$EMID; ELO_PF=$EMF
+        else
+          EHI=$EMID
+        fi
+        ESTEPS=$((ESTEPS + 1))
+      done
+    fi
+
+    # ── Rule 1: interior peak — best has a PASS point both below and above. Test
+    # the midpoint toward the higher side, move up while it beats best by >
+    # PREFILL_NOISE, stop when the bracket is small. (Simplified: only search the
+    # ascending side toward a higher neighbour, which is where a real interior
+    # peak between doubling rungs can hide.)
+    # Find the ladder PASS rung immediately above PICK (a lower neighbour always
+    # exists since the ladder starts at 256 and PICK is not the lowest when we are
+    # interior). Refine only when PICK is not the top PASS rung AND is not at the
+    # ceiling (no OOM/SPILL directly above within one doubling step).
+    local HI_NEIGH=0
+    for idx in "${!PASS_B[@]}"; do
+      local PB=${PASS_B[$idx]}
+      if [ "$PB" -gt "$PICK" ] && { [ "$HI_NEIGH" -eq 0 ] || [ "$PB" -lt "$HI_NEIGH" ]; }; then HI_NEIGH=$PB; fi
     done
+    if [ "$HI_NEIGH" -gt 0 ] && [ "$HI_NEIGH" -gt "$PICK" ]; then
+      # interior if there is also a PASS below PICK
+      local HAS_BELOW=0
+      for idx in "${!PASS_B[@]}"; do [ "${PASS_B[$idx]}" -lt "$PICK" ] && HAS_BELOW=1; done
+      if [ "$HAS_BELOW" -eq 1 ]; then
+        log "  interior peak: refining between pick=$PICK and next rung $HI_NEIGH"
+        local IBOT=$PICK IBOT_PF=$PICK_PF ITOP=$HI_NEIGH ISTEPS=0
+        while [ "$ISTEPS" -lt 4 ]; do
+          local IGAP=$((ITOP - IBOT))
+          local ISTOP=$(python3 -c "print(max(256, round(0.06*$PICK)))")
+          [ "$IGAP" -le "$ISTOP" ] && break
+          local IMID=$(( (IBOT + ITOP) / 2 )); IMID=$(( IMID / 64 * 64 ))
+          [ "$IMID" -le "$IBOT" ] && IMID=$(( IBOT + 64 ))
+          [ "$IMID" -ge "$ITOP" ] && IMID=$(( ITOP - 64 ))
+          [ "$IMID" -le "$IBOT" ] || [ "$IMID" -ge "$ITOP" ] && break
+          log ""; log "  Interior refine: testing $IMID (between $IBOT/$ITOP)..."
+          local IMF
+          IMF=$(discover_measure_candidate "$IMID") || { log "  STALL at $IMID — aborting"; exit 1; }
+          if [ "$IMF" = "0" ]; then log "  interior $IMID failed (OOM/CPU/probe) — stop"; break; fi
+          REFINE_B+=("$IMID"); REFINE_P+=("$IMF")
+          echo "$IMID PASS $IMF" >> "$POINTS"
+          if python3 -c "exit(0 if float($IMF) > float($IBOT_PF) * (1 + $PREFILL_NOISE) else 1)" 2>/dev/null; then
+            log "  interior $IMID ($IMF t/s) beats best $IBOT ($IBOT_PF) — move up"
+            if python3 -c "exit(0 if float($IMF) > float($PICK_PF) else 1)" 2>/dev/null; then PICK=$IMID; PICK_PF=$IMF; fi
+            IBOT=$IMID; IBOT_PF=$IMF
+          else
+            log "  interior $IMID ($IMF t/s) within noise of best $IBOT ($IBOT_PF) — stop"
+            break
+          fi
+          ISTEPS=$((ISTEPS + 1))
+        done
+      fi
+    fi
   fi
+
+  log "  after refinement: pick=$PICK (${PICK_PF} t/s)"
+
+  # Change E rule 3: on a confirm failure, step down through the measured points
+  # (refinement points first, largest below PICK, then ladder rungs). Echoes the
+  # largest measured PASS point strictly below $1, or empty if none.
+  discover_stepdown_candidate() {
+    local CUR=$1 BESTDN=0
+    local i
+    for i in "${!REFINE_B[@]}"; do
+      if [ "${REFINE_B[$i]}" -lt "$CUR" ] && [ "${REFINE_B[$i]}" -gt "$BESTDN" ]; then BESTDN=${REFINE_B[$i]}; fi
+    done
+    for i in "${!PASS_B[@]}"; do
+      if [ "${PASS_B[$i]}" -lt "$CUR" ] && [ "${PASS_B[$i]}" -gt "$BESTDN" ]; then BESTDN=${PASS_B[$i]}; fi
+    done
+    echo "$BESTDN"
+  }
 
   # ── Phase C: confirm at PICK (one restart per attempt, ≤2 step-downs) ──
   set_batch "$PICK"
@@ -3411,13 +3506,11 @@ print(' '.join(out))
       else
         log "  saturation OOM at pick=$PICK; stepping down"
       fi
-      # step down (below)
-      local NEWPICK=0
-      for i in "${!PASS_B[@]}"; do
-        if [ "${PASS_B[$i]}" -lt "$PICK" ] && [ "${PASS_B[$i]}" -gt "$NEWPICK" ]; then NEWPICK=${PASS_B[$i]}; fi
-      done
-      if [ "$NEWPICK" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
-        log "  No lower PASS rung below $PICK (or step-down limit reached) — failing model"
+      # step down (below): largest measured point (refine then ladder rung)
+      local NEWPICK
+      NEWPICK=$(discover_stepdown_candidate "$PICK")
+      if [ -z "$NEWPICK" ] || [ "$NEWPICK" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
+        log "  No lower measured PASS point below $PICK (or step-down limit reached) — failing model"
         log "  Inspect logs; re-run to retry."
         exit 1
       fi
@@ -3434,12 +3527,10 @@ print(' '.join(out))
     if [ "$LC_RC" -eq 2 ]; then log "  STALL during long-decode — aborting"; exit 1; fi
     if [ "$LC_RC" -ne 0 ]; then
       log "  long-decode FAIL at pick=$PICK — stepping down"
-      local NEWPICK2=0
-      for i in "${!PASS_B[@]}"; do
-        if [ "${PASS_B[$i]}" -lt "$PICK" ] && [ "${PASS_B[$i]}" -gt "$NEWPICK2" ]; then NEWPICK2=${PASS_B[$i]}; fi
-      done
-      if [ "$NEWPICK2" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
-        log "  No lower PASS rung below $PICK (or step-down limit reached) — failing model"
+      local NEWPICK2
+      NEWPICK2=$(discover_stepdown_candidate "$PICK")
+      if [ -z "$NEWPICK2" ] || [ "$NEWPICK2" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
+        log "  No lower measured PASS point below $PICK (or step-down limit reached) — failing model"
         log "  Inspect logs; re-run to retry."
         exit 1
       fi
@@ -3502,12 +3593,10 @@ print(' '.join(out))
     fi
 
     if [ "$CONFIRM_OK" -eq 0 ]; then
-      local NEWPICK3=0
-      for i in "${!PASS_B[@]}"; do
-        if [ "${PASS_B[$i]}" -lt "$PICK" ] && [ "${PASS_B[$i]}" -gt "$NEWPICK3" ]; then NEWPICK3=${PASS_B[$i]}; fi
-      done
-      if [ "$NEWPICK3" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
-        log "  No lower PASS rung below $PICK (or step-down limit reached) — failing model"
+      local NEWPICK3
+      NEWPICK3=$(discover_stepdown_candidate "$PICK")
+      if [ -z "$NEWPICK3" ] || [ "$NEWPICK3" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
+        log "  No lower measured PASS point below $PICK (or step-down limit reached) — failing model"
         log "  Inspect logs; re-run to retry."
         exit 1
       fi
@@ -3540,14 +3629,21 @@ print(' '.join(out))
   python3 -c "
 import json, datetime
 model='$MODEL'
+refine_batches=set('''${REFINE_B[@]}'''.split())
 points=[l.split() for l in open('$POINTS') if l.strip()]
-ladder=[{'batch':int(t[0]),'status':t[1],'prefill':(float(t[2]) if len(t)>2 and t[2] not in ('OOM','SPILL','PASS') else None)} for t in points]
+ladder=[]
+for t in points:
+    b=int(t[0]); st=t[1]; pf=(float(t[2]) if len(t)>2 and t[2] not in ('OOM','SPILL','PASS') else None)
+    if st=='PASS' and str(b) in refine_batches:
+        st='REFINE'
+    ladder.append({'batch':b,'status':st,'prefill':pf})
 discover={
   'mode':'$MODE_TXT',
   'ladder':ladder,
   'best_prefill':float('$BEST_PREFILL'),
   'pick':int('$PICK'),
-  'pick_rule':f'smallest PASS batch within ${PREFILL_TOL} of best prefill',
+  'pick_rule':f'best measured PASS point (incl. ${PREFILL_NOISE}-aware refinement); TOL=${PREFILL_TOL}',
+  'refine_points':sorted(int(x) for x in refine_batches if x),
   'ceiling_coarse':('${HIGHPASS}' + (' PASS / ${CEIL_FAIL_B} ${CEIL_FAIL_R}' if '${CEIL_FAIL_B}' else ' PASS (not probed higher)')),
   'ladder_break':'${CEIL_BREAK:-0}',
   'written_at':datetime.datetime.now().isoformat(),
