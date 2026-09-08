@@ -1261,3 +1261,36 @@ otherwise decide by the GPU: avg_gpu > GPU_ACTIVE_PCT → GPU, else → CPU
 The residency probe keeps its early-kill logic but takes its final verdict from the same function, so `AMBIGUOUS` disappears everywhere. Rationale for the tie-break: the GPU utilisation is direct evidence of where the matrix work runs; process CPU between 150 and 200% with the GPU busy is a host thread plus sampling, and with the GPU idle it is compute. Record `avg_cpu_pct` and `avg_gpu_util_pct` as today so the basis stays visible.
 
 Acceptance: re-run the lfm 4K bench; expect `placement: GPU`. Grep the script for `AMBIGUOUS`; the only remaining hits should be comments.
+
+---
+
+## 38. Always refine to 64 (2026-09-08, user direction)
+
+The user does not want picks confined to the doubling rungs. Change E's noise gate stops refinement after one midpoint on most curves, so in practice the pick is a power of two. This section replaces the gate with an unconditional refinement to 64-token granularity, made affordable by two facts established this week.
+
+**Facts that make it cheap.**
+1. With Change A, a probe point on a plain model costs 10 to 13 s (restart, tiny probe, one 3K to 16K-token prefill).
+2. Memory use is monotonic in batch. If both ends of a bracket passed the tiny probe and residency, no batch between them can OOM or spill, so refinement points inside such a bracket need **no residency probe**. Residency is only needed while bisecting toward a failed upper bound (ceiling edge). This cuts an MTP-model refinement step from ~45 s to ~20 s.
+
+**Change G — golden-section refinement after the ladder, always, to 64.** Supersedes the Change E stopping rules (keep the E code structure; change the policy):
+
+```
+after the ladder (Change C pick = best rung):
+  bracket = [lower neighbour rung, upper neighbour rung] of the best rung
+            (at a ceiling edge: [best rung, failed rung]; at the low end: [256, upper neighbour];
+             at the cap with nothing above: [lower neighbour, cap])
+  golden-section search on prefill inside the bracket, candidates rounded to 64,
+  reuse any point already measured, stop when the bracket width ≤ 64
+  each candidate: restart → tiny_probe → prefill_probe_sized (cache_prompt false)
+    + residency_probe ONLY when the bracket's upper bound is a failed rung (edge) and the model is not SIMPLE_NONMTP
+    + median of 3 prefill probes when the first probe completed in under 5 s
+  a candidate that OOMs/spills becomes the new upper bound
+  pick = best measured point over ladder + refinement; confirm as today (one restart)
+  record every point in the JSON ladder with status REFINE
+```
+
+Expected steps: log base 1.618 of (bracket width / 64): a 3072-wide bracket (1024 to 4096) needs about 8, a 1536-wide one about 7. Estimated added time: 1.5 to 2 min on lfm-class, 2 to 3 min on 9B MTP heads, 3 to 4 min on CPU-compute models whose probes are slower. Still far below the old bisect, whose cost was the saturation test per step, not the step count.
+
+**What this trades.** Among neighbours that measure within noise of each other, the final 64-token digit is chosen by whichever sample landed highest. That is acceptable: those candidates are equivalent by measurement, the safety gates still run at the pick, and the user has stated the preference for the resolved value. `PREFILL_NOISE` is retained only as the median-of-3 trigger and for logging.
+
+**Acceptance.** lfm 8K/16K/32K, gpt-oss 64K, gemma-12b 16K, qwen-3.5-9b 256K: every pick a multiple of 64 with 6 to 9 REFINE points in the JSON, bisect times within the estimates above, no residency probes logged inside a PASS/PASS bracket, and confirm PASS at every pick.
