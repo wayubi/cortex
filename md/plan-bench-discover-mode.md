@@ -1055,3 +1055,27 @@ All implemented and committed, one commit each:
   MODE=CPU), so simple/flat models see no extra restarts.
 
 Awaiting author review of the §30 acceptance run (below) and of §31.1.
+
+---
+
+## 32. Author review of §31 (2026-09-08)
+
+**Verdict: A, B, C, §30.3 and the §31.1 parser fix are correct. Change E is not implemented as specified: it is skipped for every non-MTP and CPU-compute model, which removes it from the models the user's complaint was about (lfm, GLM, gpt-oss). One logic bug in the edge rule. Two required fixes, listed first.**
+
+### 32.1 Required
+
+1. **Refinement must run for all modes.** `cmd_bisect_discover` wraps both refinement rules in `if [ "$SIMPLE_NONMTP" -eq 0 ] && [ "$MODE" != "CPU" ]`, with the comment "flat prefill, Change A". Change A is about residency and decode samples, which are batch-independent on simple models; it says nothing about prefill. The prefill curve on these models is not flat where it matters: the user's evidence for §30.2b was lfm 8K/16K/32K (previous picks 2112, 2176, 3008, all non-MTP) and gpt-oss (rises to 2048, falls at 4096, previous pick 2112, CPU-compute). Today's 08:34 run shows the consequence: lfm 8K logs `after refinement: pick=2048` with zero refinement points tested. Remove the exemption. Each refinement candidate already applies Change A internally through `discover_measure_candidate` (residency only when not simple / rung 256), so the per-step cost on simple models is a restart plus tiny probe plus prefill probe, about 15 to 20 s.
+2. **Edge rule fires when the best rung is not the top PASS rung.** The condition is `CEIL_FAIL_B set && reason OOM/SPILL && CEIL_FAIL_B > PICK`. If the ladder reached a failed rung but the best rung is interior (for example 512 best, 1024 PASS but lower, 2048 OOM), this bisects between 512 and 2048 and tests 1280, 1792, and so on, above a rung already known to be worse. §30.2b rule 2 requires the best to be the top PASS point. Add `[ "$PICK" -eq "$HIGHPASS" ]` to the condition; otherwise fall through to the interior rule.
+
+### 32.2 Accepted deviations and notes
+
+3. **Interior rule searches upward only.** The plan said "midpoint toward each neighbour". Upward covers every observed case (2112, 2176, 3008, all above the best rung), so this is acceptable, but it should choose the side by data rather than by convention at the same cost: test the midpoint toward whichever neighbour measured the higher prefill. One restart either way, and it catches a peak that leans below the best rung.
+4. **Change A verified in the 08:34 run:** residency once per model, no decode samples, lfm 4K bisect 2.1 min against 5.3 min this morning. Meets the §30.4 budget.
+5. **Change C verified:** lfm 4K and 8K picked 2048 with `TOL=0`. The result line still prints `smallest within 0 of best`; make it say `best measured`.
+6. **Change B not yet verified live.** The only MTP run since the change has not happened; the 07:39 gemma run predates it (`ambiguous=6`). Verify on the next gemma or ornith ladder: expect zero `AMBIGUOUS` verdicts and no 80 s residency windows. Do not start it while the lfm suite is running; two benches sharing the GPU corrupt both.
+7. **§31.1 (`n_max_loaded` from the last `--alias` block) and the extended stale guard** are correct and welcome; the loaded-versus-tuned cross-check closes the last way a record could claim a tune that was not in effect.
+8. **§30.3 p_min confirmation** is correct: one extra run only when a candidate appears to win, and the two-sample mean must still clear the tie margin.
+
+### 32.3 Acceptance after the two fixes
+
+Re-run the lfm family and `gpt-oss-20b-a4b-q4-64k-think-low` (interior peak, CPU mode): expect `REFINE` points in the JSON ladder for 8K, 16K, 32K and gpt-oss, picks within one refinement step of 2112, 2176, 3008 and 2112, and no refinement on 4K if its best rung is already at the cap. Then `qwen-3.6-35b-a3b-q4-mtp-64k` for the ceiling edge (expect resolution to 64 between 256 and 512) and one gemma ladder for Change B.
