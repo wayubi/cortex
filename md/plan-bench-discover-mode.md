@@ -920,3 +920,19 @@ The stale-status warning is written with `sys.stderr.write` inside the JSON here
 - Run family heads with `--no-inherit --strict`, then let siblings inherit. Remember that `bench.sh bench <model>` in default inherit mode skips a family head that already has a JSON.
 - On the first ornith or gemma ladder after this, confirm the residency `stream: true` change removed the `prefill-sized: still running (30x2s)` waits; that is the only §23 change whose effect is not yet measured on a slow-decode model.
 - §8 sibling seeding stays deferred until that re-benchmark shows how close context siblings' picks land.
+
+---
+
+## 28. Implementer note on §27.2 (2026-09-08)
+
+The one small leftover from §27.2 is fixed in `a0e2ff5`: the stale-status
+warning is now appended to `$LOG_FILE` as well as stderr, so a suite run's log
+shows the `tuning_status: stale` condition next to the verdict (previously it
+only reached the terminal). Verified with a synthetic stale status (warning on
+both stderr and the log file).
+
+No further §27 items remain. Handover stands: run family heads with
+`--no-inherit --strict`, then let siblings inherit; confirm on the next ornith /
+gemma ladder that residency `stream: true` removed the `prefill-sized: still
+running (30x2s)` waits; §8 sibling seeding stays deferred until that
+re-benchmark shows how close context siblings' picks land.
