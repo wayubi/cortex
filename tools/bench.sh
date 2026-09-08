@@ -4034,7 +4034,12 @@ if _mtp_tuning['tuning_status'] == 'ok':
     if (_tn is not None and _tn != _cn) or (_tp is not None and _tp != _cp):
         _mtp_tuning['tuning_status'] = 'stale'
         _mtp_tuning['tuning_reason'] = 'status ok but tuned n_max/p_min (%s/%s) != configured (%s/%s)' % (_tn, _tp, _cn, _cp)
-        sys.stderr.write('[bench] WARNING: mtp tuning_status %s (tuned %s/%s != loaded %s/%s)\n' % (_mtp_tuning['tuning_status'], _tn, _tp, _cn, _cp))
+        _warn = '[bench] WARNING: mtp tuning_status stale (tuned %s/%s != loaded %s/%s)\n' % (_tn, _tp, _cn, _cp)
+        sys.stderr.write(_warn)
+        try:
+            open('$LOG_FILE', 'a').write(_warn)
+        except Exception:
+            pass
 
 # Merge the §4.5 discover-ladder result (/tmp/discover_<model>.json) if present.
 # cmd_bisect_discover writes it; a thorough or bench-only run has none → discover={}.
