@@ -2654,8 +2654,18 @@ print(rank[0] if rank else '')
     fi
   done
   if [ -n "${WIN_CAND:-}" ]; then
-    log "  p_min=$WIN_CAND (${WIN_CAND_TP} t/s) beats 0.7 by > ${MTP_TIE} — chosen"
-    WIN_PMIN="$WIN_CAND"
+    # §30.3: confirm the win with a second sample before switching away from 0.7
+    # (a single sample can beat the reference by >5% on noise). One extra run.
+    log "  p_min=$WIN_CAND (${WIN_CAND_TP} t/s) beat 0.7 by > ${MTP_TIE} on one sample — confirming with a second"
+    discover_measure "$WIN_NMAX" "$WIN_CAND" "phase-2 p_min=$WIN_CAND (confirm)" || mtp_die_stall "STALL confirming p_min=$WIN_CAND"
+    local m2
+    m2=$(mtp_mean_for "$WIN_NMAX" "$WIN_CAND")
+    if [ -n "$m2" ] && python3 -c "exit(0 if float('$m2') > float('$REF') * (1 + $MTP_TIE) else 1)" 2>/dev/null; then
+      log "  confirmed: p_min=$WIN_CAND (${m2} t/s, 2-sample mean) still beats 0.7 — chosen"
+      WIN_PMIN="$WIN_CAND"; WIN_CAND_TP="$m2"
+    else
+      log "  p_min=$WIN_CAND did NOT hold on a second sample (mean ${m2:-n/a} t/s) — keeping 0.7"
+    fi
   else
     log "  no p_min beats 0.7 (${REF} t/s) by more than ${MTP_TIE} — keeping 0.7"
   fi
