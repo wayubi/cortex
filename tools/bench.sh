@@ -1830,15 +1830,6 @@ try:
     text = ch['message']['content']
     ct = u.get('completion_tokens', 0) or 0
     spd = t.get('predicted_per_second', 0)
-    # 8-gram degeneracy, computed after stripping heading lines (lines starting with '#')
-    lines = [ln for ln in text.split('\n') if not ln.lstrip().startswith('#')]
-    words = ('\n'.join(lines)).split()
-    deg = 0.0
-    if len(words) >= 8:
-        ng = [' '.join(words[i:i+8]) for i in range(len(words)-7)]
-        from collections import Counter
-        c = Counter(ng)
-        deg = round(sum(v for v in c.values() if v > 1) / len(ng), 4)
     print('%s|%s|%s' % (('%.1f'%spd) if spd else '0', ct, ch.get('finish_reason') or ''))
 except Exception as e:
     print('FAIL')
@@ -2856,7 +2847,11 @@ cmd_bisect_discover() {
         fi
       else
         MODE="GPU"
-        log "  GPU-resident at $B"
+        if [ "$R_V" = "AMBIGUOUS" ]; then
+          log "  AMBIGUOUS at $B (treated as GPU — not-proven-CPU counts as GPU)"
+        else
+          log "  GPU-resident at $B"
+        fi
       fi
     fi
 
@@ -3002,7 +2997,13 @@ print(' '.join(out))
     local SC_RC=$?
     if [ "$SC_RC" -eq 2 ]; then log "  STALL during saturation — aborting"; exit 1; fi
     if [ "$SC_RC" -ne 0 ]; then
-      log "  saturation FAIL at pick=$PICK (rc=$SC_RC)"
+      if [ "$SC_RC" -eq 3 ]; then
+        log "  saturation FORMAT ERROR at pick=$PICK (HTTP 500 / peg-native format) — not a batch failure; stepping down"
+      elif [ "$SC_RC" -eq 4 ]; then
+        log "  saturation SIZING FAILURE at pick=$PICK (could not reach compaction); stepping down"
+      else
+        log "  saturation OOM at pick=$PICK; stepping down"
+      fi
       # step down (below)
       local NEWPICK=0
       for i in "${!PASS_B[@]}"; do
