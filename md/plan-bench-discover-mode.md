@@ -1,6 +1,6 @@
 # Plan: `bench.sh` discover mode — find practical settings with ~1/4 of the runs
 
-**Status:** 2026-09-07 — designed; step 0 (`mtpverify`) implemented and run, premise confirmed on re-analysis (§16); §6 un-halted; remaining steps not implemented.
+**Status:** 2026-09-07 — designed; step 0 (`mtpverify`) implemented and run; premise confirmed from llama.cpp source and by the OFF-only margin test on both models (§18); §6 proceeds; `cmd_mtpverify` needs the §18.4 fixes; remaining steps not implemented.
 **Audience:** an implementing agent. Function names are the anchors; the source has no stable line numbers. Read `tools/bench.sh` top to bottom once before touching anything.
 **Scope:** `tools/bench.sh` only, plus the matching doc updates in `AGENTS.md`. Every model in `llama-cpp/models.ini` must be supported (73 entries today; see §2 for the classes).
 
@@ -550,3 +550,68 @@ The §16.2 rule reads margins at the first-divergence index `d`. Under MTP, `d` 
 4. **Reconsider the OFF/ON framing.** The MTP-off run is the ground-truth sampler. Since llama.cpp's speculative decoding accepts a draft only when it equals the target model's own sample, the correct check may be to compare the ON run's *accepted* tokens against what the target would emit — which the server already logs as `draft acceptance`. Verify on llama.cpp source (`common/sampling.cpp`, `common_sampler_sample_and_accept_n`) whether acceptance guarantees distribution identity by construction, which would make the whole empirical test moot.
 
 The implementer recommends the author weigh option 4 (acceptance-by-construction is the actual guarantee) against option 2 (a looser but computable empirical margin check), because option 1 depends on a server flag that may not exist and option 3 discards the probability data the §16.2 rule was designed around.
+
+---
+
+## 18. Author decision on the §17 blocker (2026-09-07, later)
+
+**Decision: option 4 is confirmed from source, and option 2 is adopted in a simpler form (OFF-only margin). Applying it to the data already on disk, both models PASS. Step 0 is complete. Proceed with §6 and §6.4 as written.**
+
+### 18.1 Option 4, verified against llama.cpp source
+
+A sparse checkout of `ggml-org/llama.cpp` master (commit `050dde5`, 2026-09-07; the Dockerfile builds from unpinned master, so the running build is this code or within days of it) settles the premise by construction:
+
+- `common/sampling.cpp`, `common_sampler_sample_and_accept_n`: for each drafted position the **target** sampler draws `id = common_sampler_sample(...)`, the id is appended to the result, and the loop breaks the first time `draft[i] != id`. When every draft token matched, one more target sample is appended. The output sequence is therefore exactly the target sampler's own sequence at every position; a draft token is never emitted unless the target would have sampled it.
+- `tools/server/server-context.cpp`, speculative branch: `draft-mtp` reaches this function directly. The alternative `server_sample_and_accept_synth` branch is taken only when `common_speculative_get_synth_probs` is non-empty, which is a synthetic-acceptance benchmarking mode, not the MTP drafter.
+- `common/speculative.cpp`: `common_speculative_impl_draft_mtp` produces the draft only; `n_max` bounds its length and `p_min` stops it early. Neither touches the target sampler.
+
+So `n_max` and `p_min` change how many positions are proposed per step and nothing else. The §0 claim stands on the code, independent of any empirical test.
+
+### 18.2 Why `top_logprobs` are sparse under MTP (and why the drift numbers were wrong)
+
+Same file, speculative branch: accepted tokens are emitted with `result.prob = 1.0f; // set later` and no call to `populate_token_probs`. Only tokens sampled in the non-speculative branch (no draft pending, e.g. the first token or the token after a full rejection) get probabilities. There is no server flag for this; it is an unimplemented path, so option 1 is closed.
+
+Consequence the implementer should note: at those positions the response carries `logprob: 0.0` as a placeholder, not a value. My §16.1 "drift 0.10 nats" figure and the `drift` computation in the committed `cmd_mtpverify` both averaged over placeholder zeros and are invalid. Recomputed over positions where the ON run has real probabilities:
+
+| model | positions before `d` with real ON probs | mean drift | max drift | top-5 overlap at those positions |
+|---|---|---|---|---|
+| qwen-3.5-9b | 0, 31 | 0.047 | 0.093 | 5, 4 |
+| gemma-4-12b | 0, 41, 42 | 0.089 | 0.147 | 5, 5, 4 |
+
+That is the true kernel-level noise floor between the two graphs: under 0.15 nats.
+
+### 18.3 Final `mtpverify` criterion (supersedes §16.2; OFF-only margin)
+
+The OFF run is the reference sampler and carries probabilities at every position, so the gate reads only the OFF distribution at the divergence index `d`:
+
+```
+gap_off  = lp_off[d](off-chosen) − lp_off[d](on-chosen)
+PASS     if on-chosen ∈ OFF top-10 at d  and  gap_off < MTP_TIE_NATS (0.25)
+FAIL     otherwise (the ON run chose a token the reference distribution considered clearly worse)
+REPORT   gap_on and top-5 overlap only when the ON run has probabilities at d; never gate on them
+DRIFT    mean |lp_off − lp_on| over positions i < d where the ON run has real probabilities; print "n/a" if none
+```
+
+Applied to the files already on disk (no re-run needed):
+
+| model | `d` | OFF chose | ON chose | ON-chosen rank in OFF | gap_off | verdict |
+|---|---|---|---|---|---|---|
+| qwen-3.5-9b-q4-mtp-16k | 34 | ` Origins` −0.845 | ` Roots` −0.900 | 2 | 0.055 | PASS |
+| gemma-4-12b-q4-qat-mtp-16k | 58 | ` evolution` −0.650 | ` history` −0.747 | 2 | 0.097 | PASS |
+
+For scale, the gemma OFF run has 11 positions in its first 200 tokens where the top two candidates sit within 0.25 nats; the qwen OFF run has 4 within 0.1 nats. Early divergence between any two graph shapes is the expected outcome, which is why the original 200-token rule was wrong.
+
+### 18.4 Code changes required in `cmd_mtpverify` before it is left as a tool
+
+1. Replace the comparison block with §18.3: OFF-only gate, ON-side numbers reported only when present, no spurious FAIL when `tops_on[d]` is empty.
+2. Compute `drift` only over positions where `tops_on[i]` is non-empty; skip placeholder zeros.
+3. Remove the line `set_key spec-type nonexistent` in the control block; `del_key spec-type` alone is the intended "off" state, and writing a bogus value first is churn that would survive a crash between the two calls.
+4. The control-path comparison uses chosen-token logprobs from two OFF runs, which are real at every position, so it is fine as written; print the OFF-only gap there too for symmetry.
+5. Update the header comment to describe the OFF-only criterion and the reason (server does not populate probs for speculatively accepted tokens).
+
+### 18.5 Effect on the plan
+
+- §11 step 0: **done, PASS on both named models.** No further gating on the premise.
+- §6 (`cmd_mtp_discover`, no degeneracy gate, placement as the only hard gate) and §6.4 (status plumbing) proceed as written.
+- §6.1 gains one sentence for the docs: MTP output equals the target sampler's output by construction (`common_sampler_sample_and_accept_n`); observed token differences between MTP on and off are near-tie flips under kernel-level logit noise of about 0.1 nats, the same class of difference as changing `batch-size`.
+- The scratch checkout used for §18.1 lives outside the repo and is not a deliverable; anyone re-checking should read the three locations named above at the commit that the running image was built from.
