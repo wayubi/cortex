@@ -2338,8 +2338,9 @@ cmd_mtp_thorough() {
   # ── §45.3 Change J: placement baseline (same rule as cmd_mtp_discover). ──
   # On a CPU-compute MTP model, `CPU` is the baseline at every batch, not a draft
   # spill, so the four gates below must not reject on placement. Resolve from the
-  # same-day discover JSON mode; else from the first measured candidate (the batch
-  # ladder validated the ini's own n_max). BASE_PLACEMENT empty until known →
+  # same-day discover JSON mode; else from the first measured sample (the sweep set
+  # is sorted, so the smallest n_max — a smaller n_max cannot spill where a larger
+  # one does not). BASE_PLACEMENT empty until known →
   # treated as GPU (legacy behaviour) until a sample establishes it. placement_ok
   # is base-aware: a CPU baseline never rejects on placement.
   local BASE_PLACEMENT="${MTP_BASE:-}"
@@ -2668,8 +2669,9 @@ cmd_mtp_discover() {
     IFS='|' read -r SP TK PL OO <<< "$R"
     SP=${SP:-0}; TK=${TK:-0}; OO=${OO:-1}; PL=${PL:-SHORT}
     # §45.3: if no baseline yet (no same-day discover JSON), the first measured
-    # candidate establishes it. It is the ini's own n_max (batch-ladder validated),
-    # so its placement is the model's baseline, not a spill.
+    # candidate establishes it. The ladder set is sorted, so this is the smallest
+    # candidate; its placement is the model's baseline, not a spill (a smaller
+    # n_max cannot spill where a larger one does not).
     if [ -z "$BASE_PLACEMENT" ] && { [ "$PL" = "GPU" ] || [ "$PL" = "CPU" ]; }; then
       BASE_PLACEMENT=$PL
       export MTP_BASE="$BASE_PLACEMENT"
