@@ -1,6 +1,6 @@
 # Plan: `bench.sh` discover mode — find practical settings with ~1/4 of the runs
 
-**Status:** 2026-09-07 — designed, not implemented.
+**Status:** 2026-09-07 — designed; step 0 (`mtpverify`) implemented and run, premise confirmed on re-analysis (§16); §6 un-halted; remaining steps not implemented.
 **Audience:** an implementing agent. Function names are the anchors; the source has no stable line numbers. Read `tools/bench.sh` top to bottom once before touching anything.
 **Scope:** `tools/bench.sh` only, plus the matching doc updates in `AGENTS.md`. Every model in `llama-cpp/models.ini` must be supported (73 entries today; see §2 for the classes).
 
@@ -289,7 +289,7 @@ In discover mode the degeneracy false-failure that triggered the 16:45 misreport
 
 ### 6.3 Optional diagnostic subcommand: `bench.sh mtpverify <model>`
 
-Not part of the suite. Two restarts: one with `spec-type` removed, one with it set, same prompt, request-level `temperature: 0`, `seed: 42`, `max_tokens: 1024`. Print the index of the first differing token (or "identical"), both decode speeds, both degeneracy values. This lets a human confirm the §0 claim on any family without reading llama.cpp source. Small numerical drift between batched verification and single-token decode can produce a late divergence; identical first 200+ tokens is the expected result.
+Not part of the suite. Two restarts: one with `spec-type` removed, one with it set, same prompt, request-level `temperature: 0`, `seed: 42`, `max_tokens: 1024`, `logprobs: true`, `top_logprobs: 10`. Find the first differing token and apply the margin test defined in §16.2: PASS when the flipped token was a near-tie in both runs' distributions and the top-5 sets overlap. Print the divergence index, both gaps, the overlap, the pre-divergence drift, both decode speeds and OOM counts. This lets a human confirm the §0 claim on any family without reading llama.cpp source. Implemented in commit 505b549; see §16.4 for the required fixes.
 
 ---
 
@@ -346,7 +346,7 @@ THOROUGH=0
 
 Work in this order; each step must pass its check before the next. Land each step as its own commit; the default stays on the old path until step 4 flips it, so a half-landed branch never changes what a normal run does.
 
-0. **§6.3 `mtpverify`, run as a premise test** (added after review Q1). Implement the subcommand, then run it on `gemma-4-12b-q4-qat-mtp-16k` and `qwen-3.5-9b-q4-mtp-16k` with request-level `temperature: 0`, `seed: 42`, `max_tokens: 1024`, MTP off then on, same prompt, and compare token ids. Pass criterion: the first 200 tokens are identical on both models. A later divergence is expected numerical drift between batched verification and single-token decode and does not fail the test; log the divergence index. If either model diverges inside the first 200 tokens, stop and report before implementing §6: the fallback design is to keep a degeneracy gate but measured on natural-stop output with two samples per config and no single-sample confirm failures. The llama.cpp source is not in this repo (the Dockerfile clones master at build time); the acceptance rule lives in `common/sampling.cpp`, function `common_sampler_sample_and_accept_n`, for anyone who wants to read it.
+0. **§6.3 `mtpverify`, run as a premise test** (added after review Q1; criterion revised in §16.2 after the first run). Implement the subcommand, then run it on `gemma-4-12b-q4-qat-mtp-16k` and `qwen-3.5-9b-q4-mtp-16k` with request-level `temperature: 0`, `seed: 42`, `max_tokens: 1024`, `logprobs: true`, `top_logprobs: 10`, MTP off then on, same prompt. Find the first differing token, then apply the §16.2 margin test at that position. Pass criterion: the flipped token was a near-tie (gap under 0.25 nats in both runs' distributions) and the top-5 sets overlap in at least 4 tokens. The divergence index itself is not a criterion; with kernel-level drift of about 0.1 nats and several near-ties per 200 tokens, early divergence is expected. If either model diverges inside the first 200 tokens, stop and report before implementing §6: the fallback design is to keep a degeneracy gate but measured on natural-stop output with two samples per config and no single-sample confirm failures. The llama.cpp source is not in this repo (the Dockerfile clones master at build time); the acceptance rule lives in `common/sampling.cpp`, function `common_sampler_sample_and_accept_n`, for anyone who wants to read it.
 1. **§5 decode measurement + acceptance parse fix.** These are bug fixes and apply to `--thorough` too: thorough mode preserves the old *search*, not the old broken measurement. Check: `bench.sh mtp <one small MTP model, e.g. gemma-4-12b-q4-qat-mtp-16k>` with the *current* sweep prints a numeric `acc=` and `tokens=` on every line and no result has `finish_reason=length` unless the cap was hit. Also record the degeneracy of every clean run with the new `DECODE_PROMPT`: if clean structured output scores above 0.05, the metric is picking up section scaffolding, and the fix is to strip heading lines (lines starting with `#`) before the 8-gram count, not to raise the WARN threshold.
 2. **§4 `cmd_bisect_discover` behind a temporary env `BENCH_DISCOVER=1`.** Check on three models, one per class, counting `Restarting llama-cpp` lines in the log:
    - `lfm-2.5-8b-a1b-q4-4k-think` (small ctx, non-MTP): ≤ 7 restarts, saturation PASS, pick ≤ 4096.
@@ -459,3 +459,55 @@ Both models diverge well before 200 (tokens 58 and 34), each selecting a semanti
   2. Adopt the fallback already specified in Q1: keep a degeneracy gate, but measure it on natural-stop output with two samples per config and no single-sample confirm failure.
   3. Proceed with the premise-independent steps (1, 2, 4, 5, 6) now while §6 is re-designed.
 - Open question for the author: does `temperature: 0` with `seed: 42` actually produce a deterministic greedy decode on this llama.cpp build, and could `logprobs`/sampling differ between the MTP-off and MTP-on server instances for a reason unrelated to output distribution (e.g. a different graph producing different numerical rounding)? If so, the test may be measuring numerical reproducibility rather than distribution change, and the criterion may be too strict for greedy sampling.
+
+---
+
+## 16. Author response to the step 0 report (2026-09-07, later)
+
+**Verdict: the premise holds. The step 0 criterion was wrong, not the design. §6 is un-halted, with the `mtpverify` criterion replaced by a margin test (below).** Credit to the implementer: the open question at the end of §15.4 is exactly the right one, and the answer is yes, the test was measuring numerical reproducibility.
+
+### 16.1 What the saved qwen output shows
+
+The qwen run's response files were still in `/tmp` with 20 `top_logprobs` per token, so the decisive check could be done on the existing data (the gemma files had been overwritten). At the divergence token, index 34:
+
+| | chosen | logprob | runner-up | logprob | gap (nats) | 3rd choice |
+|---|---|---|---|---|---|---|
+| MTP off | ` Origins` | −0.845 | ` Roots` | −0.900 | 0.055 | ` Devices` −3.2762 |
+| MTP on | ` Roots` | −0.839 | ` Origins` | −0.886 | 0.047 | ` Devices` −3.2762 |
+
+Both configurations agree that these two tokens are the top two, agree on their probabilities to within 0.01, and agree on the third choice to four decimals. A 0.05-nat near-tie flipped under a perturbation of that size. That is what kernel differences between a batched verification pass and a single-token decode pass look like. A genuine distribution change would show the on-run picking a token the off-run had far down its list, and it did not.
+
+Two supporting facts from the same data. Across the 34 identical tokens before the split, the chosen token's logprob differed between runs by 0.10 nats on average, which is the size of the numerical drift between the two graphs. And the off-run alone has four positions in its first 200 tokens where the top two candidates sit within 0.1 nats of each other (indices 4, 34, 165, 185). With drift of that magnitude and that many near-ties, an identical 200-token greedy run was never a realistic expectation for *any* two builds of the graph, MTP or not. The gemma divergence at index 58 (`evolution` vs `history`, a synonym pair in the same slot) has the same shape and should be re-run under the new criterion to confirm.
+
+### 16.2 Revised `mtpverify` criterion (replaces the 200-token rule in §6.3 and §11 step 0)
+
+Keep the two-restart structure. Request `logprobs: true, top_logprobs: 10` explicitly. After both runs, at the first divergence index `d` (if none within `max_tokens`, PASS trivially):
+
+```
+gap_off = lp_off[d](token chosen off) − lp_off[d](token chosen on)     # from the OFF run's top_logprobs
+gap_on  = lp_on[d](token chosen on)  − lp_on[d](token chosen off)      # from the ON run's top_logprobs
+overlap = |top5_off[d] ∩ top5_on[d]|
+drift   = mean over i < d of |lp_off[i] − lp_on[i]|                     # numerical noise level, for the report
+
+PASS  if gap_off < MTP_TIE_NATS (0.25) and gap_on < MTP_TIE_NATS and overlap ≥ 4
+FAIL  otherwise, in particular if the ON-chosen token is absent from the OFF run's top 10
+```
+
+Print `d`, both gaps, overlap, drift, both decode speeds and OOM counts. A FAIL means the on-run chose a token the off-run considered clearly worse, which is the only observation that would contradict the premise. Rationale: distribution preservation is a statement about the probabilities, so it has to be tested on the probabilities, not on which side of a coin-flip the argmax landed.
+
+**Optional control, one extra restart:** run MTP off at `batch-size = current / 2` with the same prompt and compare to the MTP-off run at the current batch. Different prefill ubatch shapes perturb the KV values the same way, so a divergence with the same near-tie signature and no MTP involved is the cleanest demonstration that this class of flip is not an MTP effect. Report it the same way; it does not gate anything.
+
+### 16.3 Next steps
+
+1. Re-run `mtpverify` with the §16.2 criterion on `gemma-4-12b-q4-qat-mtp-16k` and `qwen-3.5-9b-q4-mtp-16k`. Expected: PASS on both, with gaps under 0.1. If either FAILS, stop again and report the token, both gaps and the overlap; that would be real evidence and would trigger the Q1 fallback.
+2. On PASS, proceed with §6 as written: no degeneracy gate, placement as the only hard gate, degeneracy logged as a WARN diagnostic. The §6.4 status plumbing is independent of the premise and should proceed regardless.
+3. Steps 1, 2, 4, 5, 6 of §11 were never blocked and can run in parallel with the above.
+
+### 16.4 Review notes on the `cmd_mtpverify` code as committed (505b549)
+
+- **Restore path.** The function snapshots the section to `$SNAP` but only uses it on the STALL exits; the success path restores with `del_key` / `set_key`, which is what caused the line-reposition churn noted in §15.1. Use `restore_section "$SNAP"` on every exit path, and add the same `trap ... EXIT` pattern as `cmd_bisect` so a Ctrl-C between the two runs does not leave `spec-type` removed from a production entry.
+- **`del_key` is fine to keep** as a helper, but it is no longer needed by `mtpverify` once the restore goes through the snapshot.
+- **Request `top_logprobs` explicitly.** This build returned 20 without being asked; do not rely on that default.
+- **Compare probabilities, not just ids** (§16.2). Keep the id comparison to find `d`, then read the margins from `top_logprobs` at `d`.
+- **Keep the response files.** Write them to `/tmp/mtpv_${MODEL}_off.json` / `_on.json` instead of fixed names so a second model's run does not overwrite the first model's evidence; the gemma data was lost this way.
+- **Prompt interpolation.** The prompt is spliced into a Python triple-quoted literal inside a shell double-quoted string. It works for the current constant but will break on a prompt containing a quote or a backslash; pass it via a file or an environment variable like the other payload builders should.
