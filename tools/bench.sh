@@ -2604,9 +2604,10 @@ cmd_mtp_discover() {
   # placement must not gate. Establish BASE_PLACEMENT from the discover JSON's
   # `mode` (the batch ladder's GPU/CPU verdict) when that file exists and is from
   # this run (same day, per its written_at); otherwise resolve it from the first
-  # measured candidate, which is always the ini's own n_max (the value the batch
-  # ladder validated). GPU → placement gates as today; CPU → reject on OOM/SHORT
-  # only.
+  # measured candidate (the ladder set is sorted, so it is the smallest candidate
+  # — harmless for the baseline rule, since a smaller n_max cannot spill where a
+  # larger one does not). GPU → placement gates as today; CPU → reject on
+  # OOM/SHORT only.
   local BASE_PLACEMENT=""
   local DISC_MODE="" DISC_DAY=""
   if [ -f "/tmp/discover_${MODEL}.json" ]; then
