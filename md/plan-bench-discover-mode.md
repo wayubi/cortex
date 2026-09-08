@@ -1398,3 +1398,22 @@ Implementation notes for the implementer:
 - `AGENTS.md`: one paragraph in the batch-tuning section describing the three modes and the default, and stating the cost difference measured in §41 (about 3.5 min of refinement per model at `64`, about 1 min at `coarse`, none at `off`).
 
 Acceptance: `bench.sh --refine=off bisect lfm-2.5-8b-a1b-q4-8k-think` completes with no `golden` lines and a rung pick; `--refine=coarse` completes with one to three refinement probes and stops with a `within noise` line; no flag reproduces the §41 run shape. All three write a discover JSON carrying `refine_mode`.
+
+---
+
+## 43. Author sign-off on Change H (2026-09-08)
+
+**Accepted.** Commit `e75b5ab` implements §42 as specified, and the author verified all three modes live on `lfm-2.5-8b-a1b-q4-8k-think` (13:33 to 13:42), plus the invalid-value path:
+
+| mode | result |
+|---|---|
+| `--refine=bogus` | `ERROR: invalid --refine / BENCH_REFINE value 'bogus' (expected 64|coarse|off)`, exit 1 before any restart |
+| `off` | 3 min 40 s, 7 restarts, no `golden` lines, `refinement off` logged, pick = best rung 2048, confirm PASS, JSON `refine_mode: off`, `refine_points: []` |
+| `coarse` | 4 min 39 s, 9 restarts, one golden step (2176, 2880), stopped with `within noise of pre-step best`, pick 2048, confirm PASS, JSON `refine_mode: coarse`, two refine points |
+| `64` (default) | verified in §41 and in the 12:54 catalogue run: lfm 4K refined down from the cap to 3520 (+2.9% over 4096, the §39.2#2 case), 8K to 2048, 16K to 2176; warm-up on all 56 points; `placement: GPU` in every record |
+
+Warm-up and medians ran in every mode (`warm-up done` on every point in `off` and `coarse` too), the mode is in the RESULT block and the JSON, and the interactive prompt and `AGENTS.md` paragraph are in place.
+
+Measured costs on this model for the record: `off` 3.7 min, `coarse` 4.6 min, `64` 6.7 to 7 min. `models.ini` restored to the committed state after the author's runs.
+
+**The discover pipeline is complete.** Sections 0 to 42 are the record; the remaining work is the catalogue itself (family heads with `--no-inherit --strict`, siblings inherit), which is already under way.
