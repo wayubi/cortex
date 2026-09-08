@@ -1354,3 +1354,24 @@ With warm measurements the lfm 8K curve is flat from 1024 to 4096 within 3%, so 
 ### 40.4 Acceptance after 40.2
 
 Same six models as §38. Add to the checks: the `discover` block in each JSON lists every refinement point and its `written_at` matches the run; grep the log of a 64K model for `warm-up` on every point.
+
+---
+
+## 41. Author sign-off on Change G (2026-09-08)
+
+**Accepted.** Commit `fa29ccf` fixes both §40.2 items and a second direct run of `bench.sh bisect lfm-2.5-8b-a1b-q4-8k-think` (12:43 to 12:50) verifies them:
+
+| | |
+|---|---|
+| discover JSON | written at 12:50:21 with all 9 refinement points and `written_at` matching the run; a failed write now fails the bisect |
+| warm-up | `warm-up done` logged on all 15 points; medians on 14 |
+| ladder (warm) | 256=4623, 512=6017, 1024=6830, 2048=6909, 4096=6592, 8192=6138 |
+| refinement | bracket [1024, 4096]; nine points; 1664 adopted at 6951 t/s over 2048 at 6909; stopped when [1408, 1600] could not admit a new interior pair |
+| pick | 1664, saturation PASS at 99% of 8K, long-decode PASS, residency once |
+| time | 6 min 41 s, 16 restarts (6 rungs, 9 refinement, 1 confirm) |
+
+**Cost, honestly.** §38 estimated 1.5 to 2 minutes of refinement on this class; it was about 3.5, because the bracket was a full two rungs wide and the warm-up doubles each probe. lfm 8K now takes about twice the 09-05 pipeline's 3.8 minutes, in exchange for warm, median-of-three measurements at 64-token resolution and every point in the record. That is the trade the user chose in §38; §38's time estimates are superseded by these measurements (expect roughly: lfm-class 6 to 7 min, 9B MTP heads 8 to 10 min, CPU-compute 10 to 12 min, all still well under the old pipeline on anything above 16K).
+
+**Note on the picks.** Warm measurement changed the shape of the curve: 512 gained 10% and everything from 1024 to 2048 sits within 2%. The 64-token pick will move between runs inside that plateau (1152 at 12:33, 1664 at 12:50). Both are correct answers to the question as posed; the bench prefill at 75% of context will not distinguish them.
+
+**Remaining acceptance runs double as the first catalogue heads.** Run `gpt-oss-20b-a4b-q4-64k-think-low` (CPU-compute, slow probes), `gemma-4-12b-q4-qat-mtp-16k` (MTP, residency policy inside a bracket) and `qwen-3.5-9b-q4-mtp-256k` (ceiling edge) with `--no-inherit --strict`, and check in their logs: `warm-up done` on every point, no `residency:` line inside a PASS/PASS bracket, `placement: GPU|CPU` in the record, the `discover` block complete. Then the rest of the catalogue: family heads first, siblings inherit. `models.ini` was restored to the committed state after the author's runs.
