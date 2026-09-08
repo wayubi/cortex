@@ -4076,10 +4076,14 @@ acc = re.search(r'draft acceptance = ([0-9.]+)\s*\(\s*(\d+)\s+accepted\s*/\s*(\d
 # confirmed params from load log — scoped to THIS model's load block via its --alias
 load_logs = open('/tmp/load_logs.txt').read()
 def load_val(flag):
-    # find the --alias <MODEL> line, then look backward within ~50 lines for the flag/value pair
-    m = re.search(r'--alias\s*\n[^\n]*' + re.escape('$MODEL'), load_logs)
-    if not m:
+    # find the LAST --alias <MODEL> load block (the bench's own fresh load), then
+    # look backward for the flag/value pair. Using the last block avoids grabbing a
+    # stale earlier load (e.g. from the bisect/mtp phase at a different n_max) that
+    # a 2000-char backscan from the FIRST match would hit (plan §31 finding 2).
+    matches = list(re.finditer(r'--alias\s*\n[^\n]*' + re.escape('$MODEL'), load_logs))
+    if not matches:
         return None
+    m = matches[-1]
     block = load_logs[max(0, m.start() - 2000):m.start()]
     m2 = re.search(re.escape(flag) + r'\s*\n[^\n]*load:\s*(\S+)', block)
     return m2.group(1) if m2 else None
