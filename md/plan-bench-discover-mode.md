@@ -1005,3 +1005,53 @@ The MTP tuner switches p_min away from 0.7 when one sample beats the reference b
 ### 30.4 Acceptance for A–C and E
 
 Re-run `bench.sh --no-inherit --strict all` on the four lfm models and on `gemma-4-12b-q4-qat-mtp-16k`. Expect: lfm bisect ≤ 5 min each with residency logged once per model; gemma ladder with no `AMBIGUOUS` verdicts and no 80 s residency windows; picks equal to the best-measured point including refinement (lfm 8K/16K/32K within one refinement step of the previous 2112/2176/3008). Add one ceiling-edge model: `qwen-3.6-35b-a3b-q4-mtp-64k` (previous pick 448 between rungs 256 and 512) must resolve its edge to 64 and land within 64 of a value that passes saturation. No change to the ornith-class budget except the AMBIGUOUS saving.
+
+---
+
+## 31. Implementer finding + disposition of §30 Changes A-E and §30.3 (2026-09-08)
+
+### 31.1 A real bug the §30 review did not cover: `n_max_loaded` stale-block parser
+
+On the fresh gemma-4-12b record (08:01), `tuned_n_max: 2`, `configured_n_max: 2`
+(ini is 2), but `n_max_loaded: 4`. Ground truth from the docker log: every recent
+gemma load used n_max=2, and the bench decode's `acceptance 0.69051 /
+1390/2013 / mean len 2.20` exactly matches an n_max=2 run — so the decode really
+ran at n_max=2 and `n_max_loaded: 4` is wrong.
+
+**Root cause** (`cmd_bench` `load_val`, tools/bench.sh): it used `re.search`
+(the FIRST `--alias <MODEL>` block) then backscanned ~2000 chars for
+`--spec-draft-n-max`, grabbing an earlier load block (e.g. the bisect/mtp phase
+at n_max=4 before tuning set it to 2) instead of the bench's own fresh load.
+
+**Fix (commit `79f3bc3`):** use the LAST `--alias <MODEL>` block so the loaded
+params reflect the bench's own restart.
+
+**Follow-on (commit `6d6edb3`):** extend the §25#1 stale-status guard so it also
+flags `ok` when the server's loaded values (`n_max_loaded`/`p_min_loaded`) differ
+from the tuned ones, not just when configured differs.
+
+### 31.2 Disposition of §30 Changes A, B, C, E and §30.3
+
+All implemented and committed, one commit each:
+
+| Change | Commit | Summary |
+|---|---|---|
+| C — `PREFILL_TOL` default 0 | `bc7516e` | pick = best-measured rung; 0.03 settable for MTP headroom. |
+| B — residency GPU `<150` | `bc7516e` | `GPU_CPU_MAX=150`; fixes gemma AMBIGUOUS 80s windows. |
+| A — non-MTP shortcut | `689888a` | residency at rung 256 only; skip DEC_BASE + pick decode for simple non-MTP. |
+| E — noise-aware refinement | `d89425d` | ceiling-edge bisect to `max(64,6%)`; interior-peak midpoint; `PREFILL_NOISE` stop; REFINE in JSON. |
+| §30.3 — p_min confirm | `1dc94c4` | second sample before switching p_min away from 0.7. |
+| docs | `a039101` | AGENTS.md procedure updated for A/C/E. |
+
+### 31.3 Notes for the author on Change E
+
+- Change E is implemented conservatively: ceiling-edge bisects between the top
+  PASS point and the failed rung (rule 2), interior refinement searches the
+  ascending side toward a higher neighbour (rule 1). Both stop on the
+  `PREFILL_NOISE` gate and record points as `REFINE` in the JSON.
+- Step-down (rule 3) now walks refinement points below the pick before ladder
+  rungs, via `discover_stepdown_candidate`.
+- Refinement runs only for MTP-class models (skipped under Change A and for
+  MODE=CPU), so simple/flat models see no extra restarts.
+
+Awaiting author review of the §30 acceptance run (below) and of §31.1.
