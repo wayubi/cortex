@@ -45,7 +45,11 @@ MTP_TIE_NATS=0.25        # mtpverify: gap below this (nats) at the divergence to
 MIN_DECODE_TOKENS=512
 DECODE_PROMPT="Write a comprehensive technical report on the history of computing. Cover these twelve eras in order, with a heading and at least 250 words each: mechanical calculators, Babbage and Lovelace, Hollerith and tabulation, relay computers, ENIAC and the stored program, transistors, integrated circuits, minicomputers, microprocessors, personal computers, the web, mobile and cloud. Finish with a 200-word conclusion."
 DECODE_PROMPT_LONG="Write a comprehensive technical report on the history of computing. Cover these twelve eras in order, with a heading and at least 400 words each: mechanical calculators, Babbage and Lovelace, Hollerith and tabulation, relay computers, ENIAC and the stored program, transistors, integrated circuits, minicomputers, microprocessors, personal computers, the web, mobile and cloud. Finish with a 200-word conclusion. Do not summarise; write every section in full."
-PREFILL_TOL=0.03          # discover: pick = smallest batch within this fraction of best prefill
+PREFILL_TOL=0             # discover pick tolerance. Default 0 = best-measured rung.
+                          # Set to 0.03 to prefer a smaller batch within 3% of best for
+                          # MTP draft headroom (plan §30.2 Change C).
+PREFILL_NOISE=0.03        # discover refinement (§30.2b Change E): keep refining only while a
+                          # midpoint beats the current best by more than this fraction (3%).
 DECODE_CLIFF=0.70         # discover: decode at pick below this fraction of the 256 baseline = spill cliff
 DECODE_WARN=0.90          # discover: below this: WARN only
 MTP_TIE=0.05              # MTP tuning: candidates within 5% are a tie → smaller value wins
@@ -980,10 +984,14 @@ print(f'{p:.1f}|{d:.1f}|${AVG_CPU:-0}')
 #
 # Classification rule (single llama-s process %):
 #   cpu > 200  → CPU spillover (all cores pegged ~900-2800%) — regardless of GPU
-#   gpu_util > GPU_ACTIVE_PCT AND cpu < 100 → GPU-resident (model active on GPU)
-#   100-200% is noise/AMBIGUOUS — not proven GPU, not proven CPU (never forced).
+#   gpu_util > GPU_ACTIVE_PCT AND cpu < GPU_CPU_MAX → GPU-resident (model active on GPU)
+#   GPU_CPU_MAX is 150, not 100: gemma-class decode idles one core at 100-105%, so a
+#   <100 threshold never early-kills and the probe runs its full 40-sample window.
+#   A real draft spill measures 270-1600% (§30.2 Change B), so <150 + GPU is still safe.
+#   150-200% is noise/AMBIGUOUS — not proven GPU, not proven CPU (never forced).
 # Echoes one of: GPU | CPU | AMBIGUOUS
 GPU_ACTIVE_PCT=25
+GPU_CPU_MAX=150           # cpu < this + GPU active => GPU-resident (plan §30.2 Change B)
 RESID_MIN_FLOOR_SAMPLES=10   # 20s @2s before early-kill verdicts are allowed (belt-and-suspenders)
 residency_probe() {
   # stdout is reserved for the single verdict (GPU|CPU|AMBIGUOUS); all progress
@@ -1023,7 +1031,7 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
     # CPU-spill: definitive regardless of GPU (only all-cores >200% proves it)
     if [ "$(echo "$R_CPU > 200" | bc -l)" = "1" ]; then
       R_CPU_CONSEC=$((R_CPU_CONSEC + 1)); R_GPU_CONSEC=0
-    elif [ "$(echo "$R_CPU < 100" | bc -l)" = "1" ] && [ "$R_GPU" -gt "$GPU_ACTIVE_PCT" ] 2>/dev/null; then
+    elif [ "$(echo "$R_CPU < $GPU_CPU_MAX" | bc -l)" = "1" ] && [ "$R_GPU" -gt "$GPU_ACTIVE_PCT" ] 2>/dev/null; then
       R_GPU_CONSEC=$((R_GPU_CONSEC + 1)); R_CPU_CONSEC=0
     else
       # 100-200% is noise — reset both, keep polling
@@ -1057,7 +1065,7 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
     log "  residency: CPU (avg ${R_AVG}%)" >&2
     echo "CPU"; return 0
   fi
-  if [ "$(echo "$R_AVG <= 100" | bc -l)" = "1" ] && [ "$R_GPU_SEEN" -eq 1 ]; then
+  if [ "$(echo "$R_AVG <= $GPU_CPU_MAX" | bc -l)" = "1" ] && [ "$R_GPU_SEEN" -eq 1 ]; then
     log "  residency: GPU (avg cpu ${R_AVG}%, gpu active)" >&2
     echo "GPU"; return 0
   fi
