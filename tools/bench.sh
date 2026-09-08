@@ -13,7 +13,9 @@
 #
 # Global flags (before the subcommand): --no-inherit, --reset-parent,
 # --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
-# failed, §6.4 part 3). Env BENCH_DISCOVER=1 selects the discover-mode tuners.
+# failed, §6.4 part 3). Default mode is discover; --thorough re-enables the old
+# exhaustive tuners/bisect. Env BENCH_THOROUGH=1 is honoured; BENCH_DISCOVER=1 is
+# a deprecated no-op alias (discover is the default).
 #
 # Full suite order per model (fixed): mtpcheck -> bisect -> mtp -> bench.
 # mtpcheck empirically determines MTP capability and sets/clears spec-type in
@@ -3159,7 +3161,7 @@ print('%.2f'%sorted(vals)[len(vals)//2] if vals else '0')
   return 0
 }
 
-# ── SUBCOMMAND: bisect discover mode (plan §4, default when BENCH_DISCOVER=1) ──
+# ── SUBCOMMAND: bisect discover mode (plan §4, the default) ──
 # One coarse ladder (powers of two from 256 up to min(ctx, MAX_BATCH)), three cheap
 # measurements per rung (tiny → residency → sized prefill), then a smallest-within-
 # 3%-of-best pick (optional ceiling-edge midpoint refinement), then one-restart
@@ -4441,7 +4443,7 @@ case "$CMD" in
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
     echo "       global flags: --no-inherit --reset-parent --thorough --strict"
-    echo "       env: BENCH_DISCOVER=1 selects discover-mode bisect/mtp tuners"
+    echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
     exit 1
     ;;
 esac
