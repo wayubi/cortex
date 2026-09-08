@@ -4149,18 +4149,24 @@ _mtp_tuning = {
     'tuning_written_at': status.get('written_at') if status else None,
 }
 
-# Stale-status guard (plan §25#1): if the status file says "ok" but the tuned
-# values do not match what the ini/server actually loaded (configured_n_max /
-# configured_p_min), the tune is not in effect for this record (e.g. models.ini
-# was reverted, or a newer tune superseded the status file). Relabel it "stale"
-# but keep the tuned values for reference, and surface it on stderr via the log.
+# Stale-status guard (plan §25#1 + §31 finding 3): if the status file says "ok"
+# but the tuned values do not match what the ini/config says (configured_n_max /
+# p_min) OR what the server actually loaded for this bench (mtp.n_max_loaded /
+# p_min_loaded), the tune is not in effect for this record. Relabel it "stale"
+# but keep the tuned values for reference, and surface it via stderr and the log.
 if _mtp_tuning['tuning_status'] == 'ok':
     _cn = meta['mtp'].get('n_max'); _cp = meta['mtp'].get('p_min')
     _tn = _mtp_tuning['tuned_n_max']; _tp = _mtp_tuning['tuned_p_min']
+    _ln = mtp.get('n_max_loaded'); _lp = mtp.get('p_min_loaded')
+    _why = None
     if (_tn is not None and _tn != _cn) or (_tp is not None and _tp != _cp):
+        _why = 'configured differs: tuned n_max/p_min (%s/%s) != configured (%s/%s)' % (_tn, _tp, _cn, _cp)
+    elif (_ln is not None and _tn is not None and _ln != _tn) or (_lp is not None and _tp is not None and _lp != _tp):
+        _why = 'loaded differs: tuned n_max/p_min (%s/%s) != loaded (%s/%s)' % (_tn, _tp, _ln, _lp)
+    if _why:
         _mtp_tuning['tuning_status'] = 'stale'
-        _mtp_tuning['tuning_reason'] = 'status ok but tuned n_max/p_min (%s/%s) != configured (%s/%s)' % (_tn, _tp, _cn, _cp)
-        _warn = '[bench] WARNING: mtp tuning_status stale (tuned %s/%s != loaded %s/%s)\n' % (_tn, _tp, _cn, _cp)
+        _mtp_tuning['tuning_reason'] = _why
+        _warn = '[bench] WARNING: mtp tuning_status stale (%s)\n' % _why
         sys.stderr.write(_warn)
         try:
             open('$LOG_FILE', 'a').write(_warn)
