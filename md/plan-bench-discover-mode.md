@@ -755,3 +755,42 @@ Step C is complete. Proceeding to Step D (`cmd_mtp_discover` + §6.4 status plum
 1. Is Step G (§8 sibling seeding) wanted? If yes, implement behind `--seed-from-sibling` as a follow-up.
 2. Any desired adjustment to `PREFILL_TOL` given the lower discover picks on flat-prefill dense/MTP models?
 3. Full re-benchmark of the affected models (the discover runs wrote new batch/MTP values to models.ini during acceptance, which were reverted to committed state; the pipeline is ready for a clean full-suite run).
+
+---
+
+## 23. Author review of the completed implementation (2026-09-07, later)
+
+**Verdict: the implementation meets the plan's structure, budgets and safety requirements. Two items are not done and must be fixed before the pipeline is used for a real re-benchmark. Several smaller follow-ups are listed after them.** Verified against the code at `5953af6`, the acceptance logs from 20:01 to 22:18, `bash -n`, and a clean working tree.
+
+### 23.1 What was verified as meeting the plan
+
+| Plan section | Evidence |
+|---|---|
+| §4 ladder, pick rule, edge refinement, one-restart confirm, cliff check | `cmd_bisect_discover` reads as specified. Four acceptance runs: lfm 6 restarts, gemma 7, gpt-oss 7, ornith 7; all confirm PASS. Ornith 21:18 to 21:36, 18 min, against 37 restarts and 52 min in the 16:45 log |
+| §4.2 fixed probe length per model | Every rung of a model logs the same token count (16384 at 64K, 12288 at 16K, 3072 at 4K) |
+| CPU-compute path | gpt-oss: `CPU` at rung 256, no residency probes afterwards, pick 2048 against the committed 2112 |
+| §5 natural-stop decode, acceptance parse | Every sample logs numeric `acc=` and `tokens=`; gemma samples end with `finish=stop` at about 3000 tokens; degeneracy 0.0 throughout |
+| §6 adaptive MTP sweep | gemma: 8 runs, candidates {2,4} then neighbour 3, re-measure of 4 and 2, p_min {0.5, 0.9, 0.6}; tie rule kept n_max 2 and p_min 0.7. Note the earlier `AGENTS.md` claim that n_max was a dominant lever on gemma (54 to 79 t/s) does not reproduce on natural-stop output: 2, 3 and 4 all measure 52 to 54 t/s. The old figure was a forced-generation artefact |
+| §6.4 status plumbing, rename, inherit gate, `--strict` in both orchestrators | Forced-short test restores the ini, writes `status: failed, tuned_n_max: null`; `inherit_json` copies MTP values only on `tuning_status == ok` and logs the reason otherwise; `n_max_confirmed` is gone; `MTP_FAILED` is reset per model |
+| §7 flags, default flip, interactive prompt | `--thorough`, `BENCH_THOROUGH`, "Search depth?" prompt, depth in the MASTER PLAN block |
+| §20.1 errexit fixes | All four watchdog assignments and all five `top | grep` assignments carry `|| true`; direct `bisect <model> <batch>` reaches `=== DONE ===` |
+| §10 docs | `AGENTS.md` rewritten; the Gemma drafter, draft-VRAM, `spec-draft-type-k/v`, `cuMemCreate` and `reasoning=on` notes survived the rewrite |
+
+### 23.2 Required fixes (plan requirements not met)
+
+1. **`cmd_bench` Phase B still forces tokens.** The bench decode payload still sends the filler prompt with `ignore_eos: True` and up to 4000 tokens. §5.2 required it to use `decode_sample` and record `finish_reason`, `completion_tokens`, `degeneracy` and `accept_rate`. As it stands the published decode t/s in every MTP model's JSON remains loop-inflated, which is the number the metrics table shows. Convert it; keep the placement polling and the JSON fields it already writes.
+2. **`run_ph1` in `cmd_mtp_discover` never sees the measurement.** `discover_measure` calls `restart` and `log`, both of which write to stdout, inside the `R=$(discover_measure ...)` capture. `read` then takes the first line of `R`, which is `Restarting llama-cpp...`, so every candidate logs `rejected (placement= oom= tokens=)` including the eventual winner (all five Phase 1 lines in the 21:49 log). The sweep still produced a correct answer only because `mtp_phase1_winner` reads the TSV sample file, not `R`. Commit `5bc16fd` guarded the symptom (`[: integer expected`) instead of the cause. Fix: inside `discover_measure`, send `restart` and every `log` call to stderr (`restart >&2`, `log ... >&2`), so stdout carries only the result line; in `run_ph1`, read `$(... | tail -1)` defensively. The same function is called uncaptured in Phase 2, where its result line currently prints to the console; the redirect fixes that too.
+
+### 23.3 Recommended follow-ups (not blocking, in priority order)
+
+3. **Stale status files.** `/tmp/mtp_status_<model>.json` and `/tmp/discover_<model>.json` persist across sessions, and `cmd_bench` merges whichever file exists. A `bench.sh bench <model>` run weeks later would report last month's `tuning_status: ok`. Two small changes: `cmd_mtpcheck` writes `{"status":"not_run"}` when the model *is* MTP-capable (it currently writes only `not_mtp`), so every suite run starts from a fresh status that `cmd_mtp` overwrites; and both files carry a `written_at` timestamp that `cmd_bench` copies into the JSON.
+4. **Residency probe leaves the server generating after the client is killed.** The residency payload is non-streaming with `max_tokens` up to 4000; llama.cpp cannot notice a disconnected non-streaming client until it tries to write, so the slot keeps decoding the remaining tokens and the next request queues behind it. The ornith ladder shows the prefill probe waiting 60 s per rung for an 11 s job (`still running (30x2s)`), gemma 20 s. Set `"stream": true` on the residency request only (nothing parses its body), which lets the server abort on disconnect. Expected saving: roughly 1 min per rung on 40 t/s models, 5 to 6 min per ornith-class ladder. Verify with `/slots` or by timing the probe after the change.
+5. **Small-context pick instability.** Five lfm 4K runs picked 1024, 4096, 2048, 1024, 2048. The 3072-token probe finishes in under a second and its run-to-run noise (up to 9% at one rung) exceeds the 3% tolerance. Any of those picks is operationally fine, but the result should be repeatable: when a probe request completes in under 5 s, take the median of three. Costs a few seconds only on the models where it applies.
+6. **Stale comments and usage text.** The header (line 16), the `cmd_bisect_discover` banner, and the usage footer still say `BENCH_DISCOVER=1` selects discover mode; it is the default now. `--strict` is missing from `AGENTS.md`.
+7. **`cmd_bisect_thorough` duplicates the test-batch block** that now lives in `cmd_bisect_test_batch`. Harmless; remove when next touched.
+
+### 23.4 Answers to the open items in §22
+
+- **Step G (ctx-sibling seeding): defer.** Run the full re-benchmark with discover first. The ladder results across 64K, 128K and 256K siblings of the same weights will show whether their picks land close enough for seeding to save anything. Decide with that data.
+- **`PREFILL_TOL`: keep 3%.** The ornith drop from 8192 to 512 looks large but is not a regression. On the ladder 512 measured within 1% of the best rung; at full 64K context the confirm run measured 1308 t/s at 512 against 1353 t/s at the 16:45 pick of 1664, a 3% difference, and decode was identical (43.1 against 44.1 t/s at 256). The committed 8192 was never a measured optimum; it was the 16:45 ceiling-side value the user restored by hand. A smaller batch is the intended outcome of the tolerance rule, and it is what gives the MTP draft buffer its headroom. If a future workload shows a real cost from small batches it will be in the saturation prefill number, which the JSON now records.
+- **Full re-benchmark: yes, after 23.2.** Run family heads first with `--strict` so no JSON is published with a failed MTP tune, then let siblings inherit. The pipeline is otherwise ready.
