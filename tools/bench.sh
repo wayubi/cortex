@@ -3486,21 +3486,23 @@ print(' '.join(out))
           { [ "$IMID" -ge "$PICK" ] || [ "$IMID" -le "$DIR_NEIGH" ]; } && break
         fi
         log ""; log "  Interior refine: testing $IMID (toward ${DIR_NEIGH})..."
-        local IMF
+        local IMF PREV_PF=$PICK_PF
         IMF=$(discover_measure_candidate "$IMID") || { log "  STALL at $IMID — aborting"; exit 1; }
         if [ "$IMF" = "0" ]; then log "  interior $IMID failed (OOM/CPU/probe) — stop"; break; fi
         REFINE_B+=("$IMID"); REFINE_P+=("$IMF")
         echo "$IMID PASS $IMF" >> "$POINTS"
-        if python3 -c "exit(0 if float($IMF) > float($PICK_PF) * (1 + $PREFILL_NOISE) else 1)" 2>/dev/null; then
-          log "  interior $IMID ($IMF t/s) beats best $PICK ($PICK_PF) — move toward it"
+        # Adopt a higher-measured point (pick = best over ladder + refine,
+        # §30.2b rule 3 / Change C). PREFILL_NOISE only gates whether to keep
+        # searching further, not whether to adopt a genuinely higher point.
+        if python3 -c "exit(0 if float($IMF) > float($PICK_PF) else 1)" 2>/dev/null; then
+          log "  interior $IMID ($IMF t/s) > best $PICK ($PICK_PF) — adopt as pick"
           PICK=$IMID; PICK_PF=$IMF
-          # shift the neighbour on the direction side to the new best so the next
-          # midpoint stays bracketed toward the same side
-          if [ "$DIR_NEIGH" -gt "$PICK" ]; then HI_NEIGH=$PICK; HI_PF=$PICK_PF; else LO_NEIGH=$PICK; LO_PF=$PICK_PF; fi
-        else
-          # new point not better: tighten the far neighbour toward it (drop the
-          # searched neighbour past the new point) and stop on the noise side.
-          log "  interior $IMID ($IMF t/s) within noise of best $PICK ($PICK_PF) — stop"
+        fi
+        # Keep searching only if this step was a real (noise-clearing) improvement
+        # over the best at the start of the step; otherwise the curve is flat/noisy
+        # in this direction — stop.
+        if ! python3 -c "exit(0 if float($IMF) > float($PREV_PF) * (1 + $PREFILL_NOISE) else 1)" 2>/dev/null; then
+          log "  interior $IMID ($IMF t/s) within noise of step-start best $PREV_PF — stop"
           break
         fi
         ISTEPS=$((ISTEPS + 1))
