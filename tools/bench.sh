@@ -2676,7 +2676,7 @@ print(rank[0] if rank else '')
   local WIN_PMIN="$P_REF" WIN_CAND="" WIN_CAND_TP=""
   for P in $PP; do
     log "  measuring p_min=$P ..."
-    discover_measure "$WIN_NMAX" "$P" "phase-2 p_min=$P"
+    discover_measure "$WIN_NMAX" "$P" "phase-2 p_min=$P" >/dev/null   # result line not needed here (mean read from the sample file)
     local D2=$?
     if [ "$D2" -eq 2 ]; then mtp_die_stall "STALL measuring p_min=$P at n_max=$WIN_NMAX"; fi
     local m
@@ -2692,7 +2692,7 @@ print(rank[0] if rank else '')
     # §30.3: confirm the win with a second sample before switching away from 0.7
     # (a single sample can beat the reference by >5% on noise). One extra run.
     log "  p_min=$WIN_CAND (${WIN_CAND_TP} t/s) beat 0.7 by > ${MTP_TIE} on one sample — confirming with a second"
-    discover_measure "$WIN_NMAX" "$WIN_CAND" "phase-2 p_min=$WIN_CAND (confirm)" || mtp_die_stall "STALL confirming p_min=$WIN_CAND"
+    discover_measure "$WIN_NMAX" "$WIN_CAND" "phase-2 p_min=$WIN_CAND (confirm)" >/dev/null || mtp_die_stall "STALL confirming p_min=$WIN_CAND"
     local m2
     m2=$(mtp_mean_for "$WIN_NMAX" "$WIN_CAND")
     if [ -n "$m2" ] && python3 -c "exit(0 if float('$m2') > float('$REF') * (1 + $MTP_TIE) else 1)" 2>/dev/null; then
