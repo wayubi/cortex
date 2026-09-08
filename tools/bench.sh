@@ -3967,6 +3967,16 @@ _mtp_tuning = {
     'tuning_samples': status.get('samples') if status and status.get('samples') is not None else [],
 }
 
+# Merge the §4.5 discover-ladder result (/tmp/discover_<model>.json) if present.
+# cmd_bisect_discover writes it; a thorough or bench-only run has none → discover={}.
+discover = {}
+_disc_path = '/tmp/discover_${MODEL}.json'
+if os.path.exists(_disc_path):
+    try:
+        with open(_disc_path) as _df: discover = json.load(_df)
+    except Exception:
+        discover = {}
+
 data = {
     'model': '$MODEL',
     'ctx': $CTX,
@@ -3993,6 +4003,7 @@ data = {
         'configured_p_min': meta['mtp']['p_min'],
         'drafter': meta['mtp']['drafter'],
     },
+    'discover': discover if discover else {},
     'hardware': {
         **env,
         'run': {
