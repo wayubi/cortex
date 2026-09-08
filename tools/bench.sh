@@ -33,6 +33,7 @@ ESSAY="Write a detailed 1000-word essay explaining transformers and MoE"
 POLL_MIN_SAMPLES=3
 POLL_MAX_SAMPLES=80
 MAX_BATCH=16384          # batch search cap: never probe above min(ctx, MAX_BATCH)
+MTP_TIE_NATS=0.25        # mtpverify: gap below this (nats) at the divergence token = a near-tie, premise holds
 
 # Shared per-model state (set before each engine call)
 MODEL=""
@@ -1859,106 +1860,178 @@ print('  removed ' + key)
 # Not part of the suite. Empirically checks whether speculative decoding (MTP)
 # changes the sampled output distribution. Two restarts on the SAME model:
 #   run 1: spec-type removed (MTP off), run 2: spec-type=draft-mtp (MTP on).
-# Both requests use temperature=0, seed=42, logprobs=true, max_tokens=1024 and
-# the identical prompt. Token ids are read from logprobs.content[].id and the
-# index of the first differing token is printed.
-# Expected result: identical first ~200+ tokens (late divergence is numerical
-# drift between batched-verification and single-token decode and does not fail).
+# Both requests use temperature=0, seed=42, logprobs=true, top_logprobs=10,
+# max_tokens=1024 and the identical prompt (passed via env var, not spliced).
+#
+# Output distribution is a statement about the probabilities, so it is tested on
+# the probabilities, not on which side of a coin-flip the greedy argmax landed.
+# At the first differing token index d:
+#   gap_off = lp_off[d](off-chosen) − lp_off[d](on-chosen)
+#   gap_on  = lp_on[d](on-chosen)  − lp_on[d](off-chosen)
+#   overlap = |top5_off[d] ∩ top5_on[d]|
+#   drift   = mean over i<d of |lp_off[i] − lp_on[i]|      (numerical noise level)
+# PASS if gap_off < MTP_TIE_NATS AND gap_on < MTP_TIE_NATS AND overlap ≥ 4.
+# FAIL otherwise — in particular if the ON-chosen token is absent from the OFF
+# run's top-10 (a real distribution difference, not a near-tie flip).
 cmd_mtpverify() {
   local CTX=$(read_ctx)
   SERVED_GRACE=$((60 + CTX / 65536 * 40))
   log ""; log "=== MTP VERIFY: $MODEL ==="
-  local SNAP=/tmp/mtpverify_section_${MODEL}.snap
-  read_section > "$SNAP"
-  local ORIG_HAS_MTP=0
-  grep -q "spec-type.*draft-mtp" <(read_section) && ORIG_HAS_MTP=1
 
-  local PROMPT="Write a detailed technical report on the history of computing, covering its major eras in chronological order."
+  # Snapshot and restore the whole section on every exit (Ctrl-C included) so a
+  # run can never leave spec-type removed from a production entry. SNAP is a
+  # global (not local) so it stays in scope when the subshell EXIT trap fires.
+  MTPV_SNAP=/tmp/mtpverify_section_${MODEL}.snap
+  read_section > "$MTPV_SNAP"
+  trap 'RC=$?; [ -f "$MTPV_SNAP" ] && restore_section "$MTPV_SNAP" >/dev/null 2>&1; exit $RC' EXIT
+
+  export MTPV_PROMPT="Write a detailed technical report on the history of computing, covering its major eras in chronological order."
   local MAX_TOK=1024
+  local OFF_JSON=/tmp/mtpv_${MODEL}_off.json
+  local ON_JSON=/tmp/mtpv_${MODEL}_on.json
+
+  # ── Shared deterministic request runner (fires against the CURRENT config) ──
+  mtpv_request() {
+    local OUT=$1 LABEL=$2
+    python3 -c "
+import json, os
+payload = {'model':'$MODEL','messages':[{'role':'user','content':os.environ['MTPV_PROMPT']}],'max_tokens':$MAX_TOK,'temperature':0,'seed':42,'logprobs':True,'top_logprobs':10}
+with open('${OUT}.payload','w') as f: json.dump(payload, f)
+"
+    fire_request "${OUT}.payload" "$OUT" "mtpverify-$LABEL" "$(adaptive_timeout $MAX_TOK)"
+    local RC=$?
+    if [ "$RC" -eq 2 ]; then
+      log "  STALL on $LABEL run — aborting (network/HF fetch)"
+      return 2
+    fi
+    wait "$FIRE_PID" 2>/dev/null || true
+    return 0
+  }
 
   # ── Run 1: MTP off ──
   log "  Run 1: MTP OFF (spec-type removed)"
   del_key spec-type
   restart
-  python3 -c "
-import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':'''$PROMPT'''}],'max_tokens':$MAX_TOK,'temperature':0,'seed':42,'logprobs':True}
-with open('/tmp/mtpv_off_payload.json','w') as f: json.dump(payload, f)
-"
-  fire_request /tmp/mtpv_off_payload.json /tmp/mtpv_off.json "mtpverify-off" "$(adaptive_timeout $MAX_TOK)"
-  local RC=$?
-  if [ "$RC" -eq 2 ]; then
-    log "  STALL on MTP-off run — aborting (network/HF fetch)"
-    restore_section "$SNAP"
-    exit 1
-  fi
-  wait "$FIRE_PID" 2>/dev/null || true
+  if ! mtpv_request "$OFF_JSON" off; then return 1; fi
   local OOM_OFF=$(oom_count_since_mark)
 
   # ── Run 2: MTP on ──
   log "  Run 2: MTP ON (spec-type=draft-mtp)"
   set_key spec-type draft-mtp
   restart
-  python3 -c "
-import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':'''$PROMPT'''}],'max_tokens':$MAX_TOK,'temperature':0,'seed':42,'logprobs':True}
-with open('/tmp/mtpv_on_payload.json','w') as f: json.dump(payload, f)
-"
-  fire_request /tmp/mtpv_on_payload.json /tmp/mtpv_on.json "mtpverify-on" "$(adaptive_timeout $MAX_TOK)"
-  local RC2=$?
-  if [ "$RC2" -eq 2 ]; then
-    log "  STALL on MTP-on run — aborting (network/HF fetch)"
-    restore_section "$SNAP"
-    exit 1
-  fi
-  wait "$FIRE_PID" 2>/dev/null || true
+  if ! mtpv_request "$ON_JSON" on; then return 1; fi
   local OOM_ON=$(oom_count_since_mark)
 
-  # ── Restore original spec-type state ──
-  if [ "$ORIG_HAS_MTP" -eq 1 ]; then
-    set_key spec-type draft-mtp
-  else
+  # ── Optional control: MTP off at batch/2 vs MTP off at current batch ──
+  # Same near-tie signature with no MTP involved → proof the flip class is not an
+  # MTP effect. Non-gating. Enable with MTPV_CONTROL=1.
+  local CTRL_RESULT=""
+  if [ "${MTPV_CONTROL:-0}" -eq 1 ]; then
+    local CUR_B=$(read_batch)
+    local HALF_B=$(( CUR_B / 2 / 64 * 64 ))
+    [ "$HALF_B" -lt 64 ] && HALF_B=64
+    log "  CONTROL: MTP off at batch=$HALF_B vs batch=$CUR_B (non-gating)"
+    local C1=/tmp/mtpv_${MODEL}_ctl1.json C2=/tmp/mtpv_${MODEL}_ctl2.json
+    set_key spec-type nonexistent >/dev/null 2>&1  # ensure off
     del_key spec-type
+    set_batch "$HALF_B"; restart
+    mtpv_request "$C1" "ctl1"; local O1=$(oom_count_since_mark)
+    set_batch "$CUR_B"; restart
+    mtpv_request "$C2" "ctl2"; local O2=$(oom_count_since_mark)
+    CTRL_RESULT=$(MTPV_A="$C1" MTPV_B="$C2" MTPV_TIE=$MTP_TIE_NATS python3 -c "
+import json, os
+def load(p):
+    d=json.load(open(p)); ch=d['choices'][0]
+    lp=ch['logprobs']['content']
+    ids=[t['id'] for t in lp]
+    tops=[{x['id']:x['logprob'] for x in t.get('top_logprobs',[])} for t in lp]
+    chos=[t['logprob'] for t in lp]
+    return ids, tops, chos
+a=load(os.environ['MTPV_A']); b=load(os.environ['MTPV_B'])
+ia,ta,ca=a; ib,tb,cb=b
+d=next((i for i in range(min(len(ia),len(ib))) if ia[i]!=ib[i]),None)
+out='  CONTROL: '
+if d is None: out+='identical (%d tokens)'%min(len(ia),len(ib))
+else:
+    out+='divergence at %d; off-chosen lp %.3f vs on-chosen lp %.3f'%(d, ca[d], cb[d])
+print(out)
+")
   fi
 
-  # ── Compare ──
+  # ── Compare with the margin criterion ──
   python3 -c "
-import json
-def tokens(p):
-    try:
-        d = json.load(open(p))
-        if 'choices' not in d or not d['choices']: return None, None, None
-        ch = d['choices'][0]
-        lp = ch.get('logprobs', {})
-        ids = [t.get('id') for t in lp.get('content', [])] if isinstance(lp, dict) else None
-        t = d.get('timings', {})
-        spd = t.get('predicted_per_second', 0)
-        return ids, spd, ch
-    except Exception as e:
-        return None, None, None
+import json, os
+MTPV_OFF='$OFF_JSON'; MTPV_ON='$ON_JSON'
+MTP_TIE=float($MTP_TIE_NATS)
+def load(p):
+    d=json.load(open(p))
+    if 'choices' not in d or not d['choices']: return None, None, None
+    ch=d['choices'][0]
+    lp=ch.get('logprobs',{})
+    cont=lp.get('content',[]) if isinstance(lp,dict) else []
+    ids=[t.get('id') for t in cont]
+    # top_logprobs: dict token_id -> logprob, plus each position's chosen logprob
+    tops=[]
+    chos=[]
+    for t in cont:
+        tl=t.get('top_logprobs',[])
+        tops.append({x.get('id'):x.get('logprob') for x in tl})
+        chos.append(t.get('logprob'))
+    spd=d.get('timings',{}).get('predicted_per_second',0)
+    return ids, tops, spd
 
-ids_off, spd_off, ch_off = tokens('/tmp/mtpv_off.json')
-ids_on,  spd_on,  ch_on  = tokens('/tmp/mtpv_on.json')
+def tok(p):
+    d=json.load(open(p)); return [t.get('id') for t in d['choices'][0]['logprobs']['content']]
+
+ids_off, tops_off, spd_off = load(MTPV_OFF)
+ids_on,  tops_on,  spd_on  = load(MTPV_ON)
 
 if ids_off is None or ids_on is None:
     print('  RESULT: could not parse token ids (off=%s on=%s)' % (ids_off is None, ids_on is None))
 else:
     n = min(len(ids_off), len(ids_on))
-    diff = next((i for i in range(n) if ids_off[i] != ids_on[i]), None)
-    print('  off: %d tokens, %s t/s | on: %d tokens, %s t/s' % (len(ids_off), spd_off, len(ids_on), spd_on))
-    if diff is None:
-        if len(ids_off) == len(ids_on):
-            print('  RESULT: identical (all %d tokens match)' % n)
-        else:
-            print('  RESULT: identical over common prefix (%d tokens); lengths differ (%d vs %d) — later divergence' % (n, len(ids_off), len(ids_on)))
+    d = next((i for i in range(n) if ids_off[i] != ids_on[i]), None)
+    # drift = mean |chosen_lp_off[i] - chosen_lp_on[i]| over the identical prefix
+    toks_off = tok(MTPV_OFF); toks_on = tok(MTPV_ON)
+    drift_den = max(1, d if d is not None else n)
+    drift = 0.0
+    for i in range(min(n, d if d is not None else n)):
+        # chosen token id matches (identical prefix), compare its logprob
+        lo=tops_off[i].get(ids_off[i], 0.0); ln=tops_on[i].get(ids_on[i], 0.0)
+        if lo!=0.0 or ln!=0.0: drift += abs(lo-ln)
+    drift = drift / drift_den if drift_den else 0.0
+
+    print('  off: %d tokens, %.1f t/s | on: %d tokens, %.1f t/s' % (len(ids_off), spd_off, len(ids_on), spd_on))
+    if d is None:
+        print('  RESULT: PASS (identical over common prefix, %d tokens)' % min(len(ids_off), len(ids_on)))
     else:
-        print('  RESULT: first differing token index = %d (off=%s, on=%s)' % (diff, ids_off[diff], ids_on[diff]))
-        if diff >= 200:
-            print('  Premise holds: identical over first %d tokens; divergence is late numerical drift.' % diff)
+        off_chosen = ids_off[d]; on_chosen = ids_on[d]
+        # Both chosen tokens must be present in BOTH runs' top-logprobs at d to test margins.
+        lp_off_off = tops_off[d].get(off_chosen)
+        lp_off_on  = tops_off[d].get(on_chosen)
+        lp_on_on   = tops_on[d].get(on_chosen)
+        lp_on_off  = tops_on[d].get(off_chosen)
+        s5_off=set(list(tops_off[d].keys())[:5]); s5_on=set(list(tops_on[d].keys())[:5])
+        overlap = len(s5_off & s5_on)
+
+        if lp_off_off is None or lp_off_on is None or lp_on_on is None or lp_on_off is None:
+            absent = 'on-chosen absent from off-top10' if lp_off_on is None else ('off-chosen absent from on-top10' if lp_on_off is None else 'missing lp')
+            print('  RESULT: FAIL at token %d — %s (not a near-tie)' % (d, absent))
         else:
-            print('  WARNING: divergence within first 200 tokens — speculative decoding appears to change output.')
+            gap_off = lp_off_off - lp_off_on
+            gap_on  = lp_on_on  - lp_on_off
+            ok = (gap_off < MTP_TIE and gap_on < MTP_TIE and overlap >= 4)
+            verdict = 'PASS' if ok else 'FAIL'
+            print('  divergence at token %d' % d)
+            print('    off chose id %s lp %.4f ; on-chosen id %s lp %.4f (off run) → gap_off=%.4f' % (off_chosen, lp_off_off, on_chosen, lp_off_on, gap_off))
+            print('    on  chose id %s lp %.4f ; off-chosen id %s lp %.4f (on  run) → gap_on =%.4f' % (on_chosen, lp_on_on, off_chosen, lp_on_off, gap_on))
+            print('    overlap(top5)=%d  drift(prefix)=%.4f' % (overlap, drift))
+            print('  RESULT: %s (gap_off<%.2f AND gap_on<%.2f AND overlap>=4)' % (verdict, MTP_TIE, MTP_TIE))
+            if ok: print('  Premise holds: divergence is a near-tie flip under numerical drift (~%.2f nats).' % MTP_TIE)
+            else:  print('  WARNING: on-run chose a token the off-run considered clearly worse — output distribution appears to change.')
 "
   log "  OOM: off=$OOM_OFF on=$OOM_ON (should be 0 both)"
+  [ -n "$CTRL_RESULT" ] && log "$CTRL_RESULT"
   log "  MTP verify complete. Original spec-type state restored."
 }
 

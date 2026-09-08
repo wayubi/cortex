@@ -511,3 +511,42 @@ Print `d`, both gaps, overlap, drift, both decode speeds and OOM counts. A FAIL 
 - **Compare probabilities, not just ids** (§16.2). Keep the id comparison to find `d`, then read the margins from `top_logprobs` at `d`.
 - **Keep the response files.** Write them to `/tmp/mtpv_${MODEL}_off.json` / `_on.json` instead of fixed names so a second model's run does not overwrite the first model's evidence; the gemma data was lost this way.
 - **Prompt interpolation.** The prompt is spliced into a Python triple-quoted literal inside a shell double-quoted string. It works for the current constant but will break on a prompt containing a quote or a backslash; pass it via a file or an environment variable like the other payload builders should.
+
+---
+
+## 17. Implementer report: §16.2 criterion is not computable under MTP — `top_logprobs` gap (2026-09-07, later)
+
+Status: **the §16.4 code fixes are applied; re-running `mtpverify` exposed a blocker in the §16.2 margin criterion that requires author direction. Not a premise FAIL — a measurement-availability limitation.**
+
+### 17.1 §16.4 fixes applied to `cmd_mtpverify`
+
+- Restore goes through a snapshot on **every** exit path, guarded by a global `MTPV_SNAP` + `trap ... EXIT` (`set -u`-safe: the snapshot path is global, not a function-local, so it survives into the subshell EXIT trap). `spec-type` was confirmed restored to `draft-mtp` after the run; the earlier "SNAP: unbound variable" from the first attempt (a function-local in the trap) is fixed.
+- `top_logprobs: 10` requested explicitly on both runs.
+- Response files are per-model: `/tmp/mtpv_${MODEL}_off.json` / `_on.json`.
+- Prompt passed via exported `MTPV_PROMPT` env var read through `os.environ` (no more shell-splicing into a Python triple-quoted literal).
+- `del_key` kept as a helper but `mtpverify` now restores via the snapshot.
+- Constants: `MTP_TIE_NATS=0.25` added.
+- `bash -n` clean.
+
+### 17.2 The blocker: llama.cpp emits `top_logprobs` only at draft-re-sampled positions under MTP
+
+Re-ran `mtpverify` on `gemma-4-12b-q4-qat-mtp-16k` (temperature 0, seed 42, max_tokens 1024, top_logprobs 10). The run completed and `spec-type` was restored, but the comparison cannot be evaluated under the §16.2 rule:
+
+- **MTP-off run:** all 1024 token positions carry `top_logprobs`.
+- **MTP-on run:** only a sparse subset carry `top_logprobs` — for gemma, populated indices were `{0, 41, 42, 95, 118, 131, 139, 179, ...}` (39 of 1024). These are exactly the positions where the target model performed a **real sample decision** (a draft was rejected / re-verified). Positions where a speculative draft token was **accepted** have empty `top_logprobs`.
+- gemma's first divergence is at **token 58**, which is NOT a re-sampled position in the ON run → `top_logprobs[58]` is empty in ON → the margin test has no data to compute `gap_on`, `overlap`, or the "on-chosen absent from off top-10" check at `d`.
+
+The qwen saved data from the earlier run (§16.1) had its ON run diverge at token 34 with `top_logprobs` present there — but that was coincidental (qwen's ON run happened to have 239 populated positions spanning token 34). It is not guaranteed for every model / divergence token.
+
+### 17.3 Why this matters
+
+The §16.2 rule reads margins at the first-divergence index `d`. Under MTP, `d` will frequently (often) fall on a draft-accepted position where the ON run has no `top_logprobs`, so the rule cannot be evaluated — and a naive parser would report a spurious FAIL ("on-chosen absent from on-top10") when the data simply is not there. That is what happened on gemma. This is **not** evidence against the premise; it is a measurement limitation of `top_logprobs` under speculative decoding.
+
+### 17.4 Options for the author (not chosen unilaterally)
+
+1. **Emit at every position.** Check whether llama.cpp has a server flag that forces full logprobs / disables the skip at draft-accepted positions (e.g. an option that makes the sampler emit the distribution regardless of acceptance). If such a flag exists, request it on the ON run. (Unknown to the implementer; the source is not in this repo.)
+2. **Compare at the first common re-sampled position.** Instead of the first-divergence token `d`, evaluate the margins at the first index `r ≥ d` that has `top_logprobs` in **both** runs (a genuine sample decision in each). If the runs have already diverged by then, this tests whether the divergent path the ON run took is one the OFF run considered comparably likely at its next real decision — still a distribution-preservation check, but looser.
+3. **Drop the per-token margin comparison; test distribution-preservation empirically.** Run each config several times (different prompts / a range of seeds) and compare the empirical text/token statistics, accepting that a strict greedy-identical output is not expected under kernel drift.
+4. **Reconsider the OFF/ON framing.** The MTP-off run is the ground-truth sampler. Since llama.cpp's speculative decoding accepts a draft only when it equals the target model's own sample, the correct check may be to compare the ON run's *accepted* tokens against what the target would emit — which the server already logs as `draft acceptance`. Verify on llama.cpp source (`common/sampling.cpp`, `common_sampler_sample_and_accept_n`) whether acceptance guarantees distribution identity by construction, which would make the whole empirical test moot.
+
+The implementer recommends the author weigh option 4 (acceptance-by-construction is the actual guarantee) against option 2 (a looser but computable empirical margin check), because option 1 depends on a server flag that may not exist and option 3 discards the probability data the §16.2 rule was designed around.
