@@ -720,3 +720,38 @@ The §20.1 fix (commit `7de6697`) and the §20.3 review findings (commit `8b8342
 - Acceptance models.ini writes (the discover picks) were reverted to committed state after the runs; no working-tree residue.
 
 Step C is complete. Proceeding to Step D (`cmd_mtp_discover` + §6.4 status plumbing).
+
+---
+
+## 22. Completion report — Steps D, E, F and overall refactor state (2026-09-07, later)
+
+### Commits (Steps D–F)
+
+| Step | Commit(s) | What |
+|---|---|---|
+| D — §6 `cmd_mtp_discover` + §6.4 | `c688118`, `5bc16fd` | Old `cmd_mtp` → `cmd_mtp_thorough`; new adaptive `cmd_mtp_discover` (§6.2 Q6 rule); status-file plumbing on every exit (`mtp_write_status`, `mtp_trap_exit`, `mtp_die`, `mtp_die_stall`); `cmd_bench` merges `tuning_status`/`tuned_*`/`samples` and renames `n_max_confirmed`→`n_max_loaded`/`p_min_loaded`; `inherit_json` refuses unvalidated MTP values (Q7); `--strict` skips bench on mtp fail in both orchestrators. `5bc16fd` guards `run_ph1` against empty SHORT-sample fields (fixes a `[: integer expected` under the forced-short test). |
+| E — §7 flags | `9e0b240` | **Default is now discover** for `cmd_bisect` and `cmd_mtp`. `--thorough` / `THOROUGH=1` / env `BENCH_THOROUGH=1` → thorough. `BENCH_DISCOVER=1` deprecated no-op. Interactive "Search depth?" prompt + depth printed in MASTER PLAN. |
+| F — §4.5 JSON + §10 docs | `c140ba5`, `5fd1318` | `cmd_bench` merges `/tmp/discover_<model>.json` into a top-level `discover` key (fable §20.3 #2). AGENTS.md rewritten: discover-default batch tuning, speed-only MTP (degeneracy diagnostic), `decode_sample` natural-stop measurement, result-recording JSON fields. |
+
+### Step D acceptance (live)
+
+- **Discover mtp on `gemma-4-12b-q4-qat-mtp-16k`** (`BENCH_DISCOVER=1`): 8 decode runs, no degeneracy rejection, numeric acc= / tokens= on every sample, degeneracy 0.0, winners applied, `/tmp/mtp_status_*.json` → `status:ok, tuned_n_max:2, tuned_p_min:0.7`.
+- **Forced-short** (`MIN_DECODE_TOKENS=999999`): tuner logs "No valid n_max candidate", restores the ini (n_max=4/p_min=0.6), status file → `status:failed, tuned_n_max:null`, dispatch prints "mtp tuning FAILED". The `run_ph1` empty-field bash error was fixed and re-verified clean.
+
+### Overall refactor state
+
+- **Steps 0–5 all committed and `bash -n` clean.** Working tree and `models.ini` clean.
+- Discover ladder acceptance (Step C): lfm / gemma / gpt-oss / ornith all passed (§21).
+- The thorough path (`cmd_bisect_thorough` / `cmd_mtp_thorough`) is preserved verbatim behind `--thorough`, with its markers intact (ceiling_probe, gpu_saturation_sweep, Golden:, shortlist gate).
+- MTP premise confirmed by construction (§18) and OFF-only mtpverify both models PASS (§18.3).
+- Decode measurement de-confounded: natural stop, no `ignore_eos` on speed samples; the earlier 16:45-style "failed MTP on bogus degeneracy" no longer occurs.
+
+### Remaining / optional
+
+- **Step G (§8 ctx-sibling seeding)** is optional and gated behind `--seed-from-sibling`. Not implemented. The implementer recommends the author decide whether it is wanted; it is an optimisation, not a correctness item.
+- The discover-picks-lower-batch observation (§21: e.g. ornith 8192→512) remains flagged for the author in case the 3% tolerance should be revisited on flat-prefill dense models.
+
+### Open items for the author
+1. Is Step G (§8 sibling seeding) wanted? If yes, implement behind `--seed-from-sibling` as a follow-up.
+2. Any desired adjustment to `PREFILL_TOL` given the lower discover picks on flat-prefill dense/MTP models?
+3. Full re-benchmark of the affected models (the discover runs wrote new batch/MTP values to models.ini during acceptance, which were reverted to committed state; the pipeline is ready for a clean full-suite run).
