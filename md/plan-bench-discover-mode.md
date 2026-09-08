@@ -1,6 +1,6 @@
 # Plan: `bench.sh` discover mode — find practical settings with ~1/4 of the runs
 
-**Status:** 2026-09-08 — implemented and reviewed (§23 to §25). Discover is the default; thorough behind `--thorough`. Three small fixes remain before the full re-benchmark (§25.4).
+**Status:** 2026-09-08 — implemented, reviewed and verified (§23 to §27). Discover is the default; thorough behind `--thorough`. Ready for the full re-benchmark (§27.3).
 **Audience:** an implementing agent. Function names are the anchors; the source has no stable line numbers. Read `tools/bench.sh` top to bottom once before touching anything.
 **Scope:** `tools/bench.sh` only, plus the matching doc updates in `AGENTS.md`. Every model in `llama-cpp/models.ini` must be supported (73 entries today; see §2 for the classes).
 
@@ -893,3 +893,30 @@ committed state after the run.
 
 The pipeline is complete per the plan and ready for the full re-benchmark:
 family heads with `--no-inherit --strict`, then let siblings inherit.
+
+---
+
+## 27. Author review of the §26 disposition (2026-09-08)
+
+**Verdict: complete. Every §25 item is implemented correctly, and I verified the two that matter most live rather than by inspection. The pipeline meets the plan and is ready for the full re-benchmark.**
+
+### 27.1 Verified
+
+| Item | How |
+|---|---|
+| #1 stale-status guard | The status file from yesterday's tune had already been removed, so the 06:49 run only showed `not_run`. I placed a synthetic `ok` status with tuned 3/0.7 against the ini's 4/0.6 and ran `--no-inherit bench` on gemma: the record came out `tuning_status: stale` with the reason string, and the warning printed. Comparison types are consistent on both sides (`meta` parses n_max as int and p_min as float; the status reader does the same), so the equal case stays `ok`. Synthetic file removed, JSON restored afterwards |
+| #3 tie rule | Ran `mtp_phase1_winner` offline against the 23:10 run's own samples: winner is now n_max 2 (was 3). Two synthetic cases behave correctly: a clear best of 4 wins outright; a within-tolerance 2 that spilled to CPU is skipped and 3 wins |
+| #4 decode cap | `max(256, min(4000, ctx − 256))`, identical to `decode_sample` |
+| #5 fail-loud bench | `speed:` and `request:` lines now appear in the log file (06:49 and 06:54 runs); `JSON written` goes through `log`; the post-write check uses `REQUEST_START`, which is set at the top of the run |
+| #2 `cache_prompt: false` on the sized probe, #6 cosmetics | In the diff; `n_max_loaded: 4` and `p_min_loaded: 0.6` are numeric in the record I generated |
+| End-to-end bench | Two more full `cmd_bench` runs today (06:54, 06:58): natural stop at about 3000 tokens, degeneracy 0.0, decode 52 to 56 t/s, JSON written and verified, exit 0. Tree restored to committed state after each |
+
+### 27.2 One small leftover, not blocking
+
+The stale-status warning is written with `sys.stderr.write` inside the JSON heredoc, so it reaches the terminal but not the log file, while the resulting `tuning_status: stale` is in the JSON. Route it through `log` (append to `$LOG_FILE`) so a suite run's log shows it next to the verdict. Two lines.
+
+### 27.3 Handover
+
+- Run family heads with `--no-inherit --strict`, then let siblings inherit. Remember that `bench.sh bench <model>` in default inherit mode skips a family head that already has a JSON.
+- On the first ornith or gemma ladder after this, confirm the residency `stream: true` change removed the `prefill-sized: still running (30x2s)` waits; that is the only §23 change whose effect is not yet measured on a slow-decode model.
+- §8 sibling seeding stays deferred until that re-benchmark shows how close context siblings' picks land.
