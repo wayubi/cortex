@@ -358,7 +358,7 @@ Work in this order; each step must pass its check before the next. Land each ste
 5. **§4.5 JSON fields + §10 docs.**
 6. **§8 sibling seeding** (optional).
 
-General checks at every step: `bash -n tools/bench.sh` clean; a killed run (Ctrl-C during the ladder) leaves `models.ini` at its pre-run values (existing EXIT traps must still fire; the discover functions must use the same `trap ... EXIT` pattern as `cmd_bisect` and `cmd_mtp` today); `git diff llama-cpp/models.ini` after a successful run shows only the intended keys for the intended section.
+General checks at every step: `bash -n tools/bench.sh` clean; every acceptance run is executed **both** through the suite (`bench.sh all <model>`) and directly (`bench.sh bisect <model>` / `bench.sh mtp <model>`), because the suite's `if ( cmd_x )` wrapper suppresses `errexit` and hides a whole class of failures (§20.1); a killed run (Ctrl-C during the ladder) leaves `models.ini` at its pre-run values (existing EXIT traps must still fire; the discover functions must use the same `trap ... EXIT` pattern as `cmd_bisect` and `cmd_mtp` today); `git diff llama-cpp/models.ini` after a successful run shows only the intended keys for the intended section.
 
 ---
 
@@ -656,3 +656,46 @@ Per §12, `saturation_test` is out of scope to modify, so the implementer stoppe
 1. **Is the `saturation_test` tiny-ctx failure known / expected, and is it in scope to fix?** It blocks the §11 step-2 acceptance model `lfm-2.5-8b-a1b-q4-4k-think`. If it is a real bug, who fixes it — the implementer (requires waiving §12) or the author? If it is expected (4K-ctx models should not be run through the 99%-ctx saturation confirm), how should the acceptance check proceed?
 2. **Suggested next validation** if the lfm-4K blocker stands: run discover on a normal-size model where saturation is known to work (`gemma-4-12b-q4-qat-mtp-16k` or `ornith-1.5-9b-q4-mtp-64k-think`) to validate the full discover confirm path end-to-end. Confirm that is acceptable in place of the lfm-4K acceptance.
 3. **Any review of `cmd_bisect_discover` / `cmd_bisect_thorough` / `cmd_bisect_test_batch` / `prefill_probe_sized`** (commit `0aec580`) before the implementer proceeds to Step D (`cmd_mtp_discover` + §6.4 status plumbing)?
+
+---
+
+## 20. Author response to §19 (2026-09-07, later)
+
+### 20.1 Q1 — the `saturation_test` failure is real, pre-existing, not context-size related, and in scope to fix
+
+Diagnosis, verified by reproduction rather than by reading the log:
+
+- The script runs under `set -euo pipefail`. In `saturation_test`'s Phase 2 watchdog loop, three plain (non-`local`) assignments read line numbers out of the server log with `... | grep -n "..." | tail -1 | cut -d: -f1`, and a fourth (`TG=...`) does the same for the `n_gen` throughput line. On the first watchdog tick there is no `n_gen =` line yet, `grep` exits 1, `pipefail` makes the pipeline exit 1, the assignment inherits that status, and `errexit` terminates the shell. No log line is printed because nothing failed *visibly*; the EXIT trap then fires with `RC=1`. That is exactly the "silent exit 1 after one watchdog tick" in §19.3.
+- Why the suite never showed it: `run_full_suite` and `reset_parent_full` invoke `if ( cmd_bisect ); then`, and bash disables `errexit` for everything executed inside the condition of an `if`, subshell and called functions included. The `bisect` and `mtp` subcommand dispatch calls the function as a plain statement, where `errexit` is live. Minimal reproduction:
+
+  ```bash
+  bash -euo pipefail -c 'f(){ X=$(echo a | grep -n b | tail -1 | cut -d: -f1); echo after; }; f; echo done'
+  # exits 1 before "after"
+  bash -euo pipefail -c 'f(){ X=$(echo a | grep -n b | tail -1 | cut -d: -f1); echo after; }; if ( f ); then echo ok; fi'
+  # prints after, ok
+  ```
+- The four assignments were introduced on 2026-09-06 in commit `e3dbd7b` (stall detection). Every direct `bench.sh bisect <model>` or `bench.sh bisect <model> <batch>` invocation since then has been broken at the first saturation test on every model; the lfm 4K run was simply the first one anyone ran directly after that commit. The suite path was unaffected, which is why the 16:45 log completed.
+
+**Fix, and a narrow waiver of §12 for it.** Append `|| true` to the three `LAST_LINE_*` assignments and to the `TG=` assignment in `saturation_test`'s watchdog. That changes no behaviour: the variables were already meant to be empty when the line is absent, and the code below them handles empty. Do the same for the five `TOP=$(top -bn1 ... | grep llama-s | head -n1)` assignments (`residency_probe`, `decode_guarded_probe`, `decode_sample`, `run_decode_test`'s inherited copy if any, `cmd_bench`), which fail the same way whenever `top` misses the process for one sample. All other plain assignments flagged by a scan end in `cut`, `tr` or `echo`, which exit 0 on no match, and are safe. Do not switch to `set +e`, and do not wrap the dispatch in an `if`; fix the fragile lines so direct and suite invocation behave identically.
+
+**Verification:** `./tools/bench.sh bisect lfm-2.5-8b-a1b-q4-4k-think 1024` (direct, thorough test-batch path) must now print `Saturation: PASS` and reach `=== DONE ===`; then the discover confirm on the same model must complete. Add the direct-invocation form to the §11 checks for every step, since the suite form masks this whole class of error.
+
+### 20.2 Q2 — acceptance models
+
+Keep `lfm-2.5-8b-a1b-q4-4k-think` as the first acceptance model once §20.1 is in; it is the fastest to iterate and it is the only one that exercises the small-context clamps (`PROBE_TOKENS = 3072`, the `single-ubatch` label at rungs 4096 and above, `MAX_TOK` in `decode_sample`). Then run the other two named in §11 step 2 (`gemma-4-12b-q4-qat-mtp-16k` for a dense MTP head, `gpt-oss-20b-a4b-q4-64k-think-low` for the CPU-compute path) and finally `ornith-1.5-9b-q4-mtp-64k-think` for the direct comparison with the 16:45 log. Substituting gemma for lfm is not acceptable; it would leave the small-ctx path untested.
+
+The lfm ladder result itself is sound: 256=4611, 512=5085, 1024=5789, 2048=5627, 4096=5841 t/s; best 5841, 3% threshold 5666, smallest rung above it is 1024. That equals the value already committed for this model, which is the right kind of sanity check.
+
+### 20.3 Q3 — review of commit `0aec580` (and `287c384` / `fb759ba`)
+
+The structure matches §4 and §5 closely, the restore trap is in place, the ladder break, the pick rule, the edge refinement and the three step-down paths all read correctly. Findings, in priority order:
+
+1. **`decode_sample` computes degeneracy twice.** The first Python block builds the 8-gram ratio into `deg` and never prints it; the second block recomputes it as `QUALITY`. Delete the dead computation from the first block (keep speed, token count and finish reason there).
+2. **`cmd_bench` does not yet merge `/tmp/discover_${MODEL}.json`.** The discover path writes it (§4.5) but nothing reads it. Do this together with the §6.4 status merge in step D so the JSON schema changes land once.
+3. **Residency `AMBIGUOUS` is logged as "GPU-resident".** The branch `else MODE="GPU"` is correct per §4.1 (not-proven-CPU counts as GPU), but the log line should print the actual verdict (`GPU-resident` or `AMBIGUOUS (treated as GPU)`) so a run that was ambiguous at every rung is visible in the log and the JSON.
+4. **`cmd_bisect_test_batch` duplicates the trap/restore boilerplate** already in `cmd_bisect_discover` and `cmd_bisect_thorough`. Acceptable for now; if touched again, factor an `install_batch_restore_trap` helper.
+5. **Saturation `rc=3` (format error / HTTP 500) triggers a step-down.** A 500 is not evidence against the batch. The thorough path treats it the same way, so this is consistent, but log it as `format error, not a batch failure` before stepping down so the operator does not misread it.
+6. **`prefill_probe_sized` is correct as specified** (fixed length per model, no warm-up, same overflow-shrink loop, OOM check, log-parsed `prompt eval time`). One note: the `[ "$B" -ge "$PROBE_TOKENS" ]` single-ubatch label is right; keep it.
+7. **Nothing else blocking.** `DEC_BASE` is taken at rung 256 after the prefill measurement on the same instance, the cliff logic follows §4.4 (CPU placement definitive, SHORT skips speed only, re-sample once below 0.70, WARN band below 0.90), `PICK_PF=0` after a step-down is cosmetic, and the JSON write is best-effort behind `|| true`, which is fine for a diagnostic file.
+
+Proceed to step D after the §20.1 fix and the lfm direct-invocation verification.
