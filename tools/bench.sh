@@ -53,7 +53,7 @@ PREFILL_NOISE=0.03        # discover refinement (§30.2b Change E): keep refinin
                           # midpoint beats the current best by more than this fraction (3%).
 DECODE_CLIFF=0.70         # discover: decode at pick below this fraction of the 256 baseline = spill cliff
 DECODE_WARN=0.90          # discover: below this: WARN only
-MTP_TIE=0.05              # MTP tuning: candidates within 5% are a tie → smaller value wins
+MTP_TIE=0.02              # MTP tuning: candidates within 2% of the best mean are a tie → smallest n_max wins (plan §44; was 0.05)
 THOROUGH=0
 STRICT=0                  # --strict: skip bench when mtp tuning failed (plan §6.4 part 3 / §7)
 REFINE_MODE=64            # discover refinement depth (plan §42 Change H): 64 (default, Change G

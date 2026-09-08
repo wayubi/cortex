@@ -119,7 +119,7 @@ Params:
 **The placement gate is the real constraint, not quality.** A config whose `decode_sample` reports placement `CPU` or `oom > 0` is rejected as *not fitting at this batch*. Degeneracy is **diagnostic only** — logged, `WARN`-flagged when the 8-gram ratio exceeds 0.15, never a gate, and computed only on natural-stop output.
 
 `cmd_mtp_discover` runs an **adaptive sweep** (~6–8 decode runs) over natural-stop samples:
-1. **n_max ladder at p_min=0.7.** Start from `{2, 4, ini's n_max}` — always include the current ini value, because the batch ladder already validated residency at it and it is guaranteed to pass the placement gate. Extend to untested neighbours of the best within [2,6]. Re-measure the best and runner-up once and rank on the mean of their two samples; ties (within `MTP_TIE`, ~5%) go to the smaller n_max (smaller draft buffer, more headroom).
+1. **n_max ladder at p_min=0.7.** Start from `{2, 4, ini's n_max}` — always include the current ini value, because the batch ladder already validated residency at it and it is guaranteed to pass the placement gate. Extend to untested neighbours of the best within [2,6]. Re-measure the best and runner-up once and rank on the mean of their two samples; ties (within `MTP_TIE`, 2%) go to the smaller n_max (smaller draft buffer, more headroom).
 2. **p_min at the winning n_max.** Measure `{0.5, 0.9, ini's p_min}` minus 0.7, compare against the 0.7 reference already measured in phase 1; keep 0.7 if within tie tolerance.
 3. Failure is now only STALL, every candidate rejected by placement/OOM, or every sample SHORT — never a degeneracy value. The ini's `n_max`/`p_min` are restored on failure.
 
