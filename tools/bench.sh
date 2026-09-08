@@ -2186,8 +2186,8 @@ print(v.group(1) if v else '')
       log ""; log "  STALL during n_max=$N sweep — network/HF fetch, aborting tune"
       exit 1
     fi
-    IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
-    NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
+    IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
+    NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM|$TOKENS|$MEANLEN"
     # Quality gate: reject clearly degenerate (degeneracy > 0.15).
     local QUAL_OK=0
     python3 -c "exit(0 if float(${QUALITY:-1}) < 0.15 else 1)" 2>/dev/null && QUAL_OK=1
@@ -2216,7 +2216,7 @@ print(v.group(1) if v else '')
     log ""; log "  STALL during phase-1 confirm — aborting tune"
     exit 1
   fi
-  IFS='|' read -r CONFIRM1_SPEED _ CONFIRM1_PLACEMENT _ CONFIRM1_QUALITY CONFIRM1_OOM <<< "$CONFIRM1_RESULT"
+  IFS='|' read -r CONFIRM1_SPEED _ CONFIRM1_PLACEMENT _ CONFIRM1_QUALITY CONFIRM1_OOM _ _ _ <<< "$CONFIRM1_RESULT"
   log "  Phase-1 confirm: decode=${CONFIRM1_SPEED} t/s | degeneracy=${CONFIRM1_QUALITY} | OOM=$CONFIRM1_OOM"
 
   # Strict gate: same criteria as Phase 3 confirm.
@@ -2245,8 +2245,8 @@ print(v.group(1) if v else '')
       log ""; log "  STALL during p_min=$P sweep — network/HF fetch, aborting tune"
       exit 1
     fi
-    IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM <<< "$RESULT"
-    PMIN_RESULTS[$P]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM"
+    IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
+    PMIN_RESULTS[$P]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM|$TOKENS|$MEANLEN"
     # Quality gate: reject clearly degenerate (degeneracy > 0.15).
     local QUAL_OK=0
     python3 -c "exit(0 if float(${QUALITY:-1}) < 0.15 else 1)" 2>/dev/null && QUAL_OK=1
@@ -2275,7 +2275,7 @@ print(v.group(1) if v else '')
     log ""; log "  STALL during final confirm — aborting tune"
     exit 1
   fi
-  IFS='|' read -r CONFIRM_SPEED _ CONFIRM_PLACEMENT _ CONFIRM_QUALITY CONFIRM_OOM <<< "$CONFIRM_RESULT"
+  IFS='|' read -r CONFIRM_SPEED _ CONFIRM_PLACEMENT _ CONFIRM_QUALITY CONFIRM_OOM _ _ _ <<< "$CONFIRM_RESULT"
   log "  Final confirm: decode=${CONFIRM_SPEED} t/s | degeneracy=${CONFIRM_QUALITY} | OOM=$CONFIRM_OOM"
 
   # Strict gate: < 0.05 = clean PASS; >= 0.05 = fail (no runner-up fallback).
