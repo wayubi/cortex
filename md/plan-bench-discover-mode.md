@@ -1004,7 +1004,7 @@ The MTP tuner switches p_min away from 0.7 when one sample beats the reference b
 
 ### 30.4 Acceptance for A–C and E
 
-Re-run `bench.sh --no-inherit --strict all` on the four lfm models and on `gemma-4-12b-q4-qat-mtp-16k`. Expect: lfm bisect ≤ 5 min each with residency logged once per model; gemma ladder with no `AMBIGUOUS` verdicts and no 80 s residency windows; picks equal to the best-measured point including refinement (lfm 8K/16K/32K within one refinement step of the previous 2112/2176/3008). Add one ceiling-edge model: `qwen-3.6-35b-a3b-q4-mtp-64k` (previous pick 448 between rungs 256 and 512) must resolve its edge to 64 and land within 64 of a value that passes saturation. No change to the ornith-class budget except the AMBIGUOUS saving.
+Re-run `bench.sh --no-inherit --strict all` on the four lfm models and on `gemma-4-12b-q4-qat-mtp-16k`. Expect: lfm bisect ≤ 5 min each with residency logged once per model; gemma ladder with no `AMBIGUOUS` verdicts and no 80 s residency windows; picks equal to the best-measured point including refinement (lfm 8K/16K/32K within one refinement step of the previous 2112/2176/3008). Add one ceiling-edge model: `qwen-3.5-9b-q4-mtp-256k` (previous pick 448 between rungs 256 and 512; see §34.2) must resolve its edge to 64 and land within 64 of a value that passes saturation. No change to the ornith-class budget except the AMBIGUOUS saving.
 
 ---
 
@@ -1078,7 +1078,7 @@ Awaiting author review of the §30 acceptance run (below) and of §31.1.
 
 ### 32.3 Acceptance after the two fixes
 
-Re-run the lfm family and `gpt-oss-20b-a4b-q4-64k-think-low` (interior peak, CPU mode): expect `REFINE` points in the JSON ladder for 8K, 16K, 32K and gpt-oss, picks within one refinement step of 2112, 2176, 3008 and 2112, and no refinement on 4K if its best rung is already at the cap. Then `qwen-3.6-35b-a3b-q4-mtp-64k` for the ceiling edge (expect resolution to 64 between 256 and 512) and one gemma ladder for Change B.
+Re-run the lfm family and `gpt-oss-20b-a4b-q4-64k-think-low` (interior peak, CPU mode): expect `REFINE` points in the JSON ladder for 8K, 16K, 32K and gpt-oss, picks within one refinement step of 2112, 2176, 3008 and 2112, and no refinement on 4K if its best rung is already at the cap. Then `qwen-3.5-9b-q4-mtp-256k` for the ceiling edge (GPU 9B whose 256K KV cache leaves a memory ceiling between 256 and 512; expect resolution to 64 near the committed 448) and one gemma ladder for Change B. (Corrected in §34.2: the 35B and 26B MoE models are CPU-compute on this GPU and have no such edge.)
 
 ---
 
@@ -1137,3 +1137,37 @@ The §32.3 acceptance runs left fresh Discover results in the model JSONs (lfm,
 gpt-oss, gemma) and models.ini. These are validation outputs; whether to commit
 them as the publishable re-benchmark records (they are lower/regenerated decode
 figures) or defer to a full clean run is for the user.
+
+---
+
+## 34. Author review of §33 (2026-09-08)
+
+**Verdict: the §32 fixes are correct and verified live on every model class. Change E now runs everywhere, Change B is confirmed, and the lfm regression that started §30 is closed. Two items remain before sign-off: the "silent exit" in §33.3 is a real bug in the direct-invocation path and must be fixed, and the ceiling-edge acceptance model in §30.4 was my error and is replaced.**
+
+### 34.1 Verified
+
+| Item | Evidence |
+|---|---|
+| Refinement on all modes | lfm 8K/16K/32K each tested one midpoint (1536 or 3072); gpt-oss (CPU mode) tested 1536; gemma tested 1536 and adopted it (1180 vs 1175 t/s). `REFINE` points present in the JSON ladders |
+| Side chosen by data | 8K and 16K went toward 1024, 32K toward 4096, each matching the higher-measured neighbour |
+| Edge rule gated on top rung | Code; no false edge bisect in any log |
+| Change B | Two gemma ladders (10:14, 10:29) with zero `AMBIGUOUS` verdicts and every rung early-killed; the 07:39 run before the change had six |
+| Change A speed | lfm bisects 2.1 to 3.2 min each in the 09:02 and 09:19 suites, against 5.3 to 7.3 min this morning and 3.2 to 3.8 min on the 09-05 pipeline |
+| The §30.2 regression | Bench prefill at the new 2048 picks against the previous records: 8K 6902 vs 6907 at 2112; 16K 7034 vs 7112 at 2176 (−1.1%); 32K 6634 vs 6675 at 3008 (−0.6%). All within noise; the −4% on 16K is gone |
+| stdout-pollution and adoption fixes found during acceptance | Correct; the adoption rule now matches Change C (pick = best measured, noise gates only continued search) |
+
+One positive worth recording: `qwen-3.6-35b-a3b-q4-mtp-64k` moved from the committed 448 to 8192 with saturation and long-decode passing. Its ladder shows 448 sat on the steep part of the CPU-compute prefill curve (256 → 364 t/s, 512 → 561 t/s) while 8192 measures 1301 t/s, roughly 2.5x.
+
+### 34.2 Required
+
+1. **The gemma-26b "silent exit" is errexit on a plain-statement probe call, the same class as §20.1.** The 10:08 log ends at the 8192 rung with the OOM marker and nothing after it. In `cmd_bisect_discover` the ladder calls `tiny_probe` as a bare statement and reads `$?` on the next line; under direct `bench.sh bisect` invocation `set -e` is live, so a rung that OOMs (return 1) terminates the shell before the OOM handling runs. The suite masks it because `if ( cmd_bisect )` disables errexit. Reproduction: `bash -euo pipefail -c 'f(){ return 1; }; g(){ f; local RC=$?; echo after; }; g'` exits 1 before `after`; `f || RC=$?` does not. Sites: `tiny_probe` in the ladder and in `discover_measure_candidate`, `saturation_test "$CTX"` and `long_decode_check` in the confirm loop (four in discover), the same three in `cmd_bisect_test_batch`, and the same pattern throughout `cmd_bisect_thorough`. Fix every one with `RC=0; fn || RC=$?`. Acceptance: a **direct** `bench.sh bisect gemma-4-26b-a4b-q4-qat-mtp-8k` must log `OOM at 8192 (tiny probe / load)`, finish the ladder, and reach `=== DONE ===`. Add "one direct-invocation run that hits an OOM rung" to the standing checks in §11, since this is the second time the suite wrapper has hidden a direct-path crash.
+2. **Ceiling-edge acceptance model.** §33.3 is right: `qwen-3.6-35b-a3b` is CPU-compute at every context (a 35B Q4 cannot be resident on 12 GB) and `gemma-4-26b-a4b` records `placement: CPU` at 13.3 GB, so neither has a GPU memory ceiling between two rungs. The GPU small-ceiling case in this catalogue is the 9B MTP models at 256K, where the KV cache consumes the VRAM: `qwen-3.5-9b-q4-mtp-256k` (committed 448) and `ornith-1.5-9b-q4-mtp-256k-think` (committed 960). Replace the §30.4 edge model with `qwen-3.5-9b-q4-mtp-256k`: expect 256 PASS, 512 OOM or SPILL, bisection to 64 between them, a pick near 448, saturation PASS at 99% of 256K.
+
+### 34.3 Notes, not blocking
+
+3. In the interior loop, `LO_NEIGH`/`HI_NEIGH` and their prefills are computed once before the loop and not updated after a point is adopted, so a second step chooses its direction from the original neighbours. Harmless with the 4-step cap and the noise gate, which stopped every observed run after one step; tidy when next touched.
+4. The gemma JSON in the working tree is from the 08:01 bench (batch 512) while the 10:29 bisect set the ini to 1536; the next `bench` on that model regenerates it, and the stale guard would flag any MTP mismatch. The working-tree JSONs and `models.ini` are validation outputs; committing them is the user's call, as §33.4 says.
+
+### 34.4 After 34.2
+
+Sign-off follows a direct-invocation OOM run per item 1 and the 256K edge run per item 2. Then the catalogue: family heads with `--no-inherit --strict`, siblings inherit.
