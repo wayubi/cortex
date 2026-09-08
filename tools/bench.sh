@@ -990,7 +990,10 @@ residency_probe() {
   local DECODE_MAX=$(python3 -c "print(max(256, min(4000, $CTX - 64)))")
   python3 -c "
 import json
-payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':${DECODE_MAX},'ignore_eos':True}
+# stream:true so llama.cpp aborts generation when residency kills the curl early
+# (a non-streaming client disconnect is only noticed on the next server write,
+# leaving the slot decoding the remaining tokens and stalling the next request).
+payload = {'model':'$MODEL','messages':[{'role':'user','content':'Explain the history of computing in detail.'}],'max_tokens':${DECODE_MAX},'ignore_eos':True,'stream':True}
 with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
 "
   fire_request /tmp/resid_payload.json /tmp/resid_response.json "residency" "$(adaptive_timeout $DECODE_MAX)"
