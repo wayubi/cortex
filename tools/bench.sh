@@ -3370,18 +3370,21 @@ print(' '.join(out))
 
   # Measure one candidate batch. Echoes its prefill t/s, or "0" if it is not a
   # PASS (OOM / CPU-spill / probe failure). rc 2 = STALL (abort).
+  # All progress (set_batch/restart/tiny_probe/residency/log) goes to stderr so
+  # stdout carries ONLY the numeric prefill when captured via $(...) — otherwise
+  # the points append and the caller's parse are polluted by progress lines.
   discover_measure_candidate() {
     local CB=$1
-    set_batch "$CB"; restart
-    tiny_probe
+    set_batch "$CB" >&2; restart >&2
+    tiny_probe >&2
     local TR=$?
-    if [ "$TR" -eq 2 ]; then log "  STALL measuring candidate $CB — aborting"; return 2; fi
+    if [ "$TR" -eq 2 ]; then log "  STALL measuring candidate $CB — aborting" >&2; return 2; fi
     if [ "$TR" -ne 0 ]; then echo "0"; return 0; fi
     if [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$CB" -eq 256 ]; }; then
       local RV
       RV=$(residency_probe)
       if [ "$RV" = "CPU" ]; then echo "0"; return 0; fi
-      if [ "$RV" = "STALL" ]; then log "  STALL at $CB (residency) — aborting"; return 2; fi
+      if [ "$RV" = "STALL" ]; then log "  STALL at $CB (residency) — aborting" >&2; return 2; fi
     fi
     local CPF
     CPF=$(prefill_probe_sized "$CTX")
