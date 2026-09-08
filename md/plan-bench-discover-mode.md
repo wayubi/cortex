@@ -1079,3 +1079,61 @@ Awaiting author review of the §30 acceptance run (below) and of §31.1.
 ### 32.3 Acceptance after the two fixes
 
 Re-run the lfm family and `gpt-oss-20b-a4b-q4-64k-think-low` (interior peak, CPU mode): expect `REFINE` points in the JSON ladder for 8K, 16K, 32K and gpt-oss, picks within one refinement step of 2112, 2176, 3008 and 2112, and no refinement on 4K if its best rung is already at the cap. Then `qwen-3.6-35b-a3b-q4-mtp-64k` for the ceiling edge (expect resolution to 64 between 256 and 512) and one gemma ladder for Change B.
+
+---
+
+## 33. Implementer report — §32 fixes applied and §32.3 acceptance (2026-09-08)
+
+### 33.1 §32 required-fix commits
+
+| §32 item | Commit |
+|---|---|
+| #1 refinement runs for all modes (removed SIMPLE_NONMTP/CPU gate) | `78f3788` |
+| #2 edge rule fires only when PICK==HIGHPASS | `78f3788` |
+| #3 interior side chosen by data (higher-prefill neighbour) | `78f3788` |
+| #5 RESULT line "best measured" when TOL=0 | `78f3788` |
+| stdout pollution in discover_measure_candidate (set_batch/restart/tiny_probe wrote to stdout, corrupting refinement point capture and the $POINTS append) | `7511251` |
+| interior adoption always takes the higher measured point; PREFILL_NOISE only gates continued search | `98a5ebc` |
+
+The `7511251` and `98a5ebc` fixes were found during the acceptance run: refinement points were not recorded (stdout pollution made them multi-line garbage) and a genuinely-higher refinement point within 3% of the ladder best was never adopted.
+
+### 33.2 §32.3 acceptance results
+
+**lfm 8K/16K/32K** (`--no-inherit --strict all`): refinement now runs and REFINE
+points are recorded in the discover JSON. lfm 8K refined 1536, 16K/32K refined
+3072. Picks stayed at the best-measured ladder rung (2048) where refinement points
+were within noise; on flat plateaus this is the documented noise-selected outcome
+(§30.2b) — the previous 2112/2176/3008 were themselves golden-section
+single-sample artifacts, and 2048 is equivalent within measurement. Change A
+speed confirmed (residency once per model).
+
+**gpt-oss-20b-64k-think-low** (interior peak, CPU): mode=CPU, refinement ran
+(testing 1536 toward the higher neighbour), pick 2048 (best ladder rung 2453.91),
+1536 (2433.73) within noise — kept 2048. Previous 2112; equivalent within
+measurement. (Refinement previously did not run for CPU models; now it does.)
+
+**gemma-4-12b-q4-qat-mtp-16k** bisect (Change B): **zero AMBIGUOUS verdicts** and
+**zero 80s residency windows** — every rung classified GPU (cpu 97-106%) with the
+early-kill firing (GPU_CPU_MAX=150). Interior refinement worked: ladder best 1024
+(1172) → refined 1536 (1178.45) → adopted as pick → saturation + long-decode
+PASS at 1536.
+
+### 33.3 Finding: the qwen-3.6-35b ceiling-edge premise does not match the model
+
+§30.4 named `qwen-3.6-35b-a3b-q4-mtp-64k` for a ceiling edge resolving to 64
+between 256 and 512. In practice this 35B MoE is **CPU-compute** at every ctx
+(64k and even 4k), with a high ceiling (~8192) or a cap-limited one — it is not
+the small-ceiling GPU MoE the 448-between-256/512 example describes. The
+small-ceiling GPU MoE class in this catalogue is the gemma-4-26b-a4b family. The
+ceiling-edge-to-64 path is exercised whenever a GPU model's best PASS rung is its
+top measured point with an OOM/SPILL above (verified by the rule-2 code path);
+but the specific 448-to-64 case was not reproduced on qwen-3.6-35b because that
+model does not have a 256-512 GPU ceiling. Recommend fable confirm the intended
+ceiling-edge acceptance model (gemma-4-26b-a4b-mtp-8k hit an unhandled silent
+exit at the 8192 OOM during an exploratory bisect — separate issue worth a look).
+
+### 33.4 Note
+The §32.3 acceptance runs left fresh Discover results in the model JSONs (lfm,
+gpt-oss, gemma) and models.ini. These are validation outputs; whether to commit
+them as the publishable re-benchmark records (they are lower/regenerated decode
+figures) or defer to a full clean run is for the user.
