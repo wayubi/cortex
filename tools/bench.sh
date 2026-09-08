@@ -2308,9 +2308,14 @@ print(v.group(1) if v else '')
   log "=== DONE ==="
 }
 
-# ── SUBCOMMAND: bisect (batch ceiling + prefill sweep) ──────
-# Args: MODEL, then optional TEST_BATCH
-cmd_bisect() {
+# ── cmd_bisect_thorough: legacy exhaustive batch search (kept verbatim) ──
+# The pre-refactor cmd_bisect body (batch ceiling + 64-granularity bisect +
+# shortlist decode gate), preserved byte-for-byte so `--thorough` reproduces the
+# old search. The [test-batch] single-batch block near the top is duplicated into
+# the shared cmd_bisect_test_batch helper; it is kept inline here too so a direct
+# call to this function still behaves exactly like the original cmd_bisect.
+# Args: MODEL, then optional TEST_BATCH.
+cmd_bisect_thorough() {
   local TEST_BATCH=0
   if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
     TEST_BATCH=$2
@@ -2618,6 +2623,528 @@ cmd_bisect() {
   [ -n "$WIN_PREFILL" ] && log "  saturation_prefill=${WIN_PREFILL} t/s (real full-context; from last confirm attempt on fallback path)"
   log ""; log "  Next: run bench.sh bench $MODEL"
   log "=== DONE ==="
+}
+
+# ── SUBCOMMAND: bisect — thin dispatcher ────────────────────
+# Reads the 2nd arg as an optional single-batch test. A positive integer routes to
+# the shared cmd_bisect_test_batch (used by BOTH bisect routes). Otherwise dispatch
+# between the discover-mode ladder (plan §4, cmd_bisect_discover) and the legacy
+# exhaustive search (cmd_bisect_thorough).
+# For THIS commit discover stays behind the temporary env BENCH_DISCOVER=1
+# (plan §11 step 2): normal runs keep the old exhaustive path until step 4 flips
+# the default. THOROUGH=1 also forces the old path.
+cmd_bisect() {
+  if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+    cmd_bisect_test_batch "$2"
+    return
+  fi
+  if [ "${BENCH_DISCOVER:-0}" -eq 1 ]; then
+    cmd_bisect_discover "$@"
+  else
+    cmd_bisect_thorough "$@"
+  fi
+}
+
+# ── Shared single-batch test (both bisect routes) ───────────
+# A numeric test-batch runs: tiny probe → saturation → long-decode on that one
+# batch. On any failure restores the original batch and exits nonzero (EXIT trap).
+# Global MODEL must be set. $1 = batch value.
+cmd_bisect_test_batch() {
+  local BATCH=$1
+  local CTX=$(read_ctx)
+  [ -z "$CTX" ] && { log "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
+  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  local ORIG_BATCH=$(read_batch)
+  local RESTORED=0
+  restore_batch() {
+    [ "${RESTORED:-0}" -eq 1 ] && return
+    if [ -n "${ORIG_BATCH:-}" ]; then
+      log "  Restoring original batch=$ORIG_BATCH (run did not complete)"
+      set_batch "$ORIG_BATCH" >/dev/null 2>&1
+    fi
+    RESTORED=1
+  }
+  # Restore on failure only; the success path leaves the batch at $BATCH before exiting 0.
+  trap 'RC=$?; if [ "$RC" -ne 0 ]; then restore_batch; fi; exit $RC' EXIT
+
+  log "Model: $MODEL | ctx: $CTX | test-batch: $BATCH"
+  log ""; log "=== TESTING BATCH $BATCH ==="
+  set_batch "$BATCH"; restart
+  log ""; log "=== PHASE 1: TINY PROBE ==="
+  tiny_probe
+  local T_RC=$?
+  if [ "$T_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
+  if [ "$T_RC" -ne 0 ]; then log "  FAIL"; exit 1; fi
+  log "  PASS"
+  log ""; log "=== PHASE 2: SATURATION ==="
+  saturation_test "$CTX"
+  local S_RC=$?
+  if [ "$S_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
+  if [ "$S_RC" -ne 0 ]; then log "  FAILED"; exit 1; fi
+  log ""; log "=== PHASE 3: LONG-DECODE ==="
+  long_decode_check
+  local LD_RC=$?
+  if [ "$LD_RC" -eq 2 ]; then log "  STALL — aborting"; exit 1; fi
+  log ""; log "=== RESULT: batch=$BATCH ubatch=$BATCH ==="
+  log "=== DONE ==="
+  exit 0
+}
+
+# ── Sized prefill t/s probe (§4.2) ──────────────────────────
+# Same prompt length for EVERY rung of one model so rungs are ranked on identical
+# work (prefill t/s falls with prompt length, so a batch-proportional prompt would
+# bias large batches down). Length = min(floor(0.75×ctx), 16384) tokens; chars =
+# tokens × chars/tok (measure_ratio once at rung 256; fallback 4.0 chars/tok).
+# No separate warm-up: the caller's tiny_probe already loaded and warmed the
+# instance. Reuses prefill_probe's body approach — log-parsed 'prompt eval time',
+# overflow-shrink retry, OOM check.
+# Echoes prefill_t_s to stdout; "0" on OOM/stall/parse-fail. Progress → stderr.
+prefill_probe_sized() {
+  local CTX=${1:-65536}
+  local PROBE_TOKENS
+  PROBE_TOKENS=$(python3 -c "print(int(min(int($CTX * 0.75), 16384)))")
+  local CPT=4.0
+  if python3 -c "exit(0 if float(${CHARS_PER_TOK:-0}) > 0 else 1)" 2>/dev/null; then
+    CPT=$CHARS_PER_TOK
+  fi
+  local PROBE_CHARS
+  PROBE_CHARS=$(python3 -c "print(int($PROBE_TOKENS * $CPT))")
+  [ "$PROBE_CHARS" -lt 16 ] && PROBE_CHARS=16
+  local MAX_ATTEMPTS=15 ATTEMPT=0
+
+  while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+    ATTEMPT=$((ATTEMPT + 1))
+    python3 -c "
+import json
+filler = 'The history of computing is long and complex. '
+n = $PROBE_CHARS
+prompt = (filler * ((n // len(filler)) + 1))[:n]
+payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True}
+with open('/tmp/pp_sized.json','w') as f: json.dump(payload, f)
+"
+    fire_request /tmp/pp_sized.json /tmp/pp_sized_out.json "prefill-sized" "$(adaptive_timeout 1)"
+    local RC=$?
+    if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
+
+    local WATCH=0
+    while kill -0 $FIRE_PID 2>/dev/null; do
+      if [ "$(oom_count_since_mark)" -gt 0 ]; then kill $FIRE_PID 2>/dev/null; break; fi
+      WATCH=$((WATCH + 1))
+      [ $((WATCH % 10)) -eq 0 ] && log "    prefill-sized: still running (${WATCH}x2s)" >&2
+      sleep 2
+    done
+    wait $FIRE_PID 2>/dev/null || true
+
+    # Overflow → shrink and retry (mirrors saturation_test / prefill_probe).
+    if grep -q "exceeds the available context" /tmp/pp_sized_out.json 2>/dev/null; then
+      PROBE_CHARS=$((PROBE_CHARS * 9 / 10))
+      [ "$PROBE_CHARS" -lt 16 ] && PROBE_CHARS=16
+      log "    prefill-sized: overflow rejected (attempt $ATTEMPT) — shrinking to ${PROBE_CHARS} chars" >&2
+      continue
+    fi
+
+    local OOM=$(oom_count_since_mark)
+    if [ "$OOM" -gt 0 ]; then echo "0"; return 0; fi
+
+    # Parse the "prompt eval time" summary line from LOG_MARK forward.
+    local PPMATCH
+    PPMATCH=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+      | grep "prompt eval time" | tail -1 \
+      | grep -oE '[0-9]+\.?[0-9]* tokens per second' | awk '{print $1}')
+    if [ -n "$PPMATCH" ] && [ "$PPMATCH" != "0" ]; then
+      log "  prefill-sized: ${PPMATCH} t/s (~${PROBE_TOKENS} tokens, ${PROBE_CHARS} chars)" >&2
+      echo "$PPMATCH"
+      return 0
+    fi
+    # Parse failed — no useful data, don't retry (model served but output unreadable).
+    echo "0"
+    return 0
+  done
+  echo "0"
+}
+
+# ── SUBCOMMAND: bisect discover mode (plan §4, default when BENCH_DISCOVER=1) ──
+# One coarse ladder (powers of two from 256 up to min(ctx, MAX_BATCH)), three cheap
+# measurements per rung (tiny → residency → sized prefill), then a smallest-within-
+# 3%-of-best pick (optional ceiling-edge midpoint refinement), then one-restart
+# confirm at pick (saturation + long-decode + decode-cliff check). Safety gates are
+# unchanged (OOM grep source-of-truth, residency verdict, ini restore on failure).
+# Sets the winning batch in models.ini; writes /tmp/discover_points.txt and
+# /tmp/discover_${MODEL}.json. Same restore-on-nonzero EXIT trap as the thorough path.
+# Args: MODEL, then optional TEST_BATCH (numeric → shared cmd_bisect_test_batch).
+cmd_bisect_discover() {
+  # Shared single-batch test path (defensive: the dispatcher also routes numeric
+  # batches here before ever reaching this function).
+  if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+    cmd_bisect_test_batch "$2"
+    return
+  fi
+
+  local CTX=$(read_ctx)
+  [ -z "$CTX" ] && { log "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
+  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+
+  local ORIG_BATCH=$(read_batch)
+  local RESTORED=0
+  restore_batch() {
+    [ "${RESTORED:-0}" -eq 1 ] && return
+    if [ -n "${ORIG_BATCH:-}" ]; then
+      log "  Restoring original batch=$ORIG_BATCH (run did not complete)"
+      set_batch "$ORIG_BATCH" >/dev/null 2>&1
+    fi
+    RESTORED=1
+  }
+  # Restore on failure only; the success path sets the winner before exiting 0.
+  trap 'RC=$?; if [ "$RC" -ne 0 ]; then restore_batch; fi; exit $RC' EXIT
+
+  log "Model: $MODEL | ctx: $CTX | mode: discover"
+  local CAP=$(( CTX < MAX_BATCH ? CTX : MAX_BATCH ))
+  # Fixed prompt length per model, for the prefill probe and the single-ubatch label.
+  local PROBE_TOKENS
+  PROBE_TOKENS=$(python3 -c "print(int(min(int($CTX * 0.75), 16384)))")
+
+  # ── Phase A: one ladder, three measurements per rung ──
+  log ""; log "=== DISCOVER LADDER (cap=$CAP, prefill probe ~${PROBE_TOKENS} tokens) ==="
+  local POINTS=/tmp/discover_points.txt
+  : > "$POINTS"
+  local B=256
+  local MODE=""                 # "", GPU, or CPU (CPU skips residency + decode-cliff)
+  local BEST_PREFILL=0
+  local PREV_BELOW=0
+  local CEIL_FAIL_B="" CEIL_FAIL_R="" CEIL_BREAK=""   # ceiling info (informational)
+  local DEC_BASE="" DEC_BASE_RC=0
+  local PASS_B=() PASS_P=()     # parallel arrays of PASS rungs (ascending B)
+  local PICK=0 PICK_PF=0
+  local STEPS_DN=0
+
+  while [ "$B" -le "$CAP" ]; do
+    log ""; log "--- rung batch=$B ---"
+    set_batch "$B"; restart
+    log "  Tiny probe @ batch=$B..."
+    tiny_probe
+    local T_RC=$?
+    if [ "$T_RC" -eq 2 ]; then
+      log "  STALL at $B (network/HF fetch — not an OOM ceiling)"
+      log "  Aborting bisect: model can't cold-load. Re-run when huggingface.co is reachable."
+      exit 1
+    fi
+    if [ "$T_RC" -ne 0 ]; then
+      log "  OOM at $B (tiny probe / load)"
+      echo "$B OOM" >> "$POINTS"
+      CEIL_FAIL_B=$B; CEIL_FAIL_R="OOM"; CEIL_BREAK=1
+      break
+    fi
+    log "  Tiny PASS @ $B"
+
+    # Residency (skipped entirely once MODE=CPU).
+    if [ "$MODE" != "CPU" ]; then
+      local R_V
+      R_V=$(residency_probe)
+      if [ "$R_V" = "STALL" ]; then
+        log "  STALL during residency at $B — aborting discover"
+        exit 1
+      fi
+      if [ "$R_V" = "CPU" ]; then
+        if [ "$B" -eq 256 ]; then
+          log "  CPU-compute detected at batch 256 → MODE=CPU (no residency probes after this rung)"
+          MODE="CPU"
+        else
+          log "  CPU-spillover at $B — not GPU-resident, stopping ladder"
+          echo "$B SPILL" >> "$POINTS"
+          CEIL_FAIL_B=$B; CEIL_FAIL_R="SPILL"; CEIL_BREAK=1
+          break
+        fi
+      else
+        MODE="GPU"
+        log "  GPU-resident at $B"
+      fi
+    fi
+
+    # Measure chars-per-token once (before the first sized prefill, at rung 256).
+    if ! python3 -c "exit(0 if float(${CHARS_PER_TOK:-0}) > 0 else 1)" 2>/dev/null; then
+      measure_ratio >&2 || true
+    fi
+
+    # Sized prefill probe (identical prompt length on every rung).
+    local PF=0
+    PF=$(prefill_probe_sized "$CTX")
+    if [ "$PF" = "0" ]; then
+      if [ "$(oom_count_since_mark)" -gt 0 ]; then
+        log "  OOM at $B (prefill probe)"
+        echo "$B OOM" >> "$POINTS"
+        CEIL_FAIL_B=$B; CEIL_FAIL_R="OOM"; CEIL_BREAK=1
+        break
+      fi
+      log "  prefill probe STALL at $B — aborting discover"
+      exit 1
+    fi
+    local SINGLE=""
+    [ "$B" -ge "$PROBE_TOKENS" ] && SINGLE=" (single-ubatch)"
+    log "  batch=$B prefill=${PF} t/s$SINGLE — PASS"
+    PASS_B+=("$B"); PASS_P+=("$PF")
+    echo "$B PASS $PF" >> "$POINTS"
+
+    # Decode baseline at the first GPU rung (256), after the prefill measurement.
+    if [ "$B" -eq 256 ] && [ "$MODE" = "GPU" ]; then
+      if ! DEC_BASE=$(decode_sample "256-baseline"); then
+        log "  STALL during 256 decode baseline — aborting discover"
+        exit 1
+      fi
+      DEC_BASE_RC=0
+      local DB_SPEED DB_TOK
+      DB_SPEED=$(echo "$DEC_BASE" | cut -d'|' -f1)
+      DB_TOK=$(echo "$DEC_BASE" | cut -d'|' -f7)
+      log "  DEC_BASE (batch 256): ${DB_SPEED:-?} t/s, ${DB_TOK:-0} tokens"
+    fi
+
+    # Two consecutive PASS rungs below best×(1−PREFILL_TOL) → past the peak, stop.
+    if python3 -c "exit(0 if float($PF) > float($BEST_PREFILL) else 1)" 2>/dev/null; then
+      BEST_PREFILL=$PF
+    fi
+    local THIS_BELOW=0
+    if python3 -c "exit(0 if float($PF) < float($BEST_PREFILL) * (1 - $PREFILL_TOL) else 1)" 2>/dev/null; then
+      THIS_BELOW=1
+    fi
+    if [ "$THIS_BELOW" -eq 1 ] && [ "$PREV_BELOW" -eq 1 ]; then
+      log "  Two consecutive PASS rungs below best (${BEST_PREFILL}) — stopping ladder (peak passed)"
+      CEIL_BREAK=2
+      break
+    fi
+    PREV_BELOW=$THIS_BELOW
+    B=$((B * 2))
+  done
+
+  # Summary of the coarse ladder (informational ceiling; nothing downstream consumes it).
+  local LADDER_TXT
+  LADDER_TXT=$(python3 -c "
+lines = [l.split() for l in open('$POINTS') if l.strip()]
+out = []
+for toks in lines:
+    b = toks[0]
+    if toks[1] == 'PASS': out.append(b + '=' + toks[2])
+    else: out.append(b + '=' + toks[1])
+print(' '.join(out))
+")
+  log ""; log "  ladder: $LADDER_TXT"
+  local HIGHPASS=0
+  [ "${#PASS_B[@]}" -gt 0 ] && HIGHPASS=${PASS_B[${#PASS_B[@]}-1]}
+  local MODE_TXT=${MODE:-unknown}
+  if [ -n "$CEIL_FAIL_B" ]; then
+    log "  mode=$MODE_TXT  ceiling(coarse)=${HIGHPASS} PASS / ${CEIL_FAIL_B} ${CEIL_FAIL_R}"
+  else
+    log "  mode=$MODE_TXT  ceiling(coarse) ≥ ${HIGHPASS} PASS (not probed higher)"
+  fi
+  if [ "${#PASS_B[@]}" -eq 0 ]; then
+    log "  ERROR: no batch passed at any rung down to 256. Lower ctx or free VRAM (override-tensor=exps=CPU)."
+    exit 1
+  fi
+
+  # ── Phase B: pick = smallest PASS batch within tolerance of the best prefill ──
+  local THRESH
+  THRESH=$(python3 -c "print(float($BEST_PREFILL) * (1 - $PREFILL_TOL))")
+  PICK=0
+  for idx in "${!PASS_B[@]}"; do
+    if python3 -c "exit(0 if float('${PASS_P[$idx]}') >= float($THRESH) else 1)" 2>/dev/null; then
+      PICK=${PASS_B[$idx]}; PICK_PF=${PASS_P[$idx]}; break
+    fi
+  done
+  [ "$PICK" -eq 0 ] && { PICK=${PASS_B[0]}; PICK_PF=${PASS_P[0]}; }
+  log "  best prefill=${BEST_PREFILL} t/s; pick=$PICK (smallest within ${PREFILL_TOL} of best)"
+
+  # Edge refinement (only case a non-power-of-two is tested): PICK is the highest
+  # PASS rung AND the next rung failed → optimum may lie between. ≤2 extra restarts.
+  local MID_FAIL="$CEIL_FAIL_B"
+  if [ "${#PASS_B[@]}" -gt 0 ] && [ "$PICK" -eq "$HIGHPASS" ] \
+     && [ -n "$CEIL_FAIL_B" ] && { [ "$CEIL_FAIL_R" = "OOM" ] || [ "$CEIL_FAIL_R" = "SPILL" ]; }; then
+    log "  PICK is the highest PASS rung and ${MID_FAIL} ${CEIL_FAIL_R} — refining the ceiling edge"
+    local EXTRA=0
+    while [ "$EXTRA" -lt 2 ]; do
+      local MID
+      MID=$(( (PICK + MID_FAIL) / 2 )); MID=$(( MID / 64 * 64 ))
+      [ "$MID" -le "$PICK" ] && MID=$(( PICK + 64 ))
+      if [ "$MID" -ge "$MID_FAIL" ]; then log "  midpoint clamped to edge — stop refining"; break; fi
+      log ""; log "  Edge refine: testing midpoint $MID (between $PICK and $MID_FAIL)..."
+      set_batch "$MID"; restart
+      log "  Tiny probe @ batch=$MID..."
+      tiny_probe
+      local MT_RC=$?
+      if [ "$MT_RC" -eq 2 ]; then log "  STALL at $MID — aborting"; exit 1; fi
+      if [ "$MT_RC" -ne 0 ]; then log "  midpoint $MID OOM — stop refining"; break; fi
+      if [ "$MODE" != "CPU" ]; then
+        local MR_V
+        MR_V=$(residency_probe)
+        if [ "$MR_V" = "CPU" ]; then log "  midpoint $MID CPU-spill — stop refining"; break; fi
+      fi
+      local MID_PF
+      MID_PF=$(prefill_probe_sized "$CTX")
+      if [ "$MID_PF" = "0" ] || [ -z "$MID_PF" ]; then log "  midpoint $MID probe failed — stop refining"; break; fi
+      log "  midpoint $MID prefill=${MID_PF} t/s"
+      # Keep mid only if it passes AND its prefill is strictly higher than PICK's.
+      if python3 -c "exit(0 if float('$MID_PF') > float('$PICK_PF') else 1)" 2>/dev/null; then
+        log "  midpoint better — PICK ${PICK} → ${MID}"
+        PICK=$MID; PICK_PF=$MID_PF
+        EXTRA=$((EXTRA + 1))
+      else
+        log "  midpoint not better — keeping PICK=$PICK"
+        break
+      fi
+    done
+  fi
+
+  # ── Phase C: confirm at PICK (one restart per attempt, ≤2 step-downs) ──
+  set_batch "$PICK"
+  log ""; log "=== DISCOVER CONFIRM (pick=$PICK, mode=$MODE) ==="
+  while :; do
+    log "  Confirm restart @ pick=$PICK..."
+    set_batch "$PICK"; restart
+    log ""; log "  === SATURATION at $PICK ==="
+    saturation_test "$CTX"
+    local SC_RC=$?
+    if [ "$SC_RC" -eq 2 ]; then log "  STALL during saturation — aborting"; exit 1; fi
+    if [ "$SC_RC" -ne 0 ]; then
+      log "  saturation FAIL at pick=$PICK (rc=$SC_RC)"
+      # step down (below)
+      local NEWPICK=0
+      for i in "${!PASS_B[@]}"; do
+        if [ "${PASS_B[$i]}" -lt "$PICK" ] && [ "${PASS_B[$i]}" -gt "$NEWPICK" ]; then NEWPICK=${PASS_B[$i]}; fi
+      done
+      if [ "$NEWPICK" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
+        log "  No lower PASS rung below $PICK (or step-down limit reached) — failing model"
+        log "  Inspect logs; re-run to retry."
+        exit 1
+      fi
+      STEPS_DN=$((STEPS_DN + 1))
+      log "  Stepping down: pick $PICK → $NEWPICK"
+      PICK=$NEWPICK; PICK_PF=0
+      continue
+    fi
+    log "  saturation PASS at pick=$PICK"
+
+    log ""; log "  === LONG-DECODE at $PICK ==="
+    long_decode_check
+    local LC_RC=$?
+    if [ "$LC_RC" -eq 2 ]; then log "  STALL during long-decode — aborting"; exit 1; fi
+    if [ "$LC_RC" -ne 0 ]; then
+      log "  long-decode FAIL at pick=$PICK — stepping down"
+      local NEWPICK2=0
+      for i in "${!PASS_B[@]}"; do
+        if [ "${PASS_B[$i]}" -lt "$PICK" ] && [ "${PASS_B[$i]}" -gt "$NEWPICK2" ]; then NEWPICK2=${PASS_B[$i]}; fi
+      done
+      if [ "$NEWPICK2" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
+        log "  No lower PASS rung below $PICK (or step-down limit reached) — failing model"
+        log "  Inspect logs; re-run to retry."
+        exit 1
+      fi
+      STEPS_DN=$((STEPS_DN + 1))
+      log "  Stepping down: pick $PICK → $NEWPICK2"
+      PICK=$NEWPICK2; PICK_PF=0
+      continue
+    fi
+    log "  long-decode PASS at pick=$PICK"
+
+    # Decode-cliff check (GPU mode only). CPU placement → step down (definitive);
+    # SHORT either side → keep; <0.70 → re-sample once then decide; <0.90 → WARN.
+    local CONFIRM_OK=1
+    if [ "$MODE" = "GPU" ]; then
+      local DEC_PICK
+      if ! DEC_PICK=$(decode_sample "pick-confirm"); then
+        log "  STALL during pick decode sample — aborting"; exit 1
+      fi
+      local DP_SPEED DP_PLAC DP_TOK DP_OOM
+      DP_SPEED=$(echo "$DEC_PICK" | cut -d'|' -f1)
+      DP_PLAC=$(echo "$DEC_PICK" | cut -d'|' -f3)
+      DP_TOK=$(echo "$DEC_PICK" | cut -d'|' -f7)
+      DP_OOM=$(echo "$DEC_PICK" | cut -d'|' -f6)
+      log "  DEC_PICK: ${DP_SPEED:-?} t/s | placement=$DP_PLAC | tokens=${DP_TOK:-0} | oom=$DP_OOM"
+      if [ "$DP_OOM" = "1" ]; then
+        log "  OOM in pick decode sample — stepping down"
+        CONFIRM_OK=0
+      elif [ "$DP_PLAC" = "CPU" ]; then
+        log "  draft/KV spill at pick (CPU placement) — stepping down"
+        CONFIRM_OK=0
+      else
+        local BASE_SPEED BASE_TOK
+        BASE_SPEED=$(echo "$DEC_BASE" | cut -d'|' -f1)
+        BASE_TOK=$(echo "$DEC_BASE" | cut -d'|' -f7)
+        if [ -z "$BASE_SPEED" ] || [ -z "$DP_SPEED" ] \
+           || python3 -c "exit(0 if int('${BASE_TOK:-0}') < $MIN_DECODE_TOKENS or int('${DP_TOK:-0}') < $MIN_DECODE_TOKENS else 1)" 2>/dev/null; then
+          log "  cliff speed check skipped (SHORT sample); placement GPU at pick — keeping pick"
+        elif python3 -c "exit(0 if float('$DP_SPEED') < float('$BASE_SPEED') * $DECODE_CLIFF else 1)" 2>/dev/null; then
+          log "  decode at pick ${DP_SPEED} t/s < ${DECODE_CLIFF}× baseline ${BASE_SPEED} — re-sampling once"
+          local DEC_PICK2
+          if ! DEC_PICK2=$(decode_sample "pick-resample"); then
+            log "  STALL during pick re-sample — aborting"; exit 1
+          fi
+          local DP2_SPEED
+          DP2_SPEED=$(echo "$DEC_PICK2" | cut -d'|' -f1)
+          local MEAN
+          MEAN=$(python3 -c "print((float('$DP_SPEED') + float('$DP2_SPEED')) / 2)")
+          if python3 -c "exit(0 if float('$MEAN') < float('$BASE_SPEED') * $DECODE_CLIFF else 1)" 2>/dev/null; then
+            log "  re-sample mean ${MEAN} t/s still < ${DECODE_CLIFF}× baseline — stepping down"
+            CONFIRM_OK=0
+          else
+            log "  WARN: first sample slow, re-sample recovered (mean ${MEAN} t/s) — keeping pick"
+          fi
+        elif python3 -c "exit(0 if float('$DP_SPEED') < float('$BASE_SPEED') * $DECODE_WARN else 1)" 2>/dev/null; then
+          log "  WARN: decode ${DP_SPEED} t/s in ${DECODE_WARN}–${DECODE_CLIFF} noise band — keeping pick"
+        fi
+      fi
+    fi
+
+    if [ "$CONFIRM_OK" -eq 0 ]; then
+      local NEWPICK3=0
+      for i in "${!PASS_B[@]}"; do
+        if [ "${PASS_B[$i]}" -lt "$PICK" ] && [ "${PASS_B[$i]}" -gt "$NEWPICK3" ]; then NEWPICK3=${PASS_B[$i]}; fi
+      done
+      if [ "$NEWPICK3" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
+        log "  No lower PASS rung below $PICK (or step-down limit reached) — failing model"
+        log "  Inspect logs; re-run to retry."
+        exit 1
+      fi
+      STEPS_DN=$((STEPS_DN + 1))
+      log "  Stepping down: pick $PICK → $NEWPICK3"
+      PICK=$NEWPICK3; PICK_PF=0
+      continue
+    fi
+    break   # pick confirmed
+  done
+
+  # ── Result block (§4.5) ──
+  set_batch "$PICK"
+  log ""; log "=== RESULT ==="
+  log "  batch=$PICK ubatch=$PICK ctx=$CTX"
+  log "  mode=$MODE_TXT  pick=$PICK (smallest within ${PREFILL_TOL} of best ${BEST_PREFILL} t/s)"
+  if [ -n "$CEIL_FAIL_B" ]; then
+    log "  ceiling(coarse)=${HIGHPASS} PASS / ${CEIL_FAIL_B} ${CEIL_FAIL_R}"
+  else
+    log "  ceiling(coarse) ≥ ${HIGHPASS} PASS (not probed higher)"
+  fi
+  log "  confirm: saturation PASS, long-decode PASS"
+  if [ "$MODE" = "GPU" ] && [ -n "$DEC_BASE" ]; then
+    log "  decode $(echo "$DEC_PICK" | cut -d'|' -f1) t/s @pick vs $(echo "$DEC_BASE" | cut -d'|' -f1) t/s @256 (GPU)"
+  fi
+  log ""; log "  Next: run bench.sh bench $MODEL"
+  log "=== DONE ==="
+
+  # Write the discover JSON for cmd_bench to merge (§4.5). Best-effort.
+  python3 -c "
+import json
+model='$MODEL'
+points=[l.split() for l in open('$POINTS') if l.strip()]
+ladder=[{'batch':int(t[0]),'status':t[1],'prefill':(float(t[2]) if len(t)>2 and t[2] not in ('OOM','SPILL','PASS') else None)} for t in points]
+discover={
+  'mode':'$MODE_TXT',
+  'ladder':ladder,
+  'best_prefill':float('$BEST_PREFILL'),
+  'pick':int('$PICK'),
+  'pick_rule':f'smallest PASS batch within ${PREFILL_TOL} of best prefill',
+  'ceiling_coarse':('${HIGHPASS}' + (' PASS / ${CEIL_FAIL_B} ${CEIL_FAIL_R}' if '${CEIL_FAIL_B}' else ' PASS (not probed higher)')),
+  'ladder_break':'${CEIL_BREAK:-0}',
+}
+with open('/tmp/discover_${MODEL}.json','w') as f:
+    json.dump(discover,f,indent=2)
+" 2>/dev/null || true
+  exit 0
 }
 
 # ── SUBCOMMAND: bench (full benchmark record) ───────────────
