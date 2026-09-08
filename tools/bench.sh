@@ -1932,7 +1932,7 @@ c=Counter(ng); print(round(sum(v for v in c.values() if v>1)/len(ng),4))
       # acceptance parse: 'draft acceptance = X (a accepted / g generated), mean len = L'
       local ACCEPT MEANLEN
       ACCEPT=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -oE "draft acceptance = [0-9.]+" | tail -1 | awk '{print $4}')
-      MEANLEN=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -oE "mean len = [0-9.]+" | tail -1 | awk '{print $4}')
+      MEANLEN=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) | grep -oE "mean len =\s*[0-9.]+" | tail -1 | awk '{print $4}')
       local SHORT_TAG=""
       [ "${TOKENS:-0}" -lt "$MIN_DECODE_TOKENS" ] && SHORT_TAG=" (SHORT: ${TOKENS} tokens < $MIN_DECODE_TOKENS)"
       plog "  Result: decode=${SPEED:-0} t/s | acc=${ACCEPT:-n/a} | placement=$PLACEMENT (cpu ${AVG_CPU}%) | degeneracy=${QUALITY:-?} | tokens=${TOKENS:-0} | finish=$FINISH | OOM=$OOM$SHORT_TAG"
@@ -2027,6 +2027,7 @@ out = {
     "status": os.environ["MTP_STATUS"],
     "reason": os.environ["MTP_REASON"] or None,
     "written_at": datetime.datetime.now().isoformat(),
+    "placement_baseline": os.environ.get("MTP_BASE") or None,
     "tuned_n_max": n_or_null(os.environ["MTP_TN"]),
     "tuned_p_min": n_or_null(os.environ["MTP_TP"]),
     "samples": samples,
@@ -2334,6 +2335,26 @@ cmd_mtp_thorough() {
   mtp_init_samples
   log ""; log "Model: $MODEL | ctx: $CTX | mode: THOROUGH"
 
+  # ── §45.3 Change J: placement baseline (same rule as cmd_mtp_discover). ──
+  # On a CPU-compute MTP model, `CPU` is the baseline at every batch, not a draft
+  # spill, so the four gates below must not reject on placement. Resolve from the
+  # same-day discover JSON mode; else from the first measured candidate (the batch
+  # ladder validated the ini's own n_max). BASE_PLACEMENT empty until known →
+  # treated as GPU (legacy behaviour) until a sample establishes it. placement_ok
+  # is base-aware: a CPU baseline never rejects on placement.
+  local BASE_PLACEMENT="${MTP_BASE:-}"
+  local DISC_MODE="" DISC_DAY=""
+  if [ -z "$BASE_PLACEMENT" ] && [ -f "/tmp/discover_${MODEL}.json" ]; then
+    DISC_MODE=$(python3 -c "import json;print(json.load(open('/tmp/discover_${MODEL}.json')).get('mode',''))" 2>/dev/null || echo "")
+    DISC_DAY=$(python3 -c "import json;print(json.load(open('/tmp/discover_${MODEL}.json')).get('written_at','')[:10])" 2>/dev/null || echo "")
+    if [ "$DISC_DAY" = "$(date +%Y-%m-%d)" ] && { [ "$DISC_MODE" = "GPU" ] || [ "$DISC_MODE" = "CPU" ]; }; then
+      BASE_PLACEMENT=$DISC_MODE
+      export MTP_BASE="$BASE_PLACEMENT"
+      log "  placement baseline: $BASE_PLACEMENT (discover JSON mode, same-day)"
+    fi
+  fi
+  placement_ok() { [ "${BASE_PLACEMENT:-GPU}" = "CPU" ] || [ "$1" != "CPU" ]; }
+
   # ── Phase 1: n_max sweep {2,3,4,5} at p_min=0.7 (speed axis) ──
   local NMAX_VALUES="2 3 4 5"
   local SWEEP_PMIN=0.7
@@ -2354,18 +2375,28 @@ cmd_mtp_thorough() {
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
     mtp_add_sample "$N" "$SWEEP_PMIN" "$SPEED" "$TOKENS" "$PLACEMENT" "$ACC" "$QUALITY" "$OOM" "$MEANLEN"
     NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM|$TOKENS|$MEANLEN"
+    # §45.3: if no discover-JSON baseline, the first measured sample establishes it.
+    if [ -z "$BASE_PLACEMENT" ] && { [ "$PLACEMENT" = "GPU" ] || [ "$PLACEMENT" = "CPU" ]; }; then
+      BASE_PLACEMENT=$PLACEMENT
+      export MTP_BASE="$BASE_PLACEMENT"
+      if [ "$BASE_PLACEMENT" = "CPU" ]; then
+        log "  placement baseline: CPU (CPU-compute model; placement is not a gate)"
+      else
+        log "  placement baseline: GPU (from first measured sample n_max=$N)"
+      fi
+    fi
     # Quality gate: reject clearly degenerate (degeneracy > 0.15).
     local QUAL_OK=0
     python3 -c "exit(0 if float(${QUALITY:-1}) < 0.15 else 1)" 2>/dev/null && QUAL_OK=1
-    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "$QUAL_OK" -eq 1 ]; then
+    if [ "$OOM" -eq 0 ] && placement_ok "$PLACEMENT" && [ "$QUAL_OK" -eq 1 ]; then
       if python3 -c "exit(0 if float($SPEED) > float($WIN_SPEED) else 1)" 2>/dev/null; then
         WIN_NMAX=$N; WIN_SPEED=$SPEED
       fi
     fi
   done
   if [ "$WIN_NMAX" -eq 0 ]; then
-    log ""; log "  No n_max passed all filters (OOM/degenerate/CPU) — failing model, no auto fallback"
-    mtp_die "no n_max passed all filters (OOM/degenerate/CPU)"
+    log ""; log "  No n_max passed all filters (OOM/degenerate/placement) — failing model, no auto fallback"
+    mtp_die "no n_max passed all filters (OOM/degenerate/placement)"
   fi
   log ""; log "  PHASE 1 WINNER: n_max=$WIN_NMAX"
 
@@ -2389,7 +2420,7 @@ cmd_mtp_thorough() {
   # Strict gate: same criteria as Phase 3 confirm.
   local CONFIRM1_CLEAN=0
   python3 -c "exit(0 if float(${CONFIRM1_QUALITY:-1}) < 0.05 else 1)" 2>/dev/null && CONFIRM1_CLEAN=1
-  if [ "$CONFIRM1_OOM" -eq 0 ] && [ "$CONFIRM1_PLACEMENT" != "CPU" ] && [ "$CONFIRM1_CLEAN" -eq 1 ]; then
+  if [ "$CONFIRM1_OOM" -eq 0 ] && placement_ok "$CONFIRM1_PLACEMENT" && [ "$CONFIRM1_CLEAN" -eq 1 ]; then
     log "  Phase-1 confirm PASSED (degeneracy=${CONFIRM1_QUALITY} < 0.05)"
   else
     log "  Phase-1 confirm FAILED (degeneracy=${CONFIRM1_QUALITY:-?}) — failing model, no auto fallback"
@@ -2418,7 +2449,7 @@ cmd_mtp_thorough() {
     # Quality gate: reject clearly degenerate (degeneracy > 0.15).
     local QUAL_OK=0
     python3 -c "exit(0 if float(${QUALITY:-1}) < 0.15 else 1)" 2>/dev/null && QUAL_OK=1
-    if [ "$OOM" -eq 0 ] && [ "$PLACEMENT" != "CPU" ] && [ "$QUAL_OK" -eq 1 ]; then
+    if [ "$OOM" -eq 0 ] && placement_ok "$PLACEMENT" && [ "$QUAL_OK" -eq 1 ]; then
       if python3 -c "exit(0 if float($SPEED) > float($WIN_PMIN_SPEED) else 1)" 2>/dev/null; then
         WIN_PMIN=$P; WIN_PMIN_SPEED=$SPEED
       fi
@@ -2426,7 +2457,7 @@ cmd_mtp_thorough() {
   done
   if [ "$WIN_PMIN" -eq 0 ]; then
     log ""; log "  No p_min passed all filters (OOM/degenerate/CPU) — failing model, no auto fallback"
-    mtp_die "no p_min passed all filters (OOM/degenerate/CPU)"
+    mtp_die "no p_min passed all filters (OOM/degenerate/placement)"
   fi
   log ""; log "  PHASE 2 WINNER: p_min=$WIN_PMIN"
 
@@ -2450,7 +2481,7 @@ cmd_mtp_thorough() {
   # Strict gate: < 0.05 = clean PASS; >= 0.05 = fail (no runner-up fallback).
   local CONFIRM_CLEAN=0
   python3 -c "exit(0 if float(${CONFIRM_QUALITY:-1}) < 0.05 else 1)" 2>/dev/null && CONFIRM_CLEAN=1
-  if [ "$CONFIRM_OOM" -eq 0 ] && [ "$CONFIRM_PLACEMENT" != "CPU" ] && [ "$CONFIRM_CLEAN" -eq 1 ]; then
+  if [ "$CONFIRM_OOM" -eq 0 ] && placement_ok "$CONFIRM_PLACEMENT" && [ "$CONFIRM_CLEAN" -eq 1 ]; then
     log "  Final confirm PASSED (degeneracy=${CONFIRM_QUALITY} < 0.05)"
   else
     log "  Final confirm FAILED (degeneracy=${CONFIRM_QUALITY:-?}) — failing model, no auto fallback"
@@ -2480,19 +2511,22 @@ cmd_mtp_thorough() {
 }
 
 # ── MTP discover-mode ranking helpers (read the collected sample TSV) ──
-# Valid phase-1 sample: p_min == 0.7, placement != CPU, oom == 0, tokens >= MIN.
+# Valid phase-1 sample: p_min == 0.7, oom == 0, tokens >= MIN, and (when the
+# model's baseline placement is GPU, §45.3 Change J) placement != CPU. On a CPU-
+# compute model (MTP_BASE=CPU) a CPU sample is the baseline, not a spill.
 mtp_mean_for() {  # $1 nmax $2 pmin -> mean tps over valid samples of that config ('' if none)
   local NM=$1 PM=$2
-  MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS python3 -c "
+  MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS MTP_BASE="${MTP_BASE:-GPU}" python3 -c "
 import os
 rows = []
+rej_cpu = os.environ['MTP_BASE'] != 'CPU'
 for ln in open(os.environ['MTP_SAMP']):
     p = ln.rstrip('\n').split('|')
     if len(p) < 9: continue
     if p[0] != '$NM' or p[1] != '$PM': continue
     try: tps = float(p[2]); tok = int(p[3]); oom = int(p[7])
     except Exception: continue
-    if oom or p[4] == 'CPU' or tok < int(os.environ['MTP_MIN']): continue
+    if oom or (rej_cpu and p[4] == 'CPU') or tok < int(os.environ['MTP_MIN']): continue
     rows.append(tps)
 if not rows:
     print('')
@@ -2507,16 +2541,17 @@ else:
 # (e.g. n_max=2 when 4 is best but 2 is within 5%) is preferred for draft-buffer
 # headroom, independent of measurement order.
 mtp_phase1_winner() {
-  MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS MTP_TIE="$MTP_TIE" python3 -c '
+  MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS MTP_TIE="$MTP_TIE" MTP_BASE="${MTP_BASE:-GPU}" python3 -c '
 import os, sys
 rows = []
+rej_cpu = os.environ["MTP_BASE"] != "CPU"
 for ln in open(os.environ["MTP_SAMP"]):
     p = ln.rstrip("\n").split("|")
     if len(p) < 9: continue
     if p[1] != "0.7": continue
     try: tps = float(p[2]); tok = int(p[3]); oom = int(p[7])
     except Exception: continue
-    if oom or p[4] == "CPU" or tok < int(os.environ["MTP_MIN"]): continue
+    if oom or (rej_cpu and p[4] == "CPU") or tok < int(os.environ["MTP_MIN"]): continue
     rows.append((int(p[0]), tps))
 agg = {}
 for nm, t in rows: agg.setdefault(nm, []).append(t)
@@ -2561,6 +2596,30 @@ cmd_mtp_discover() {
   local CUR=${ORIG_NMAX:-}
   [ -z "$CUR" ] && CUR=2
   log "  ini spec-draft-n-max=$CUR spec-draft-p-min=${ORIG_PMIN:-unset}"
+
+  # ── §45.3 Change J: placement gate relative to the model's baseline ──
+  # On a GPU-resident model a `CPU` verdict means the draft buffer at this n_max
+  # spilled off the GPU — a rejection. On a model that is CPU-compute at every
+  # batch (MTP MoE with experts on CPU), `CPU` is the baseline, not a spill, so
+  # placement must not gate. Establish BASE_PLACEMENT from the discover JSON's
+  # `mode` (the batch ladder's GPU/CPU verdict) when that file exists and is from
+  # this run (same day, per its written_at); otherwise resolve it from the first
+  # measured candidate, which is always the ini's own n_max (the value the batch
+  # ladder validated). GPU → placement gates as today; CPU → reject on OOM/SHORT
+  # only.
+  local BASE_PLACEMENT=""
+  local DISC_MODE="" DISC_DAY=""
+  if [ -f "/tmp/discover_${MODEL}.json" ]; then
+    DISC_MODE=$(python3 -c "import json;print(json.load(open('/tmp/discover_${MODEL}.json')).get('mode',''))" 2>/dev/null || echo "")
+    DISC_DAY=$(python3 -c "import json;print(json.load(open('/tmp/discover_${MODEL}.json')).get('written_at','')[:10])" 2>/dev/null || echo "")
+    if [ "$DISC_DAY" = "$(date +%Y-%m-%d)" ]; then
+      if [ "$DISC_MODE" = "GPU" ] || [ "$DISC_MODE" = "CPU" ]; then
+        BASE_PLACEMENT=$DISC_MODE
+        export MTP_BASE="$BASE_PLACEMENT"
+        log "  placement baseline: $BASE_PLACEMENT (discover JSON mode, same-day)"
+      fi
+    fi
+  fi
 
   # ── Phase 1: n_max ladder at p_ref ──
   # S = sorted dedup{2, 4, cur}; n_max bounded to [2,6].
@@ -2607,10 +2666,30 @@ cmd_mtp_discover() {
     if [ "$DR" -eq 2 ]; then mtp_die_stall "STALL measuring n_max=$NM at p_min=$P_REF"; fi
     IFS='|' read -r SP TK PL OO <<< "$R"
     SP=${SP:-0}; TK=${TK:-0}; OO=${OO:-1}; PL=${PL:-SHORT}
-    if [ "$OO" -eq 0 ] && [ "$PL" != "CPU" ] && [ "$TK" -ge "$MIN_DECODE_TOKENS" ]; then
+    # §45.3: if no baseline yet (no same-day discover JSON), the first measured
+    # candidate establishes it. It is the ini's own n_max (batch-ladder validated),
+    # so its placement is the model's baseline, not a spill.
+    if [ -z "$BASE_PLACEMENT" ] && { [ "$PL" = "GPU" ] || [ "$PL" = "CPU" ]; }; then
+      BASE_PLACEMENT=$PL
+      export MTP_BASE="$BASE_PLACEMENT"
+      if [ "$BASE_PLACEMENT" = "CPU" ]; then
+        log "  placement baseline: CPU (CPU-compute model; placement is not a gate)"
+      else
+        log "  placement baseline: GPU (from first measured candidate n_max=$NM)"
+      fi
+    fi
+    # Reject on OOM or SHORT always; reject on CPU only when the baseline is GPU
+    # (a GPU model's CPU = draft spill; a CPU-compute model is CPU at every batch).
+    local REJ=""
+    [ "$OO" -eq 0 ] || REJ="oom"
+    [ "$TK" -ge "$MIN_DECODE_TOKENS" ] || REJ="short-tokens"
+    if [ "$OO" -eq 0 ] && [ "$TK" -ge "$MIN_DECODE_TOKENS" ]; then
+      if [ "$BASE_PLACEMENT" != "CPU" ] && [ "$PL" = "CPU" ]; then REJ="cpu-spill"; fi
+    fi
+    if [ -z "$REJ" ]; then
       log "  n_max=$NM: PASS (${SP} t/s, ${TK} tokens, $PL)"
     else
-      log "  n_max=$NM: rejected (placement=$PL oom=$OO tokens=$TK)"
+      log "  n_max=$NM: rejected (${REJ}: placement=$PL oom=$OO tokens=$TK)"
     fi
   }
 
@@ -2639,16 +2718,17 @@ cmd_mtp_discover() {
   R1=$(mtp_phase1_winner 2>/dev/null) || mtp_die "no n_max winner after neighbour extension"
   TOP1=$R1
   # runner-up = highest-mean n_max other than TOP1, via a dedicated python pass.
-  TOP2=$(MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS MTP_TIE="$MTP_TIE" python3 -c "
+  TOP2=$(MTP_SAMP="$(mtp_sample_file)" MTP_MIN=$MIN_DECODE_TOKENS MTP_TIE="$MTP_TIE" MTP_BASE="${MTP_BASE:-GPU}" python3 -c "
 import os, sys
 rows=[]
+rej_cpu = os.environ['MTP_BASE'] != 'CPU'
 for ln in open(os.environ['MTP_SAMP']):
     p=ln.rstrip('\n').split('|')
     if len(p)<9: continue
     if p[1]!='0.7': continue
     try: tps=float(p[2]); tok=int(p[3]); oom=int(p[7])
     except Exception: continue
-    if oom or p[4]=='CPU' or tok < int(os.environ['MTP_MIN']): continue
+    if oom or (rej_cpu and p[4]=='CPU') or tok < int(os.environ['MTP_MIN']): continue
     rows.append((p[0],tps))
 agg={}
 for nm,t in rows: agg.setdefault(nm,[]).append(t)
@@ -3507,6 +3587,38 @@ print(' '.join(out))
       echo "$CB FAIL" >> "$POINTS"
       GOLD_RES="0"; return 0
     fi
+    # §45.4#2: CPU-compute probes are single timed samples (over 5s → no median)
+    # and noisier than GPU probes (e.g. 3392 at 1564 between neighbours 1825/1786,
+    # a 13% outlier). Cheap guard: when a CPU-compute candidate measures >5% below
+    # BOTH of its measured neighbours (nearest measured batch above and below), it
+    # is a likely outlier — re-probe once and keep the higher value. One extra
+    # probe only when triggered.
+    if [ "$MODE" = "CPU" ]; then
+      # Nearest already-recorded measured batch strictly below and above CB, across
+      # both the ladder rungs and prior refinement points.
+      local LO=0 HI=0 LO_PF="" HI_PF="" PB j
+      for j in "${!PASS_B[@]}"; do
+        PB=${PASS_B[$j]}
+        [ "$PB" -lt "$CB" ] && [ "$PB" -gt "$LO" ] && { LO=$PB; LO_PF=${PASS_P[$j]}; }
+        [ "$PB" -gt "$CB" ] && { [ "$HI" -eq 0 ] || [ "$PB" -lt "$HI" ]; } && { HI=$PB; HI_PF=${PASS_P[$j]}; }
+      done
+      for j in "${!REFINE_B[@]}"; do
+        PB=${REFINE_B[$j]}
+        [ "$PB" -lt "$CB" ] && [ "$PB" -gt "$LO" ] && { LO=$PB; LO_PF=${REFINE_P[$j]}; }
+        [ "$PB" -gt "$CB" ] && { [ "$HI" -eq 0 ] || [ "$PB" -lt "$HI" ]; } && { HI=$PB; HI_PF=${REFINE_P[$j]}; }
+      done
+      if [ -n "$LO_PF" ] && [ -n "$HI_PF" ]; then
+        if python3 -c "exit(0 if float('$MF') < float('$LO_PF') * 0.95 and float('$MF') < float('$HI_PF') * 0.95 else 1)" 2>/dev/null; then
+          log "  golden $CB (${MF} t/s) >5% below both neighbours ($LO=${LO_PF}, $HI=${HI_PF}) on CPU — re-probing once" >&2
+          local MF2
+          MF2=$(discover_measure_candidate "$CB" "$SK") || { log "  STALL re-probing $CB — aborting"; exit 1; }
+          if [ -n "$MF2" ] && [ "$MF2" != "0" ]; then
+            python3 -c "exit(0 if float('$MF2') > float('$MF') else 1)" 2>/dev/null && MF=$MF2
+            log "  golden $CB re-probe → ${MF2} t/s; keeping ${MF} t/s" >&2
+          fi
+        fi
+      fi
+    fi
     REFINE_B+=("$CB"); REFINE_P+=("$MF")
     echo "$CB PASS $MF" >> "$POINTS"
     if python3 -c "exit(0 if float('$MF') > float('$PICK_PF') else 1)" 2>/dev/null; then
@@ -4338,6 +4450,7 @@ _mtp_tuning = {
     'tuning_reason': status.get('reason') if status else None,
     'tuned_n_max': status.get('tuned_n_max') if status else None,
     'tuned_p_min': status.get('tuned_p_min') if status else None,
+    'placement_baseline': status.get('placement_baseline') if status else None,
     'tuning_samples': status.get('samples') if status and status.get('samples') is not None else [],
     'tuning_written_at': status.get('written_at') if status else None,
 }
