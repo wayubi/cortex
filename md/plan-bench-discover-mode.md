@@ -1499,3 +1499,15 @@ Notes:
 Every record has `tuned == configured == loaded`, `placement_baseline` set, a complete discover block, and the siblings' ini sections carry the head's batch and MTP values. Change J did its job on all three CPU-compute heads: every candidate passed on placement, tuning succeeded, and the siblings inherited. Decode figures are lower than the old records everywhere (e.g. 26b 4K 73.6 → 48.1) because the old ones were forced-generation loop inflation; the new ones are real.
 
 **Noise note for the CPU-compute class.** On gemma-26b 4K the 3072-token probe rated 3328 six percent above the 4096 rung, and the bench, on the same prompt length, rated it five percent below the old record at 4096. Both are single-run figures on a model whose prefill runs on 20 threads of a 14-core CPU, and the 3200 outlier (15% low, corrected by the re-probe) shows the same thing. CPU-compute prefill has about ±5% run-to-run noise even with medians, so the 64-token picks on this class are equivalent within that band, and the bench prefill differences between the old and new records are inside it too. No action required; anyone who wants faster runs on this class loses nothing measurable with `--refine=coarse`.
+
+---
+
+## 48. Qwen uncensored family, 23:42 to 00:34 (2026-09-09)
+
+`bench_20260908-2342.log`: two non-MTP heads (9B GPU, 35B CPU-compute), two think-siblings inherited. No failures; records consistent (`tuning_status: not_mtp`, placement binary, discover blocks complete). 9B: pick 1664 at 1677 t/s (previous ini value 2560), bisect 15 min. 35B: pick 8192 (unchanged), bisect 30 min, of which 13 min was refinement over [4096, 16384]: 13 points, all within ±2% of the 8192 rung, no gain.
+
+**Observation (second occurrence, see §47).** On CPU-compute models the prefill curve near the peak sits inside ±2 to 5% run-to-run noise, so 64-token refinement resolves nothing there, and this class has the widest brackets and slowest probes in the catalogue (35B at 64K: about a minute per point). The remaining CPU-compute heads (six qwen-3.6-35b MTP, six gpt-oss) would each spend 10 to 15 minutes the same way.
+
+**Option for the user (not applied).** Default `REFINE_MODE` to `coarse` when the ladder sets `MODE=CPU`, unless `--refine=64` was passed explicitly; log the reason. GPU models keep 64, where refinement has found real 2 to 5% gains (gemma-26b 8K 3072, gemma-12b 1408 to 1664, lfm 4K 3520). Estimated saving: 10 to 15 min per CPU-compute head, about 2 to 3 hours across the remaining catalogue.
+
+**Cosmetic.** `inherit_json` logs `MTP values NOT inherited (parent tuning_status=not_mtp)` for non-MTP families; it should say the parent is not an MTP model.
