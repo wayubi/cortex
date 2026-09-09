@@ -474,6 +474,7 @@ maybe_inherit() {
   local MODEL=$1
   local PARENT
   PARENT=$(family_of "$MODEL")
+  INHERIT_PARENT_FAILED=0   # §50.2 Change L signal for the caller's verdict
 
   # No-inherit: always run real bench
   [ "$INHERIT_MODE" -eq 0 ] && return 1
@@ -488,6 +489,17 @@ maybe_inherit() {
   fi
 
   # Sibling: inherit from parent if parent has JSON
+  # §50.2 Change L: when RESET_PARENT is on, only inherit from a parent that was
+  # actually benched successfully THIS run (RESET_DONE set). A head that failed
+  # its bisect/bench must not feed its stale record to siblings — copying it and
+  # stamping a fresh propagated_date would make the failure invisible. Set a
+  # signal the callers read to report the verdict; return 0 (handled/skip) so the
+  # sibling is not benched against stale data.
+  if [ "$RESET_PARENT" -eq 1 ] && [ "${RESET_DONE[$PARENT]:-0}" -ne 1 ]; then
+    log "  $MODEL: NOT inherited — parent $PARENT was not benched successfully this run"
+    INHERIT_PARENT_FAILED=1
+    return 0
+  fi
   if has_json "$PARENT"; then
     inherit_json "$PARENT" "$MODEL"
     return 0   # handled — skip
@@ -529,9 +541,12 @@ oom_count_since_mark() { oom_since_mark | wc -l | tr -d ' '; }
 # The router logs "proxy_reques: proxying request to model <model> on port <N>"
 # ONLY after the model finishes loading and the request is being served.
 # A hung cold-load (e.g. HF network fetch stalled) never emits this line.
-# SERVED_GRACE = max seconds to wait for the proxy_reques line. Base 60s + 40s per
-# 64k ctx (covers large-ctx cold-loads under contention). Set ctx-aware in each command.
-SERVED_GRACE=${SERVED_GRACE:-60}
+# SERVED_GRACE = max seconds to wait for the proxy_reques line. Change K (§49.1):
+# base 180s + 40s per 64k ctx (the old 60s base was too tight for the largest
+# saturation bodies — intermittent cold-load hangs on GLM 128K/198K heads that had
+# served every prior probe). Set ctx-aware in each command via served_grace.
+SERVED_GRACE=${SERVED_GRACE:-180}
+served_grace() { echo $((180 + $1 / 65536 * 40)); }
 
 # Wait for the router log to show our request being served (proxy_reques line).
 # Takes the curl PID — if the curl has already exited (request completed, whether
@@ -1695,7 +1710,7 @@ for b, p in pts[:$SHORTLIST_SIZE]:
 # On failure, restores the original section and exits 1 (caller decides).
 detect_mtp() {
   local CTX=$(read_ctx)
-  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  SERVED_GRACE=$(served_grace "$CTX")
   log ""; log "=== MTP DETECTION: $MODEL ==="
   local SNAP=/tmp/mtp_section_${MODEL}.snap
   read_section > "$SNAP"
@@ -1852,6 +1867,7 @@ with open('/tmp/decode_payload.json','w') as f: json.dump(payload, f)
 
     plog "  Polling CPU/GPU until request completes (max $((POLL_MAX_SAMPLES * 2))s)..."
     local CPU_SAMPLES=() GPU_SAMPLES=()
+    local POLL_T0=$(date +%s)
     for i in $(seq 1 $POLL_MAX_SAMPLES); do
       local TOP CPU GPU
       TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
@@ -1862,7 +1878,7 @@ with open('/tmp/decode_payload.json','w') as f: json.dump(payload, f)
       [ $((i % 20)) -eq 0 ] && plog "    ...${i}x2s (CPU ${CPU}% GPU ${GPU}%)"
       sleep 2
       if [ "$i" -ge "$POLL_MIN_SAMPLES" ] && ! kill -0 $PID 2>/dev/null; then
-        plog "    Request complete after ~$((i*2))s — stopping poll"
+        plog "    Request complete after ~$(( $(date +%s) - POLL_T0 ))s — stopping poll"
         break
       fi
     done
@@ -2130,7 +2146,7 @@ print('  removed ' + key)
 #           probabilities; print "n/a" if none.
 cmd_mtpverify() {
   local CTX=$(read_ctx)
-  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  SERVED_GRACE=$(served_grace "$CTX")
   log ""; log "=== MTP VERIFY: $MODEL ==="
 
   # Snapshot and restore the whole section on every exit (Ctrl-C included) so a
@@ -2313,7 +2329,7 @@ cmd_mtp_thorough() {
     exit 1
   fi
   local CTX=$(read_ctx)
-  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  SERVED_GRACE=$(served_grace "$CTX")
 
   # Snapshot original n_max/p_min so a failed run restores the pre-run config
   # (mirrors cmd_bisect's restore_batch EXIT trap).
@@ -2574,7 +2590,7 @@ print(winner)
 # includes the ini's current n_max (it was validated by the batch ladder).
 cmd_mtp_discover() {
   local CTX=$(read_ctx)
-  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  SERVED_GRACE=$(served_grace "$CTX")
 
   # Snapshot/restore original n_max & p_min on any failure (EXIT trap).
   local ORIG_NMAX ORIG_PMIN
@@ -2830,7 +2846,7 @@ cmd_bisect_thorough() {
   fi
 
   local CTX=$(read_ctx)
-  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  SERVED_GRACE=$(served_grace "$CTX")
   [ -z "$CTX" ] && { log "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
 
   # Snapshot the model's original batch so a failed run can restore it
@@ -3159,7 +3175,7 @@ cmd_bisect_test_batch() {
   local BATCH=$1
   local CTX=$(read_ctx)
   [ -z "$CTX" ] && { log "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
-  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  SERVED_GRACE=$(served_grace "$CTX")
   local ORIG_BATCH=$(read_batch)
   local RESTORED=0
   restore_batch() {
@@ -3328,7 +3344,7 @@ cmd_bisect_discover() {
 
   local CTX=$(read_ctx)
   [ -z "$CTX" ] && { log "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
-  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  SERVED_GRACE=$(served_grace "$CTX")
 
   local ORIG_BATCH=$(read_batch)
   local RESTORED=0
@@ -4047,7 +4063,7 @@ except: print('')
 
   # Read ctx-size (scoped to the model's own section)
   local CTX=$(read_ctx)
-  SERVED_GRACE=$((60 + CTX / 65536 * 40))
+  SERVED_GRACE=$(served_grace "$CTX")
   [ -z "$CTX" ] && { log "ERROR: ctx-size not found"; exit 1; }
 
   # Prompt size: 75% of ctx (CTX now guaranteed set)
@@ -4221,6 +4237,7 @@ print(f'  Decode payload: DECODE_PROMPT (natural stop, max_tokens=$DECODE_MAX_TO
   log "  Polling CPU/GPU until request completes (max $((POLL_MAX_SAMPLES * 2))s)..."
   local CPU_SAMPLES=() GPU_SAMPLES=() MEM_SAMPLES=() TEMP_SAMPLES=()
   local POWER_SAMPLES=() VRAM_SAMPLES=() CLOCK_SM_SAMPLES=() CLOCK_MEM_SAMPLES=()
+  local POLL_T0=$(date +%s)
   local i
   for i in $(seq 1 $POLL_MAX_SAMPLES); do
     local TOP CPU GPUSTATS GPU MEM TEMP POWER VRAM CLOCK_SM CLOCK_MEM
@@ -4245,7 +4262,7 @@ print(f'  Decode payload: DECODE_PROMPT (natural stop, max_tokens=$DECODE_MAX_TO
     [ -n "$CLOCK_MEM" ] && CLOCK_MEM_SAMPLES+=("$CLOCK_MEM")
     sleep 2
     if [ "$i" -ge "$POLL_MIN_SAMPLES" ] && ! kill -0 $PID 2>/dev/null; then
-      log "  Request complete after ~$((i*2))s — stopping poll"
+      log "  Request complete after ~$(( $(date +%s) - POLL_T0 ))s — stopping poll"
       break
     fi
   done
@@ -4652,6 +4669,11 @@ run_full_suite() {
         for s in mtpcheck bisect mtp bench; do
           VERDICTS["$NAME|$s"]="SKIPPED (family head)"
         done
+      elif [ "${INHERIT_PARENT_FAILED:-0}" -eq 1 ]; then
+        lshow "  $NAME: skipped — parent $PARENT_NAME was not benched this run"
+        for s in mtpcheck bisect mtp bench; do
+          VERDICTS["$NAME|$s"]="SKIPPED (parent bench failed)"
+        done
       else
         lshow "  $NAME: inheriting from $PARENT_NAME (JSON copied, no bench)"
         for s in mtpcheck bisect mtp bench; do
@@ -4748,6 +4770,8 @@ fi
 
 # ── Inheritance flags (global, apply to whole selection) ──
 declare -A RESET_DONE
+INHERIT_PARENT_FAILED=0     # §50.2 Change L: set by maybe_inherit when a sibling was
+                            # skipped because its parent was not benched this run
 INHERIT_MODE=1
 RESET_PARENT=0
 MAIN_ARGS=()
@@ -4903,6 +4927,8 @@ case "$CMD" in
       if maybe_inherit "$m"; then
         if [ "$m" = "$(family_of "$m")" ]; then
           log "  $m: family head, already benched (skip)"
+        elif [ "${INHERIT_PARENT_FAILED:-0}" -eq 1 ]; then
+          log "  $m: skipped — parent $(family_of "$m") was not benched this run"
         else
           log "  $m: inheriting from $(family_of "$m") (JSON copied, no bench)"
         fi
