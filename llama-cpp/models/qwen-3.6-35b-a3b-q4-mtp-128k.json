@@ -1,0 +1,313 @@
+{
+  "model": "qwen-3.6-35b-a3b-q4-mtp-128k",
+  "ctx": 131072,
+  "batch": 9024,
+  "ubatch": 9024,
+  "placement": "CPU",
+  "bench_date": "2026-09-09T14:40:45.016280",
+  "bench_method": "bench_model.sh v2",
+  "config": {
+    "temp": "0.7",
+    "top_k": "20",
+    "top_p": "0.8",
+    "min_p": "0.00",
+    "repeat_penalty": "1.0",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL",
+    "quant": "UD-Q4_K_XL",
+    "reasoning": "off",
+    "ctx": "131072",
+    "batch": "9024"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 98304,
+    "decode_prompt_tokens": 108,
+    "model_file_size_gb": 21.28,
+    "build_info": "b1-3737e41",
+    "wall_time_s": 112
+  },
+  "speed": {
+    "prefill_t_s": 1021.45,
+    "prefill_ms": 94159.06,
+    "prefill_ms_per_tok": 0.979,
+    "decode_t_s": 29.41,
+    "decode_ms": 106866.48,
+    "decode_ms_per_tok": 34.0014
+  },
+  "request": {
+    "prefill_prompt_tokens": 96179,
+    "decode_prompt_tokens": 108,
+    "max_tokens": 4000,
+    "completion_tokens": 3144,
+    "total_tokens": 3252,
+    "cached_tokens": 0,
+    "cache_n": 0,
+    "predicted_n": 3144,
+    "finish_reason": "stop",
+    "truncated": false,
+    "degeneracy": 0.0
+  },
+  "mtp": {
+    "acceptance": 0.84766,
+    "draft_accepted": 1519,
+    "draft_generated": 1792,
+    "draft_mean_len": 2.5,
+    "n_max_loaded": 3,
+    "p_min_loaded": 0.7,
+    "tuning_status": "ok",
+    "tuning_reason": null,
+    "tuned_n_max": 3,
+    "tuned_p_min": 0.7,
+    "placement_baseline": "CPU",
+    "tuning_samples": [
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 29.7,
+        "tokens": 3690,
+        "placement": "CPU",
+        "accept": 0.86608,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.31
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 28.8,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.85204,
+        "degeneracy": 0.0027,
+        "oom": 0,
+        "mean_draft_len": 2.66
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 29.5,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.85983,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.56
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 29.8,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.86849,
+        "degeneracy": 0.0013,
+        "oom": 0,
+        "mean_draft_len": 2.56
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 28.4,
+        "tokens": 3018,
+        "placement": "CPU",
+        "accept": 0.88875,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.36
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.5,
+        "tps": 28.7,
+        "tokens": 3756,
+        "placement": "CPU",
+        "accept": 0.69688,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.47
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.9,
+        "tps": 26.8,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.97672,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.48
+      }
+    ],
+    "tuning_written_at": "2026-09-09T14:36:29.219313",
+    "configured_n_max": 3,
+    "configured_p_min": 0.7,
+    "drafter": "in-model"
+  },
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 353.86
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 549.62
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 809.56
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 1079.83
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1281.34
+      },
+      {
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 1310.93
+      },
+      {
+        "batch": 16384,
+        "status": "OOM",
+        "prefill": null
+      },
+      {
+        "batch": 8768,
+        "status": "REFINE",
+        "prefill": 1347.15
+      },
+      {
+        "batch": 11648,
+        "status": "REFINE",
+        "prefill": 970.27
+      },
+      {
+        "batch": 6976,
+        "status": "REFINE",
+        "prefill": 1305.17
+      },
+      {
+        "batch": 8704,
+        "status": "REFINE",
+        "prefill": 1350.36
+      },
+      {
+        "batch": 9856,
+        "status": "REFINE",
+        "prefill": 1254.08
+      },
+      {
+        "batch": 8064,
+        "status": "REFINE",
+        "prefill": 1303.54
+      },
+      {
+        "batch": 9152,
+        "status": "REFINE",
+        "prefill": 1351.02
+      },
+      {
+        "batch": 9088,
+        "status": "REFINE",
+        "prefill": 1350.3
+      },
+      {
+        "batch": 9408,
+        "status": "REFINE",
+        "prefill": 1284.76
+      },
+      {
+        "batch": 8960,
+        "status": "REFINE",
+        "prefill": 1336.26
+      },
+      {
+        "batch": 9216,
+        "status": "REFINE",
+        "prefill": 1340.91
+      },
+      {
+        "batch": 9024,
+        "status": "REFINE",
+        "prefill": 1358.22
+      }
+    ],
+    "best_prefill": 1310.93,
+    "pick": 9024,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      6976,
+      8064,
+      8704,
+      8768,
+      8960,
+      9024,
+      9088,
+      9152,
+      9216,
+      9408,
+      9856,
+      11648
+    ],
+    "ceiling_coarse": "8192 PASS / 16384 OOM",
+    "ladder_break": "1",
+    "written_at": "2026-09-09T14:16:11.583150"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 1682.4,
+      "avg_gpu_util_pct": 27.3,
+      "avg_gpu_mem_util_pct": 21.8,
+      "cpu_stddev_pct": 66.7,
+      "peak_vram_mib": 11003,
+      "peak_power_w": 75.71,
+      "peak_temp_c": 59,
+      "peak_clocks_sm_mhz": 1957,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 11003,
+      "final_temp_c": 48,
+      "final_power_w": 39.33,
+      "ram_used_mib": 77816,
+      "rss_mib": 27038,
+      "sample_count": 45
+    }
+  }
+}
