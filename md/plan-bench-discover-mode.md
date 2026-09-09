@@ -1482,3 +1482,20 @@ Notes:
 - The comment in the discover tuner says the first measured candidate is the ini's own n_max; the set is sorted, so it is the smallest candidate. Harmless for the baseline rule (a smaller n_max cannot spill where a larger one does not), but the comment should say "the smallest candidate".
 - The head's bench JSON on disk still carries `tuning_status: failed` from 16:11. Run `bench.sh --no-inherit bench gemma-4-26b-a4b-q4-qat-mtp-8k` to regenerate it with the ok status, after which the 8K siblings inherit the MTP values. The 4K and 16K heads and the 35B family will tune correctly on their first pass now.
 - `models.ini` carries this tune (n_max 3, p_min 0.7 for the 8K head) alongside the user's uncommitted suite results; the author did not revert it because it is a real result from the final code.
+
+---
+
+## 47. First full family through the final pipeline: gemma, 16:58 to 18:49 (2026-09-08)
+
+`bench_20260908-1658.log`: four heads tuned, four think-siblings inherited, no failures, no warnings, no `AMBIGUOUS`, no stale status. 1 h 51 min for eight models: heads 26, 25, 31 and 29 minutes (bisect 13 to 16, MTP 11 to 13, bench 1.5 to 2), siblings seconds.
+
+| head | batch (old → new) | bench prefill | MTP | notes |
+|---|---|---|---|---|
+| gemma-12b 16K | 1664 → 1408 | 1185 | 2 / 0.5, baseline GPU | 64-token pick moved inside the flat 1024 to 2048 plateau, as §41 predicted; p_min 0.5 held on the second sample this time |
+| gemma-26b 4K | 4096 → 3328 | 1770 (old record 1858 at 4096) | 2 / 0.7, baseline CPU | see noise note |
+| gemma-26b 8K | 4096 → 3072 | 1859 (old 1758) | 2 / 0.7, baseline CPU | outlier guard fired once: 3200 measured 1543, re-probed 1807, then 3072 adopted at 1836 |
+| gemma-26b 16K | 4096 → 4096 | 1829 (old 1815) | 2 / 0.7, baseline CPU | refinement found nothing above the rung |
+
+Every record has `tuned == configured == loaded`, `placement_baseline` set, a complete discover block, and the siblings' ini sections carry the head's batch and MTP values. Change J did its job on all three CPU-compute heads: every candidate passed on placement, tuning succeeded, and the siblings inherited. Decode figures are lower than the old records everywhere (e.g. 26b 4K 73.6 → 48.1) because the old ones were forced-generation loop inflation; the new ones are real.
+
+**Noise note for the CPU-compute class.** On gemma-26b 4K the 3072-token probe rated 3328 six percent above the 4096 rung, and the bench, on the same prompt length, rated it five percent below the old record at 4096. Both are single-run figures on a model whose prefill runs on 20 threads of a 14-core CPU, and the 3200 outlier (15% low, corrected by the re-probe) shows the same thing. CPU-compute prefill has about ±5% run-to-run noise even with medians, so the 64-token picks on this class are equivalent within that band, and the bench prefill differences between the old and new records are inside it too. No action required; anyone who wants faster runs on this class loses nothing measurable with `--refine=coarse`.
