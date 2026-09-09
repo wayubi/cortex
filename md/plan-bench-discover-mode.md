@@ -1663,3 +1663,28 @@ case B: head failed pre-pass, RECOVERED in main loop
 Siblings always carry a higher index than their head (`family_of` returns the first matching section), so the flag is always set before any sibling reads it.
 
 **Acceptance.** Force a head's bisect to fail on its first attempt only, run the family with `--reset-parent`, and confirm: the head shows OK in the verdict table, its siblings show inherited rather than skipped, and their JSON mtimes match the head's. Then force a permanent failure and confirm the siblings show `SKIPPED (parent bench failed)` with their files untouched.
+
+---
+
+## 52. Author sign-off on Changes K and L (2026-09-09)
+
+**Accepted.** Commit `482b609` applies the §51.2 fix verbatim: a family head that recovers in the main loop marks itself done, so its siblings inherit the fresh record instead of being skipped.
+
+Verified by extracting the live `maybe_inherit` and driving it through a mirror of the main loop:
+
+| scenario | head | sibling | correct |
+|---|---|---|---|
+| A: head succeeded in the pre-pass | already reset-benched | inherits fresh record | yes |
+| B: head failed pre-pass, recovered in main loop | real bench flow, OK | inherits fresh record | yes, this was the §51.2 regression |
+| C: head fails everywhere | real bench flow, FAIL | `SKIPPED (parent bench failed)`, file untouched | yes, this is Change L's purpose |
+
+Scenario B is the 2026-09-09 GLM 128K case and now produces the same outcome that run did, with the stale-record path closed.
+
+One risk checked and cleared: `[ "$NAME" = "$(family_of "$NAME")" ] && RESET_DONE["$NAME"]=1` returns non-zero for a sibling, and the script runs under `set -e`. A failing left operand of `&&` is exempt from errexit, confirmed by running the same construct inside a loop under `set -euo pipefail`; the loop continues and the script exits 0.
+
+Change K, Change L and the §49.4 poll fix are all complete. `bash -n` clean, working tree clean apart from model records.
+
+**Open items now, in order:**
+1. §49.2a, whether CPU-compute models should default to coarse refinement. **A design decision for the user. No agent should act on it.**
+2. §50.2 acceptance is still live-untested: force a head failure and confirm siblings are skipped with their files untouched. The isolated test above proves the logic; a real run would prove the plumbing.
+3. Remaining catalogue: gpt-oss, lfm, zamai, and the qwen MTP families.
