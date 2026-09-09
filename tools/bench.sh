@@ -4737,6 +4737,13 @@ run_full_suite() {
       lshow "  $(date +%H:%M:%S) starting bench for $NAME"
       if ( cmd_bench ); then
         VERDICTS["$NAME|bench"]="OK"
+        # §51.2: a head re-run here after a failed pre-pass is a valid fresh source
+        # for its siblings, which are processed later in this same loop. Mark it
+        # done so Change L's sibling guard (which requires RESET_DONE[$parent]) does
+        # not wrongly skip them. Siblings always carry a higher index than their
+        # head (family_of returns the first matching section), so this is always set
+        # before any sibling reads it.
+        [ "$NAME" = "$(family_of "$NAME")" ] && RESET_DONE["$NAME"]=1
       else
         VERDICTS["$NAME|bench"]="FAIL"
       fi
