@@ -1,10 +1,10 @@
 {
   "model": "gemma-4-12b-q4-qat-mtp-16k-think",
   "ctx": 16384,
-  "batch": 1664,
-  "ubatch": 1664,
+  "batch": 1408,
+  "ubatch": 1408,
   "placement": "GPU",
-  "bench_date": "2026-09-08T14:19:54.763164",
+  "bench_date": "2026-09-08T17:24:49.182412",
   "bench_method": "bench_model.sh v2",
   "config": {
     "temp": "1.0",
@@ -21,7 +21,7 @@
     "quant": "UD-Q4_K_XL",
     "reasoning": "on",
     "ctx": "16384",
-    "batch": "1664"
+    "batch": "1408"
   },
   "bench": {
     "max_tokens": 4000,
@@ -29,142 +29,143 @@
     "decode_prompt_tokens": 103,
     "model_file_size_gb": 6.26,
     "build_info": "b1-3737e41",
-    "wall_time_s": 55
+    "wall_time_s": 52
   },
   "speed": {
-    "prefill_t_s": 1194.61,
-    "prefill_ms": 9871.03,
-    "prefill_ms_per_tok": 0.8371,
-    "decode_t_s": 55.61,
-    "decode_ms": 53249.59,
-    "decode_ms_per_tok": 17.9836
+    "prefill_t_s": 1185.41,
+    "prefill_ms": 9947.62,
+    "prefill_ms_per_tok": 0.8436,
+    "decode_t_s": 56.09,
+    "decode_ms": 49689.1,
+    "decode_ms_per_tok": 17.8289
   },
   "request": {
     "prefill_prompt_tokens": 11793,
     "decode_prompt_tokens": 103,
     "max_tokens": 4000,
-    "completion_tokens": 2962,
-    "total_tokens": 3065,
+    "completion_tokens": 2788,
+    "total_tokens": 2891,
     "cached_tokens": 1,
     "cache_n": 1,
-    "predicted_n": 2962,
+    "predicted_n": 2788,
     "finish_reason": "stop",
     "truncated": false,
     "degeneracy": 0.0
   },
   "mtp": {
-    "acceptance": 0.61579,
-    "draft_accepted": 1513,
-    "draft_generated": 2457,
-    "draft_mean_len": 2.16,
+    "acceptance": 0.60485,
+    "draft_accepted": 1422,
+    "draft_generated": 2351,
+    "draft_mean_len": 2.14,
     "n_max_loaded": 2,
     "p_min_loaded": 0.5,
     "tuning_status": "ok",
     "tuning_reason": null,
     "tuned_n_max": 2,
     "tuned_p_min": 0.5,
+    "placement_baseline": "GPU",
     "tuning_samples": [
       {
         "n_max": 2,
         "p_min": 0.7,
-        "tps": 51.7,
-        "tokens": 3002,
+        "tps": 52.3,
+        "tokens": 2961,
         "placement": "GPU",
-        "accept": 0.68025,
+        "accept": 0.69053,
         "degeneracy": 0.0,
         "oom": 0,
-        "mean_draft_len": ""
-      },
-      {
-        "n_max": 4,
-        "p_min": 0.7,
-        "tps": 53.9,
-        "tokens": 3145,
-        "placement": "GPU",
-        "accept": 0.5894,
-        "degeneracy": 0.0,
-        "oom": 0,
-        "mean_draft_len": ""
+        "mean_draft_len": 2.2
       },
       {
         "n_max": 3,
         "p_min": 0.7,
-        "tps": 51.6,
-        "tokens": 3154,
+        "tps": 52.2,
+        "tokens": 2915,
         "placement": "GPU",
-        "accept": 0.62466,
+        "accept": 0.60595,
         "degeneracy": 0.0,
         "oom": 0,
-        "mean_draft_len": ""
+        "mean_draft_len": 2.37
       },
       {
         "n_max": 4,
         "p_min": 0.7,
-        "tps": 53.8,
-        "tokens": 2884,
+        "tps": 54.1,
+        "tokens": 3040,
         "placement": "GPU",
-        "accept": 0.57667,
+        "accept": 0.59638,
         "degeneracy": 0.0,
         "oom": 0,
-        "mean_draft_len": ""
+        "mean_draft_len": 2.56
+      },
+      {
+        "n_max": 5,
+        "p_min": 0.7,
+        "tps": 51.3,
+        "tokens": 3256,
+        "placement": "GPU",
+        "accept": 0.52029,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.51
       },
       {
         "n_max": 2,
         "p_min": 0.7,
-        "tps": 52.2,
-        "tokens": 3224,
+        "tps": 53.4,
+        "tokens": 2591,
         "placement": "GPU",
-        "accept": 0.71241,
+        "accept": 0.69484,
         "degeneracy": 0.0,
         "oom": 0,
-        "mean_draft_len": ""
+        "mean_draft_len": 2.21
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 53.3,
+        "tokens": 3660,
+        "placement": "GPU",
+        "accept": 0.59073,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.56
       },
       {
         "n_max": 2,
         "p_min": 0.5,
         "tps": 55.1,
-        "tokens": 3263,
+        "tokens": 2923,
         "placement": "GPU",
-        "accept": 0.608,
+        "accept": 0.6129,
         "degeneracy": 0.0,
         "oom": 0,
-        "mean_draft_len": ""
+        "mean_draft_len": 2.14
       },
       {
         "n_max": 2,
         "p_min": 0.9,
-        "tps": 48.4,
-        "tokens": 3418,
+        "tps": 49.3,
+        "tokens": 3261,
         "placement": "GPU",
-        "accept": 0.79211,
+        "accept": 0.81084,
         "degeneracy": 0.0,
         "oom": 0,
-        "mean_draft_len": ""
-      },
-      {
-        "n_max": 2,
-        "p_min": 0.6,
-        "tps": 51.9,
-        "tokens": 3802,
-        "placement": "GPU",
-        "accept": 0.63254,
-        "degeneracy": 0.0,
-        "oom": 0,
-        "mean_draft_len": ""
+        "mean_draft_len": 2.28
       },
       {
         "n_max": 2,
         "p_min": 0.5,
-        "tps": 55.8,
-        "tokens": 2892,
+        "tps": 54.6,
+        "tokens": 2710,
         "placement": "GPU",
-        "accept": 0.61161,
+        "accept": 0.59613,
         "degeneracy": 0.0,
         "oom": 0,
-        "mean_draft_len": ""
+        "mean_draft_len": 2.12
       }
     ],
-    "tuning_written_at": "2026-09-08T14:18:32.276220",
+    "tuning_written_at": "2026-09-08T17:23:28.971429",
     "configured_n_max": 2,
     "configured_p_min": 0.5,
     "drafter": "in-model"
@@ -176,79 +177,67 @@
       {
         "batch": 256,
         "status": "PASS",
-        "prefill": 1078.28
+        "prefill": 1070.47
       },
       {
         "batch": 512,
         "status": "PASS",
-        "prefill": 1152.55
+        "prefill": 1153.87
       },
       {
         "batch": 1024,
         "status": "PASS",
-        "prefill": 1180.23
+        "prefill": 1178.79
       },
       {
         "batch": 2048,
         "status": "PASS",
-        "prefill": 1167.21
+        "prefill": 1157.59
       },
       {
         "batch": 4096,
         "status": "PASS",
-        "prefill": 1111.22
+        "prefill": 1108.29
       },
       {
         "batch": 1088,
         "status": "REFINE",
-        "prefill": 1143.5
+        "prefill": 1144.0
       },
       {
         "batch": 1408,
         "status": "REFINE",
-        "prefill": 1184.92
+        "prefill": 1184.36
       },
       {
         "batch": 1664,
         "status": "REFINE",
-        "prefill": 1188.17
+        "prefill": 1182.21
       },
       {
-        "batch": 1600,
+        "batch": 1280,
         "status": "REFINE",
-        "prefill": 1156.43
+        "prefill": 1181.37
       },
       {
-        "batch": 1792,
+        "batch": 1472,
         "status": "REFINE",
-        "prefill": 1188.06
-      },
-      {
-        "batch": 1728,
-        "status": "REFINE",
-        "prefill": 1162.57
-      },
-      {
-        "batch": 1856,
-        "status": "REFINE",
-        "prefill": 1144.29
+        "prefill": 1151.16
       }
     ],
-    "best_prefill": 1180.23,
-    "pick": 1664,
+    "best_prefill": 1178.79,
+    "pick": 1408,
     "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
     "refine_points": [
       1088,
+      1280,
       1408,
-      1600,
-      1664,
-      1728,
-      1792,
-      1856
+      1472,
+      1664
     ],
     "ceiling_coarse": "4096 PASS (not probed higher)",
     "ladder_break": "2",
-    "written_at": "2026-09-08T14:07:09.654508"
+    "written_at": "2026-09-08T17:12:25.369138"
   },
   "hardware": {
     "gpu": {
@@ -274,24 +263,24 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 99.2,
-      "avg_gpu_util_pct": 86.3,
-      "avg_gpu_mem_util_pct": 83.4,
-      "cpu_stddev_pct": 2.5,
-      "peak_vram_mib": 7847,
-      "peak_power_w": 164.91,
-      "peak_temp_c": 66,
-      "peak_clocks_sm_mhz": 1957,
+      "avg_cpu_pct": 98.0,
+      "avg_gpu_util_pct": 88.3,
+      "avg_gpu_mem_util_pct": 85.8,
+      "cpu_stddev_pct": 4.4,
+      "peak_vram_mib": 7709,
+      "peak_power_w": 166.5,
+      "peak_temp_c": 67,
+      "peak_clocks_sm_mhz": 1950,
       "peak_clocks_mem_mhz": 7301,
-      "final_vram_mib": 7847,
+      "final_vram_mib": 7709,
       "final_temp_c": 61,
-      "final_power_w": 51.33,
-      "ram_used_mib": 45701,
-      "rss_mib": 1976,
-      "sample_count": 23
+      "final_power_w": 47.99,
+      "ram_used_mib": 46587,
+      "rss_mib": 1931,
+      "sample_count": 21
     }
   },
   "propagated": true,
   "propagated_from": "gemma-4-12b-q4-qat-mtp-16k",
-  "propagated_date": "2026-09-08T14:19:54.950231"
+  "propagated_date": "2026-09-08T18:49:49.448378"
 }
