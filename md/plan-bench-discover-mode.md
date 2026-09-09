@@ -1511,3 +1511,107 @@ Every record has `tuned == configured == loaded`, `placement_baseline` set, a co
 **Option for the user (not applied).** Default `REFINE_MODE` to `coarse` when the ladder sets `MODE=CPU`, unless `--refine=64` was passed explicitly; log the reason. GPU models keep 64, where refinement has found real 2 to 5% gains (gemma-26b 8K 3072, gemma-12b 1408 to 1664, lfm 4K 3520). Estimated saving: 10 to 15 min per CPU-compute head, about 2 to 3 hours across the remaining catalogue.
 
 **Cosmetic.** `inherit_json` logs `MTP values NOT inherited (parent tuning_status=not_mtp)` for non-MTP families; it should say the parent is not an MTP model.
+
+---
+
+## 49. GLM family run, 00:39 onward (2026-09-09) — one real failure, one confirmed waste
+
+`bench_20260909-0039.log`, still running at 07:17 (6 h 38 m for 6 heads, one of them twice). All six are non-MTP and CPU-compute; mtpcheck, ladder, MODE=CPU handling, confirms, records and sibling inheritance are all correct. Two things need action and one needs a look.
+
+### 49.1 Real failure: `SERVED_GRACE` is too tight for the largest saturation requests
+
+`glm-4.7-23b-a3b-flash-reap-q4-128k` failed its bisect at 05:26 after four consecutive `sat-size: cold-load hang (no proxy line in 140s)` retries. The same model had served every ladder and refinement probe minutes earlier, and served fine on the re-run at 06:58. `glm-4.7-30b-a3b-flash-q4-198k` hit the same hang once at 180 s and recovered on attempt 2.
+
+`SERVED_GRACE = 60 + ctx/65536*40` → 100 s at 64K, 140 s at 128K, 180 s at 198K. It scales with context, but what actually varies is model load time and request-body size. Observed cold load on a GLM head: 111 s (`1.51.637.572` on the 23b-64k mtpcheck line). The saturation sizing body at 128K is 524 KB, at 198K is 1 MB; ladder probes are 82 KB. The hang is intermittent and correlates with the largest bodies, and 140 s does not absorb it.
+
+**Change K.** Raise the base: `SERVED_GRACE=$((180 + CTX / 65536 * 40))` → 220 s / 260 s / 300 s. The cost falls only on a genuinely dead model (three attempts, so worst case grows from about 7 min to 15 min); the benefit is not losing a 25-minute bisect to a transient. Better still, add the model file size: `+ model_gb * 5`. Do not lower the retry count.
+
+Recovery behaviour was correct: the pre-pass failure left `RESET_DONE` unset, so the main loop re-ran the head from scratch. That is the design working, but it costs a second full bisect and can fail the same way.
+
+### 49.2 Confirmed: 64-token refinement buys nothing on CPU-compute models
+
+Third and largest sample (§47, §48 were the first two). Every head: bracket [4096, 16384], nine golden steps, 13 probes, 16 to 22 minutes.
+
+| head | best rung | final pick | gain |
+|---|---|---|---|
+| 30b 64K | 8192 = 821.92 | 8192 | 0% |
+| 30b 128K | 8192 = 814.77 | 8064 = 815.55 | +0.10% |
+| 30b 198K | 8192 = 796.68 | 8448 = 802.04 | +0.67% |
+| 23b 64K | 8192 = 842.61 | 8768 = 843.66 | +0.12% |
+| 23b 128K | 8192 = 830.12 | 8192 | 0% |
+| 23b 198K | 8192 = 819.11 | 8384 = 819.74 | +0.08% |
+
+Mean gain 0.16%, max 0.67%, all inside the ±2 to 5% run-to-run noise of this class. Cost so far: about 1 h 45 m of the 6 h 38 m. Every head picked 8192 from the ladder and every refined pick landed within 8064 to 8768 of it.
+
+### 49.2a NOT A CHANGE REQUEST — author decision, do not implement
+
+**Implementing agent: stop here. This section is evidence, not an instruction. Do not change any default, constant or code path from it. It is recorded so the user can make a design decision with numbers in front of them, and that decision has not been made.**
+
+The measurements above establish only that 64-token refinement on CPU-compute models produced a mean 0.16% prefill gain for 16 to 22 minutes per head in this run. They do not establish what the default should be. That is a judgement about what the tool is for, and it belongs to the user:
+
+- Refinement to 64 is the accepted default from §41 and §43, chosen deliberately after §38. The user's stated preference is a fully measured record at a resolved value, not a rung with an argument attached.
+- The same code that looks wasteful here is what found 3072 on gemma-26b 8K (+4.7%), 640 at the qwen 256K ceiling edge (+25% batch), and 3520 on lfm 4K (+2.9%). The search cannot know in advance which class it is in.
+- A per-class default would make records less uniform: two models in the same catalogue would carry picks resolved at different granularities, and the JSON's `refine_mode` would be the only signal.
+- `--refine=coarse` and `--refine=off` already exist (§42 Change H) and can be passed per run, so nothing is blocked either way.
+
+If the user asks for a change, the shape would be: default `REFINE_MODE=coarse` when the ladder sets `MODE=CPU`, unless `--refine=64` is passed explicitly; GPU models keep 64. Estimated saving 10 to 20 min per CPU-compute head. **Until the user says so in as many words, the default stays at 64 and this section is closed.** The same standing applies to the identical suggestion in §48.
+
+### 49.3 Look at, not act on: degeneracy 0.2168
+
+`glm-4.7-23b-a3b-flash-reap-q4-198k` recorded `degeneracy: 0.2168` on its bench decode, above the 0.15 WARN line, on natural-stop output of 3301 tokens. Every other record in this run is 0.0. This is diagnostic only and gates nothing, but it is the first non-zero degeneracy seen outside the forced-generation era, and this is a REAP expert-pruned model. Worth reading the generated text once before trusting that model's output quality.
+
+### 49.4 Cosmetic: the poll's "Request complete after ~Ns" understates by the sampling overhead
+
+On the 23b-198k bench the poll printed `Request complete after ~102s` while the server reported 121 s of decode. Nothing was printed early: the poll loop is only a monitor, and `wait $PID` immediately after it blocks with no cap until curl exits, so the response is always complete before it is parsed. The record is right too, `wall_time_s: 127` comes from real clock timestamps.
+
+The label is wrong because it computes `i * 2`, assuming each iteration is exactly the 2-second sleep. Each iteration is really the sleep plus a `top -bn1` and an `nvidia-smi`, about 2.35 s on this host. Evidence from that block: 51 samples, first at 06:55:59 and last at 06:57:59, so 120 s of real elapsed reported as 102 s, an 18% understatement.
+
+**Fix.** Stamp `date +%s` before the loop and print the real difference, the same way `wall_time_s` is already computed. One line in `cmd_bench` and one in `decode_sample`. Worth doing because this label is the only elapsed figure visible while a run is in progress, and it makes long decodes look faster than they are.
+
+---
+
+## 50. A failed family head still lets its siblings inherit a stale record (2026-09-09)
+
+Found while tracing why the main loop appeared to start before the heads were finished. It had not: the pre-pass attempted all six GLM heads between 00:39 and 06:58, five succeeded, and `glm-4.7-23b-a3b-flash-reap-q4-128k` failed its bisect at 05:26. `reset_parent_full` is called as `reset_parent_full "$PARENT_NAME" || true`, so the failure is swallowed and `RESET_DONE` is never set for that head. The main loop then re-runs it in place, which is correct. The defect is what happens to its siblings.
+
+### 50.1 The defect
+
+`maybe_inherit`'s sibling branch is:
+
+```
+  # Sibling: inherit from parent if parent has JSON
+  if has_json "$PARENT"; then
+    inherit_json "$PARENT" "$MODEL"
+    return 0
+  fi
+```
+
+It asks only whether a parent JSON exists on disk. It never asks whether the parent was benched successfully in this run. A head can fail its bisect, leave a months-old record in place, and its siblings will copy that record and stamp it with a fresh `propagated_date`. Nothing in the sibling's record or in the verdict table says the parent's bench failed.
+
+Live example right now. The 128K head's record on disk:
+
+| field | value |
+|---|---|
+| bench_date | 2026-09-06T07:48 (three days old) |
+| bench_method | the pre-refactor path |
+| discover block | absent |
+| batch | 8192 |
+
+If the retry currently running fails the same way, indices 25 to 27 will copy that into the three 128K siblings with today's propagation date. The failure would be invisible in the resulting records.
+
+Ordering is not the protection here. It happens to hold because `family_of` returns the first matching section, so a head always has a lower index than its siblings. But that is incidental, and it does not help when the head fails.
+
+### 50.2 Change L (required before the next catalogue run)
+
+In `maybe_inherit`'s sibling branch, when `RESET_PARENT` is 1, require the parent to be marked done this run:
+
+```
+  if [ "$RESET_PARENT" -eq 1 ] && [ "${RESET_DONE[$PARENT]:-0}" -ne 1 ]; then
+    log "  $MODEL: NOT inherited — parent $PARENT was not benched successfully this run"
+    return 0   # handled: skip, do not copy a stale record
+  fi
+```
+
+Record the verdict as `SKIPPED (parent bench failed)` for all four steps, matching how the suite already reports a head whose bisect failed. Leave the behaviour unchanged when `RESET_PARENT` is 0, since then an existing parent record is the intended source.
+
+Acceptance: force a head's bisect to fail (a bogus `ctx-size`, or `MIN_DECODE_TOKENS` set absurdly high), run the suite over that family with `--reset-parent`, and confirm the siblings' JSON files are untouched (mtime unchanged) and the verdict table shows the skip with its reason.
