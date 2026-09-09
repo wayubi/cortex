@@ -1615,3 +1615,51 @@ In `maybe_inherit`'s sibling branch, when `RESET_PARENT` is 1, require the paren
 Record the verdict as `SKIPPED (parent bench failed)` for all four steps, matching how the suite already reports a head whose bisect failed. Leave the behaviour unchanged when `RESET_PARENT` is 0, since then an existing parent record is the intended source.
 
 Acceptance: force a head's bisect to fail (a bogus `ctx-size`, or `MIN_DECODE_TOKENS` set absurdly high), run the suite over that family with `--reset-parent`, and confirm the siblings' JSON files are untouched (mtime unchanged) and the verdict table shows the skip with its reason.
+
+---
+
+## 51. Author review of Changes K and L and the §49.4 fix (2026-09-09)
+
+Commit `507399c`. **Two of three are correct and complete. Change L has a regression on the exact scenario that motivated it, and must be fixed before the next `--reset-parent` run.**
+
+### 51.1 Correct
+
+**Change K (§49.1).** A `served_grace` helper replaces the inline arithmetic, the base moves from 60 s to 180 s, and all eight call sites are converted (`detect_mtp`, `cmd_mtpverify`, both MTP tuners, both bisect variants, the test-batch helper, `cmd_bench`); the fallback default is raised to match. Grace becomes 220 s at 64K, 260 s at 128K, 300 s at 198K, against the 140 s that lost a head twice on the GLM 128K model.
+
+**§49.4 poll elapsed.** `POLL_T0` is stamped before each poll loop and the message prints the real difference, in both `decode_sample` and `cmd_bench`. The `local` inside `decode_sample`'s retry loop correctly re-stamps per attempt.
+
+### 51.2 Regression in Change L — required fix
+
+The guard is right, but `RESET_DONE` is written in exactly one place in the whole script, `reset_parent_full` (line 4625). The main loop never sets it, not even when it benches a family head successfully. So:
+
+| scenario | RESET_DONE | sibling outcome | correct? |
+|---|---|---|---|
+| head succeeded in the pre-pass | set | inherits fresh record | yes |
+| head failed everywhere | unset | skipped, verdict records why | yes, this is the point of Change L |
+| **head failed in the pre-pass, succeeded on the main-loop retry** | **unset** | **skipped** | **no — the record is fresh and should be inherited** |
+
+The third row is precisely what happened on 2026-09-09: `glm-4.7-23b-a3b-flash-reap-q4-128k` failed its pre-pass bisect at 05:26, was re-run by the main loop, passed at 08:06, and its three siblings correctly inherited the new record. With this commit those three would instead be skipped, and the family would end the run with one fresh head and three stale sibling records left untouched on disk. That is a worse outcome than before the change.
+
+Verified in isolation by extracting `maybe_inherit` and stubbing its dependencies:
+
+```
+case A: head succeeded in the PRE-PASS (RESET_DONE set)
+  -> inherit_json HEAD -> SIBLING (record copied)      rc=0 flag=0
+case B: head failed pre-pass, RECOVERED in main loop
+  SIBLING: NOT inherited — parent HEAD was not benched successfully this run   rc=0 flag=1
+```
+
+**Fix.** In `run_full_suite`'s main loop, mark a family head as done when its own bench succeeds, so later siblings see it:
+
+```
+      if ( cmd_bench ); then
+        VERDICTS["$NAME|bench"]="OK"
+        # §51.2: a head re-run here after a failed pre-pass is a valid fresh
+        # source for its siblings, which are processed later in this same loop.
+        [ "$NAME" = "$(family_of "$NAME")" ] && RESET_DONE["$NAME"]=1
+      else
+```
+
+Siblings always carry a higher index than their head (`family_of` returns the first matching section), so the flag is always set before any sibling reads it.
+
+**Acceptance.** Force a head's bisect to fail on its first attempt only, run the family with `--reset-parent`, and confirm: the head shows OK in the verdict table, its siblings show inherited rather than skipped, and their JSON mtimes match the head's. Then force a permanent failure and confirm the siblings show `SKIPPED (parent bench failed)` with their files untouched.
