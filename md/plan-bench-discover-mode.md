@@ -1914,3 +1914,49 @@ The user had already given this instruction: **if a `.downloadInProgress` file e
 So this is not a case of a vague instruction being reasonably missed. A precise, correct instruction was lost because it was never recorded, and the gap was then filled with a worse design defended by an assumption I could have checked in thirty seconds. §56.1 and §56.2 are corrected to use the marker as the primary signal.
 
 **Standing rule going forward:** any instruction the user gives in conversation that changes behaviour gets written into this plan in the same turn it is given, in the user's own terms. An instruction that lives only in chat is an instruction that will be lost. And before writing "do not do X" into a plan, verify X against the source rather than an assumption — a plan that countermands a correct instruction is worse than a plan that omits it.
+
+---
+
+## 57. Author review of Changes N and O (2026-09-10)
+
+Commits `072a8ce` and `8111dbf`. **The core of both changes is right. Three gaps, one of which re-opens the exact failure §56 exists to prevent.**
+
+### 57.1 Correct
+
+`ensure_model_cached` uses `*.downloadInProgress` as the primary signal, exactly as §56.1 specifies, with the `hf` → `hub/models--<org>--<repo>` mapping and `refs/main` as the completion marker. It never restarts the container. Size sampling is correctly demoted to a liveness test on the partial file, `DL_POLL_SEC` and `DL_IDLE_MAX` match the plan, and progress lines report MB fetched. Placement in `run_full_suite` is right: after the inheritance gate, so siblings never pay for it. `detect_mtp` now writes a `stall` status and exits 2, `cmd_mtpcheck` recognises it and returns 2, and `MTP_DIE_STATUS` is cleared so the EXIT trap cannot overwrite the stall status with `not_mtp`. That last detail was not in the plan and is a good catch.
+
+### 57.2 Required — a stalled model is still benched
+
+`run_full_suite` records `SKIPPED (download stall)` for the mtpcheck step and then **falls straight through to `cmd_bisect`**. There is no `continue`. §55.3 item 1 is explicit: "skip the model entirely rather than benching it as non-MTP. A model whose weights will not load must not produce a record at all."
+
+Two consequences, both bad. If the weights truly are not there, every ladder rung stalls at `SERVED_GRACE` × 3 attempts, roughly 11 to 15 minutes per rung, before the run finally gives up. If the stall was transient and the model loads a few minutes later, the bisect succeeds and writes a record with `spec-type` restored away — which is precisely the wrong record the 22:34 run produced.
+
+**Fix:** make the stall branch skip the model, the same shape as the `ensure_model_cached` failure path directly above it:
+
+```
+      if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
+        lshow "  $NAME: mtpcheck STALL — skipping model (weights never served)"
+        for s in mtpcheck bisect mtp bench; do
+          VERDICTS["$NAME|$s"]="SKIPPED (mtpcheck stall)"
+        done
+        continue
+      fi
+```
+
+Apply the same skip in `reset_parent_full`, whose mtpcheck step also proceeds to bisect after a stall.
+
+### 57.3 Required — the 60s fallback assumes success on the one case we know is unsafe
+
+If no `*.downloadInProgress` appears within 60 s **and `refs/main` does not exist**, the function returns 0 with the comment "assume cached". At that point we know for a fact the model has never been fully fetched: `refs/main` is absent. Assuming cached is the least safe reading available.
+
+60 s is easy to exceed legitimately. The router may first unload a 22 GB model, the HTTP connection may be slow to establish, or the fetch may be resolving the repo. Any of those returns 0 and hands an un-downloaded model to `mtpcheck`, reproducing the original failure.
+
+**Fix:** split the two cases. If `refs/main` exists, cached, return 0. If it does not, keep waiting for the marker on the same idle counter used for the download itself (`DL_IDLE_MAX` × `DL_POLL_SEC` = 3 min of nothing) and return 2 on expiry. Never return 0 while `refs/main` is absent.
+
+### 57.4 Required — only one subcommand got the pre-flight
+
+`ensure_model_cached` is called from `reset_parent_full`, `run_full_suite` and the `mtpcheck` dispatch. §56.2 says "at the top of each subcommand so direct invocations get it too". `bisect`, `mtp`, `bench` and `mtpverify` have no pre-flight, so `bench.sh bisect <uncached-model>` still walks into a download with the old ctx-scaled grace. Add the same guard to each, skipping the model with a clear message on return 2.
+
+### 57.5 Acceptance
+
+The §56.3 cases still stand and none have been run yet. Case 2 (move a repo's cache aside) is the one that matters, and it should now also confirm that a stalled model produces **no** JSON record and **no** models.ini change. Add a fourth: with the cache moved aside, run `bench.sh bisect <model>` directly and confirm the pre-flight fires there too.
