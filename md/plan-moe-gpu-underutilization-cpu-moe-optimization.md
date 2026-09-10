@@ -428,11 +428,31 @@ every layer's attention/shared tensors stay GPU-resident while only the (much la
 only-fractionally-active) expert tensors move to CPU — a strictly better placement than today's
 whole-layer split, not merely an alternative one.
 
-Confirm this empirically rather than assuming it: grep a candidate model's load log for
-`load_tensors: layer N assigned to` (or the equivalent line in this llama.cpp build) to see
-whether attention tensors for the "spilled" layers are currently CPU- or GPU-resident. This
-should be a five-minute check before writing the search code, since it changes how much benefit
-to expect.
+**Update (2026-09-10):** checked this against the live container. At default log verbosity,
+this build's `load_tensors:` per-tensor device-assignment lines are not emitted — only
+"unused tensor" warnings for architecture-mismatched blocks appear. Two things were confirmed
+directly, though:
+
+- **Real tensor names**, read from `tiel-coder-35b-a3b-q4-mtp-128k-think-coder`'s live load log
+  (`peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP:UD-Q4_K_XL`, currently loaded on
+  `cortex-llama-cpp-1`): `ffn_down_exps`, `ffn_gate_exps`, `ffn_up_exps` (routed experts, large),
+  `ffn_gate_shexp`, `ffn_up_shexp`, `ffn_down_shexp` (shared expert, ~1 MiB each — negligible),
+  `ffn_gate_inp` (router). This confirms the §4/§9 sub-tensor regex names
+  (`.ffn_(up|down)_exps.`) are correct for this architecture family, not assumed.
+- **A separate architecture-specific MTP block exists** (`blk.40.nextn.*`: `eh_proj`, `enorm`,
+  `hnorm`, `shared_head_norm`), logged as "unused" in this particular load because that run
+  didn't engage `spec-type`. This is the draft model referred to in §11 step 8.5 — its own
+  routed-expert tensors are governed by `--spec-draft-cpu-moe`/`--spec-draft-n-cpu-moe`, fully
+  separate from the main model's `--n-cpu-moe`. Concrete confirmation, not just a stated
+  assumption, that these two knobs are architecturally distinct.
+
+The per-layer device-assignment question (does today's default `ngl=-1` fitting spill whole
+layers, or already spare attention?) still needs a direct check, but it is **not** the free
+grep this section originally implied — it requires `--verbose` (`-v`) or `--log-verbosity N`
+(confirmed present in `llama-server --help`) on one load. Do this once, on one candidate model,
+as the actual first step of implementation (before writing the `--n-cpu-moe` search loop, not
+before finalizing this plan) — reloading a candidate purely to check a log line is not worth
+doing outside of active implementation work.
 
 ## 16. Expected Outcome
 
