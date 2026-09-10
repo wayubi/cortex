@@ -1732,3 +1732,39 @@ The cost is the difference between a rung failure and a run failure. A recognise
 ### 53.4 Note
 
 The `-think` sibling was correctly reported as `SKIPPED (parent bench failed)` in the verdict table and its record was left untouched. Change L is working as intended on a live failure.
+
+---
+
+## 54. Author sign-off on Change M (2026-09-09)
+
+**Accepted, verified by a live run of the model that had failed four times.** Commit `c695dd3`.
+
+### 54.1 Code
+
+Both halves of §53.3 are implemented. `OMG_GREP` gains `ggml_abort` and `exited with status 1`, and `CUDA error: out of memory` is broadened to `CUDA error`. `prefill_probe_sized_raw` now echoes `STALL` on `fire_request` rc 2 and `0` on every other failure; the wrapper propagates `STALL` from both the warm-up and the timed probe; the ladder aborts only on `STALL` and treats `0` as a ceiling; `discover_measure_candidate` returns 2 on `STALL` so `golden_probe`'s `||` fires.
+
+**False-positive risk on the two new patterns: checked and cleared.** The container log holds 1308 `exited with status 0` lines from normal unloads against 59 with status 1, so the pattern is precise and does not fire on a routine model swap. Every `CUDA error` occurrence in the log is a genuine fault (6 illegal-access, 5 out-of-memory); there are no benign ones.
+
+Remaining `exit 1` paths in the ladder are all genuine `fire_request` rc 2 stalls (tiny probe, residency, decode baseline, saturation, long-decode) and are correctly still fatal. The median-of-three path degrades safely if a re-sample returns `STALL`: the value is excluded by the parser and the fallback is the known-good first sample.
+
+### 54.2 Live acceptance — `qwen-3.6-35b-a3b-q4-mtp-8k`
+
+```
+ladder: 256=354.27 512=557.54 1024=828.31 2048=1107.60 4096=OOM
+  OOM at 4096 (prefill probe)
+  mode=CPU  ceiling(coarse)=2048 PASS / 4096 OOM
+  refinement (mode=64): bracket [1024, 4096]
+  golden 2176 (1109.84 t/s) > best pick 2048 — adopt as pick
+  after refinement: pick=2176
+  Saturation: PASS (prompt_tokens=8110, total=8191, ctx=8192, prefill=1082.92 t/s)
+  long-decode PASS at pick=2176
+=== DONE ===   (exit 0)
+```
+
+The crash at 4096 is now a rung failure, the ladder ends there, the ceiling edge is refined over nine points, and the pick of 2176 passes both confirm gates. models.ini is set to 2176 and the discover JSON carries the full ladder including the OOM rung. This is the same model, the same crash, and the same batch that aborted the bisect four times across two earlier runs.
+
+### 54.3 Remaining work
+
+- Run `--reset-parent` on the 8K family so `-think` inherits, and `bench` the head. That completes the catalogue: 73 of 73.
+- One cosmetic note: the ladder now logs `OOM at $B (prefill probe)` for any non-stall failure, including a crash or an unparseable response. The label is imprecise but conveys the actionable meaning and drives the ceiling logic correctly. If it is ever touched, `FAILED at $B (prefill probe: OOM or crash)` would read better.
+- §49.2a (coarse refinement default for CPU-compute models) remains a user decision, not an implementation item.
