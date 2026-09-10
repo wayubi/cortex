@@ -1763,13 +1763,15 @@ with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
     > /dev/null 2>&1 &
   local CURL_PID=$!
 
-  # Wait for the marker to appear (max 60s). If it never appears, either the
-  # model was already cached or the request was served from cache.
-  local WAIT=0
-  while [ "$WAIT" -lt 60 ]; do
+  # Wait for the marker to appear, or for refs/main to show the model loaded from
+  # cache. Use the download-monitor's idle counter (DL_IDLE_MAX × DL_POLL_SEC = 3
+  # min) rather than a fixed 60s — a slow router, a slow connection, or a large
+  # first repo resolution can legitimately exceed 60s.
+  local WAIT=0 MARKER_FOUND=0
+  while [ "$WAIT" -lt $((DL_IDLE_MAX * DL_POLL_SEC)) ]; do
     PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
-    if [ -n "$PART" ]; then break; fi
-    # If refs/main appeared while we were waiting, the model loaded from cache.
+    if [ -n "$PART" ]; then MARKER_FOUND=1; break; fi
+    # If refs/main appeared, the model loaded from cache.
     if [ -f "$REFS_MAIN" ]; then
       kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
       local SIZE
@@ -1777,16 +1779,17 @@ with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
       log "  weights cached ($SIZE)"
       return 0
     fi
-    sleep 5; WAIT=$((WAIT + 5))
+    sleep "$DL_POLL_SEC"; WAIT=$((WAIT + DL_POLL_SEC))
   done
 
-  if [ -z "$PART" ]; then
-    # No marker appeared in 60s and no refs/main — either cached (tiny probe
-    # returned fast) or a different kind of stall. If the curl exited, treat as
-    # cached (the model served from cache). If still running, the download is
-    # being served differently; assume cached.
+  if [ "$MARKER_FOUND" -eq 0 ]; then
+    # No marker appeared and refs/main absent after DL_IDLE_MAX × DL_POLL_SEC:
+    # the download never started or the server is unresponsive. Return 2 (stall)
+    # so callers skip the model — never assume cached when refs/main is absent
+    # (§57.3).
+    log "  weights not cached, no download started (${DL_IDLE_MAX}×${DL_POLL_SEC}s)"
     kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
-    return 0
+    return 2
   fi
 
   local ELAPSED=0 IDLE=0 LAST_SIZE=0
@@ -4754,6 +4757,12 @@ reset_parent_full() {
     IS_MTP=1
     log "  $(date +%H:%M:%S) mtpcheck OK for $P (MTP-capable)"
   else
+    # Change N (§55.3): check if mtpcheck wrote a stall status.
+    local MTP_SF="/tmp/mtp_status_${P}.json"
+    if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
+      log "  $(date +%H:%M:%S) mtpcheck STALL for $P — skipping model (weights never served)"
+      return 2
+    fi
     log "  $(date +%H:%M:%S) mtpcheck: NOT MTP for $P"
   fi
 
@@ -4865,13 +4874,18 @@ run_full_suite() {
     else
       IS_MTP=0
       # Change N (§55.3): detect_mtp writes a stall status file when it aborts
-      # on STALL. Check it to report the true reason.
+      # on STALL. Check it to report the true reason, and skip the model entirely
+      # — a model whose weights will not load must not produce a record at all
+      # (§55.3 item 1).
       local MTP_SF; MTP_SF="/tmp/mtp_status_${NAME}.json"
       if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
-        VERDICTS["$NAME|mtpcheck"]="SKIPPED (download stall)"
-      else
-        VERDICTS["$NAME|mtpcheck"]="SKIPPED (not MTP)"
+        lshow "  $NAME: mtpcheck STALL — skipping model (weights never served)"
+        for s in mtpcheck bisect mtp bench; do
+          VERDICTS["$NAME|$s"]="SKIPPED (mtpcheck stall)"
+        done
+        continue
       fi
+      VERDICTS["$NAME|mtpcheck"]="SKIPPED (not MTP)"
     fi
     lshow "  $(date +%H:%M:%S) finished mtpcheck for $NAME"
 
@@ -5091,17 +5105,20 @@ case "$CMD" in
   mtpverify)
     for m in "$@"; do
       MODEL=$m
+      ensure_model_cached "$m" || { echo "  $m: STALL (download failed — skipping)"; continue; }
       ( cmd_mtpverify ) || { echo "  $m: mtpverify FAILED"; continue; }
     done
     ;;
   bisect)
     MODEL=$1
     shift
+    ensure_model_cached "$MODEL" || { echo "  $MODEL: STALL (download failed — skipping)"; exit 2; }
     cmd_bisect "$MODEL" "$@"
     ;;
   mtp)
     for m in "$@"; do
       MODEL=$m
+      ensure_model_cached "$m" || { echo "  $m: STALL (download failed — skipping)"; continue; }
       ( cmd_mtp ) || { echo "  $m: mtp tuning FAILED"; continue; }
     done
     ;;
@@ -5126,6 +5143,7 @@ case "$CMD" in
         fi
         continue
       fi
+      ensure_model_cached "$m" || { echo "  $m: STALL (download failed — skipping)"; continue; }
       ( cmd_bench ) || { echo "  $m: bench FAILED"; continue; }
     done
     ;;
