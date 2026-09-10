@@ -39,6 +39,8 @@ OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate call
 POLL_MIN_SAMPLES=3
 POLL_MAX_SAMPLES=80
 MAX_BATCH=16384          # batch search cap: never probe above min(ctx, MAX_BATCH)
+DL_POLL_SEC=30           # Change O (§56): seconds between download-progress samples
+DL_IDLE_MAX=6            # Change O: 30s × 6 = 3 min of no progress → stall
 MTP_TIE_NATS=0.25        # mtpverify: gap below this (nats) at the divergence token = a near-tie, premise holds
 # Decode measurement (§5): speed samples use a natural-stop prompt (NO ignore_eos)
 # so a looping / forced decode cannot inflate t/s or acceptance. A sample shorter
@@ -1708,6 +1710,131 @@ for b, p in pts[:$SHORTLIST_SIZE]:
 # Snapshots the model's section to a temp file, sets MTP config, restarts, probes.
 # MTP supported = probe succeeds AND log shows MTP engagement.
 # On failure, restores the original section and exits 1 (caller decides).
+# Change O (§56): wait for a model's HF weights to be fully cached before any timed
+# work. llama.cpp's downloader writes a *.downloadInProgress marker during fetch
+# and renames it away only on completion (common/download.cpp:369-404). This
+# marker, not growth sampling, is the primary signal — it survives container
+# restarts, is instant to check, and distinguishes "never fetched" from
+# "fetching" from "complete". The function fires ONE load request to start a
+# download, then monitors the marker until it disappears (or the download stalls).
+# It never restarts the container (restarts abort in-flight downloads). Returns 0
+# when cached/downloaded, 2 on a genuine stall (3 min of no progress).
+ensure_model_cached() {
+  local M=$1
+  local HF
+  HF=$(python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'\['+re.escape('$M')+r'\](.*?)(?=\n\[|\Z)', c, re.DOTALL)
+sec = m.group(1) if m else ''
+hf = re.search(r'^\s*hf\s*=\s*(\S+)', sec, re.MULTILINE)
+print(hf.group(1) if hf else '')
+" 2>/dev/null || echo "")
+  [ -z "$HF" ] && return 0
+  local REPO="${HF%%:*}"
+  local HUB_DIR="$ROOT/.local/llama-cpp_data/hub/models--$(echo "$REPO" | tr '/' '--')"
+  local REFS_MAIN="$HUB_DIR/refs/main"
+
+  # Check for an active or interrupted download (primary signal).
+  local PART=""
+  PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
+
+  # Complete: refs/main exists and no partial file.
+  if [ -z "$PART" ] && [ -f "$REFS_MAIN" ]; then
+    local SIZE
+    SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
+    log "  weights cached ($SIZE)"
+    return 0
+  fi
+
+  log "  preparing weights (hf=$HF)"
+
+  # Start or resume a download. Fire one request to trigger llama.cpp's -hf loader
+  # (which fetches the model), but do NOT wait_served — the download may take
+  # minutes. The curl runs in the background; we only care about the marker.
+  python3 -c "
+import json
+payload = {'model':'$M','messages':[{'role':'user','content':'Say hello'}],'max_tokens':8}
+with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
+" 2>/dev/null
+  logmark
+  curl -s --max-time 7200 -X POST http://localhost:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' -d @/tmp/cache_probe.json \
+    > /dev/null 2>&1 &
+  local CURL_PID=$!
+
+  # Wait for the marker to appear (max 60s). If it never appears, either the
+  # model was already cached or the request was served from cache.
+  local WAIT=0
+  while [ "$WAIT" -lt 60 ]; do
+    PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
+    if [ -n "$PART" ]; then break; fi
+    # If refs/main appeared while we were waiting, the model loaded from cache.
+    if [ -f "$REFS_MAIN" ]; then
+      kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
+      local SIZE
+      SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
+      log "  weights cached ($SIZE)"
+      return 0
+    fi
+    sleep 5; WAIT=$((WAIT + 5))
+  done
+
+  if [ -z "$PART" ]; then
+    # No marker appeared in 60s and no refs/main — either cached (tiny probe
+    # returned fast) or a different kind of stall. If the curl exited, treat as
+    # cached (the model served from cache). If still running, the download is
+    # being served differently; assume cached.
+    kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
+    return 0
+  fi
+
+  local ELAPSED=0 IDLE=0 LAST_SIZE=0
+  LAST_SIZE=$(stat -c %s "$PART" 2>/dev/null || echo 0)
+  if [ "$LAST_SIZE" -gt 0 ]; then
+    log "  downloading weights: $((LAST_SIZE / 1048576)) MB fetched"
+  fi
+
+  # Monitor until complete or stall. Never restart the container while downloading.
+  while :; do
+    sleep "$DL_POLL_SEC"
+    ELAPSED=$((ELAPSED + DL_POLL_SEC))
+    PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
+
+    # Download complete: marker gone, refs/main present.
+    if [ -z "$PART" ] && [ -f "$REFS_MAIN" ]; then
+      local SIZE
+      SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
+      log "  download complete ($SIZE, ${ELAPSED}s)"
+      kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
+      return 0
+    fi
+
+    # Still downloading: check progress.
+    if [ -n "$PART" ]; then
+      local CUR_SIZE
+      CUR_SIZE=$(stat -c %s "$PART" 2>/dev/null || echo 0)
+      local DELTA=$((CUR_SIZE - LAST_SIZE))
+      if [ "$DELTA" -gt 0 ]; then
+        log "    downloading: $((CUR_SIZE / 1048576)) MB (+$((DELTA / 1048576)) MB, ${ELAPSED}s)"
+        LAST_SIZE=$CUR_SIZE; IDLE=0
+      else
+        IDLE=$((IDLE + 1))
+      fi
+    else
+      # Marker disappeared but refs/main not found — possibly the file was
+      # renamed in-flight. Wait one more cycle to confirm.
+      IDLE=$((IDLE + 1))
+    fi
+
+    if [ "$IDLE" -ge "$DL_IDLE_MAX" ]; then
+      log "  download stalled (${DL_IDLE_MAX}×${DL_POLL_SEC}s — no progress)"
+      kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
+      return 2
+    fi
+  done
+}
+
 detect_mtp() {
   local CTX=$(read_ctx)
   SERVED_GRACE=$(served_grace "$CTX")
@@ -1744,7 +1871,14 @@ with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
     if [ "$RC" -eq 2 ]; then
       log "  STALL during MTP detection (network/HF fetch) — aborting"
       restore_section "$SNAP"
-      exit 1
+      # Change N (§55.3): write stall status so cmd_mtpcheck can distinguish
+      # this from NOT MTP. A model whose weights won't load must not produce a
+      # record at all.
+      MTP_STAT="$(mtp_status_file)" python3 -c "
+import json, os, datetime
+open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'stall','reason':'model never served (network/download failure)','written_at':datetime.datetime.now().isoformat()}))
+" 2>/dev/null || true
+      exit 2
     fi
     wait "$FIRE_PID" 2>/dev/null || true
 
@@ -2098,7 +2232,18 @@ open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_run','written_a
 " 2>/dev/null || true
     return 0
   else
-    MTP_STAT="$(mtp_status_file)" python3 -c "
+    # Check if detect_mtp wrote a stall status (it catches STALL itself and writes
+    # to the status file before exit 2). Return 2 so callers can skip the model
+    # rather than recording it as non-MTP (Change N, §55.3).
+    local SF; SF=$(mtp_status_file)
+    if [ -f "$SF" ] && grep -q '"stall"' "$SF" 2>/dev/null; then
+      log "  mtpcheck: STALL (model never served — network/download failure)"
+      # Clear MTP_DIE_STATUS so the EXIT trap does not overwrite the stall status
+      # file with "not_mtp".
+      MTP_DIE_STATUS=""
+      return 2
+    fi
+    MTP_STAT="$SF" python3 -c "
 import json, os, datetime
 open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_mtp','written_at':datetime.datetime.now().isoformat()}))
 " 2>/dev/null || true
@@ -4596,6 +4741,12 @@ reset_parent_full() {
   log ""
   lshow "=============== RESET PARENT: $P ==============="
 
+  # Change O (§56): wait for weights to be cached before any timed work.
+  ensure_model_cached "$MODEL" || {
+    log "  $(date +%H:%M:%S) $P: download stall — skipping model"
+    return 2
+  }
+
   # step 1: mtpcheck (detect_mtp uses exit 1 → must be subshelled)
   log "  $(date +%H:%M:%S) starting mtpcheck for $P"
   local IS_MTP=0
@@ -4697,6 +4848,15 @@ run_full_suite() {
       continue
     fi
 
+    # Change O (§56): wait for weights to be cached before any timed work.
+    ensure_model_cached "$NAME" || {
+      lshow "  $(date +%H:%M:%S) $NAME: download stall — skipping model"
+      for s in mtpcheck bisect mtp bench; do
+        VERDICTS["$NAME|$s"]="SKIPPED (download stall)"
+      done
+      continue
+    }
+
     # step 1: mtpcheck
     lshow "  $(date +%H:%M:%S) starting mtpcheck for $NAME"
     if ( cmd_mtpcheck ); then
@@ -4704,7 +4864,14 @@ run_full_suite() {
       VERDICTS["$NAME|mtpcheck"]="OK"
     else
       IS_MTP=0
-      VERDICTS["$NAME|mtpcheck"]="SKIPPED (not MTP)"
+      # Change N (§55.3): detect_mtp writes a stall status file when it aborts
+      # on STALL. Check it to report the true reason.
+      local MTP_SF; MTP_SF="/tmp/mtp_status_${NAME}.json"
+      if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
+        VERDICTS["$NAME|mtpcheck"]="SKIPPED (download stall)"
+      else
+        VERDICTS["$NAME|mtpcheck"]="SKIPPED (not MTP)"
+      fi
     fi
     lshow "  $(date +%H:%M:%S) finished mtpcheck for $NAME"
 
@@ -4910,6 +5077,10 @@ case "$CMD" in
   mtpcheck)
     for m in "$@"; do
       MODEL=$m
+      # Change O (§56): wait for weights before mtpcheck.
+      if ! ensure_model_cached "$m"; then
+        echo "  $m: STALL (download failed — skipping)"; continue
+      fi
       if ( cmd_mtpcheck ); then
         echo "  $m: MTP-capable (spec-type=draft-mtp set)"
       else
