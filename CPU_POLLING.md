@@ -1,5 +1,9 @@
 # How to bench llama-server correctly (CPU + prefill + decode)
 
+**What this file is for.** The measurement constants in `tools/bench.sh` look arbitrary until you know what they cost to learn. This is that record: each rule below was paid for by a wrong benchmark, and each one is still enforced somewhere in the script. Before "optimising" a poll window, a decode length or a prompt size, read the failure it was chosen to prevent.
+
+The procedure itself is automated. You do not run these steps by hand; `bench.sh` does. See `AGENTS.md` for the current pipeline.
+
 ## Problem 1: CPU sampling timing
 The model doesn't load into VRAM until the first request arrives. If you `sleep` too long or sample before the request, you're measuring idle time, not decode.
 
@@ -13,7 +17,7 @@ A short prompt (~12 tokens) produces garbage prefill numbers (~30-55 t/s) that a
 - Use `max_tokens=4000` (sustained decode, ~160s)
 - Poll CPU for 80 samples × 2s = 160 seconds
 - Average CPU from sample 10+ (skip warmup)
-- Classify: avg CPU < 100% = **GPU**, avg CPU > 200% = **CPU**, 100-200% = **AMBIGUOUS**
+- Classify from the average (see rule 6 for the current thresholds)
 
 **Example of the trap:**
 ```
@@ -27,16 +31,22 @@ A short prompt (~12 tokens) produces garbage prefill numbers (~30-55 t/s) that a
 
 ## Key rules
 
-1. **Fire request FIRST** — model loads on first request, not at container start
-2. **Wait for VRAM > 2GB** — confirms model weights are loaded
-3. **Use `top -bn1 | grep llama-s | head -n1`** — `ps -o %cpu=` gives instantaneous snapshot and can miss spikes
-4. **Default max_tokens=4000** — long decode reveals true placement
-5. **Poll CPU for 160s** — 80 samples × 2s. Never use 50s.
-6. **Placement classification** — average CPU from sample 10+: <100% = GPU, >200% = CPU, 100-200% = AMBIGUOUS
-7. **Coder variants are independent models** — bench them separately, no copying between entries
-8. **PREFILL BENCHMARK: prompt MUST be long** — ~75% of ctx-size tokens. A 12-token prompt gives garbage prefill numbers (~30-55 t/s) that are just setup overhead.
-9. **Prompt size per variant** — 4k ctx → 3000 tokens, 8k ctx → 6000 tokens, 16k ctx → 12000 tokens
-10. **Don't assume prefill numbers are comparable across different prompt sizes** — only compare prefill within the same prompt size (same ctx variant)
+Each rule names where it is enforced, so a change to the code can be checked against the reason for the rule.
+
+1. **Fire the request FIRST** — the model loads on the first request, not at container start. *(`fire_request`, used by every probe.)*
+2. ~~Wait for VRAM > 2GB to confirm weights are loaded.~~ **Superseded.** Readiness is now detected from the router's `proxy_reques` log line, which is a direct signal that the request is being served rather than a proxy for it. *(`wait_served`.)*
+3. **Use `top -bn1 | grep llama-s | head -n1`** — `ps -o %cpu=` gives an instantaneous snapshot and can miss spikes. *(`residency_probe`, `decode_sample`, `cmd_bench`.)*
+4. **Default `max_tokens=4000`** — a long decode reveals true placement. Clamped to the context size on small-ctx models. *(`decode_sample`, `cmd_bench`.)*
+5. **Poll for 160s** — 80 samples × 2s. Never use 50s. *(`POLL_MAX_SAMPLES=80`.)* Note the poll is a monitor only; a `wait` after it blocks with no cap until the request actually finishes.
+6. **Placement classification is BINARY** — there is no ambiguous verdict. `classify_placement` returns CPU when the process is above 200%, GPU when it is below `GPU_CPU_MAX` (150%) with GPU utilisation above 25%, and otherwise decides on GPU utilisation alone. *(Shared by `residency_probe`, `decode_sample` and `cmd_bench`.)*
+   **This replaces the old three-way rule** (<100% GPU, >200% CPU, 100-200% AMBIGUOUS). The 100% threshold was wrong: a GPU-resident llama.cpp keeps exactly one host thread busy feeding the GPU, so it reads 100-110% and was being classified as ambiguous. A real spill measures 270-1600%.
+7. **Coder and think variants INHERIT from their family head** — they are not benched separately. A family is every entry sharing the same `hf` and the same `ctx-size`. *(`family_of`, `inherit_json`, `maybe_inherit`.)*
+   **This reverses the old rule** ("bench them separately, no copying"), which predated family inheritance. Sampling parameters, the reasoning toggle and the chat template do not change throughput. The exception is near the memory ceiling, where `reasoning = on` has sustained a slightly larger batch than `off` on the same GGUF and ctx; bench those with `--no-inherit`.
+8. **PREFILL BENCHMARK: the prompt MUST be long** — ~75% of ctx-size tokens. A 12-token prompt gives garbage numbers (~30-55 t/s) that are just setup overhead. *(`cmd_bench` Phase A.)*
+9. **Prompt size per variant** — 4k ctx → 3000 tokens, 8k ctx → 6000, 16k ctx → 12000.
+10. **Don't compare prefill numbers across different prompt sizes** — prefill throughput falls as the prompt grows, so only compare within the same prompt size. *(This is why the discover ladder probes every batch of one model with a single fixed prompt length, `min(0.75 × ctx, 16384)` tokens: the rungs must rank on identical work.)*
+11. **Warm up before timing, and take a median on fast probes** — the first prefill at a new ubatch shape pays a one-time setup cost, and it weighs more on larger ubatches. Measuring without a warm-up biased every ladder against the larger batch. *(`prefill_probe_sized`: one untimed probe, then a timed sample, or the median of three when the probe finishes in under 5s.)*
+12. **Never force tokens past EOS in a speed measurement** — `ignore_eos` on a decode that outruns the model's natural stop produces looping text, and looping inflates both draft acceptance and t/s. It once made the slowest clean configuration look like the worst one. Keep `ignore_eos` only where the point is memory pressure. *(`decode_sample` uses natural stop; `saturation_test` and `long_decode_check` still force, deliberately.)*
 
 ## What went wrong before
 
@@ -52,3 +62,7 @@ A short prompt (~12 tokens) produces garbage prefill numbers (~30-55 t/s) that a
 | Comparing prefill across ctx sizes | Different prompt sizes = not comparable |
 | Using max_tokens=1000 | Decode too short, placement not revealed |
 | Polling only 25 samples (50s) | CPU spike after 50s missed |
+| GPU threshold at CPU < 100% | GPU-resident models read 100-110% and came back AMBIGUOUS |
+| Timing the first probe at a new batch | One-time graph setup counted as throughput; penalised large batches by ~10% |
+| `ignore_eos` on a speed sample | Looping inflated acceptance and t/s; the clean config measured slowest |
+| Scaling the probe prompt with the batch | Larger batches got longer prompts, so they measured slower for the wrong reason |

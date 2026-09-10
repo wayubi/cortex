@@ -7,7 +7,7 @@
 - **Only POST requests (inference) can trigger unload or state changes.** GET/HEAD/OPTIONS probes pass through without any action — this prevents Open WebUI polling from bouncing the state or reading bodies unnecessarily.
 - Unload flow: `POST /api/generate` with `keep_alive: 0` (ollama), `POST /models/unload` (llama-cpp), or `GET /v1/models` + `POST /v1/models/unload` (nllb). All three backends are queried first to find exactly which model(s) are loaded. When switching away from nllb, a `/shutdown` is also sent.
 - The shared `backend_state` dict stores two keys: `"backend"` (which backend last handled inference) and `"model"` (which model name was last requested). Both are used to decide whether an unload is needed.
-- Before unloading on cross-backend switches, coordinator drains active POST requests on the current backend (polls `request_counts` up to 30s at 500ms intervals). Same-backend model changes skip drain (only one backend involved).
+- Before unloading on cross-backend switches, coordinator drains active POST requests on the current backend (polls `request_counts` up to `DRAIN_TIMEOUT` = **600s** at 500ms intervals). If the backend is still busy when that expires the incoming request gets a 503, rather than unloading under load. Same-backend model changes skip drain (only one backend involved).
 - Active requests are counted at access phase and decremented via `log_by_lua_block` in each nginx server block.
 
 ## Critical naming
@@ -38,7 +38,7 @@ If adding a new backend, update:
 ├── README.md
 ├── LICENSE
 ├── full-metrics.md        # full table of all models.ini entries (regenerate via tools/gen_metrics.sh)
-├── CPU_POLLING.md         # correct bench methodology (CPU/GPU placement verification)
+├── CPU_POLLING.md         # why the measurement constants are what they are (empirical rationale)
 ├── tools/                 # ALL scripts go here (bench, metrics)
 │   ├── bench.sh               # unified pipeline: mtpcheck → bisect → mtp → bench (canonical)
 │   └── gen_metrics.sh         # regenerate full-metrics.md from llama-cpp/models/*.json
@@ -67,7 +67,9 @@ If adding a new backend, update:
 3. **Run batch tuning** (`./tools/bench.sh bisect <model>`, discover mode by default) before any benchmark — one pass sets the batch and runs the residency / saturation / long-decode gates
 4. **THEN run the full bench:** `./tools/bench.sh bench <model>`
 
-**Coder variants are independent models and are benched separately.** No values are copied between entries — run tuning + bench on each coder variant like any other model.
+**Coder and think variants inherit from their family head — they are NOT benched separately.** A family is every entry sharing the same `hf` AND the same `ctx-size`, so `-coder`, `-think` and `-think-coder` siblings of one weights/context pair form one family. `bench.sh` benches the head (the first such section in models.ini) and copies its record to the siblings in seconds, rebuilding each sibling's `config` block from its own section. Cost therefore scales with distinct weight-and-context combinations, not with the number of entries.
+
+This reverses the earlier rule, which predated family inheritance. Sampling parameters, the reasoning toggle and the chat template do not change prefill or decode rate, so the head's measurements transfer. The one caveat is near the memory ceiling: `reasoning = on` has been observed to sustain a slightly larger batch than `reasoning = off` on the same GGUF and ctx (Qwen3.5-9B-MTP @ 16K: 2048 vs 1984). When a pick sits within a factor of two of the spill ceiling, bench the think sibling separately with `--no-inherit`. A head whose bench fails does not feed its record to siblings; they are skipped and reported as `SKIPPED (parent bench failed)`.
 
 ## Batch tuning (discover mode, default)
 
@@ -153,7 +155,7 @@ The tuners write diagnostic JSON that `cmd_bench` merges into the model's bench 
 - ollama unload uses `keep_alive: 0` on a generate request. This evicts the model and KV cache immediately. Without this flag, ollama keeps the model resident per its configured `OLLAMA_KEEP_ALIVE`.
 - llama-cpp unload uses `POST /models/unload` with the model ID. Only models with `status.value == "loaded"` are targeted (queried from `/v1/models`).
 - `coordinator.lua` logs every request, switch decision, and unload result via `ngx.log`. View with `docker logs -f cortex-openresty-1 | grep -E "request:|skip:|switch:|drain|state:|ollama:|llama-cpp:|nllb:"`. The `error_log /proc/self/fd/2 info;` directive is patched into the main nginx.conf via `sed` in the Dockerfile — INFO-level messages appear in `docker logs`.
-- The drain loop calls `ngx.sleep(0.5)` in the access phase, blocking the nginx worker for up to 30s during a switch. Switches are rare, so this is acceptable — but do not increase the timeout without understanding the concurrency impact.
+- The drain loop calls `ngx.sleep(0.5)` in the access phase, blocking the nginx worker for up to `DRAIN_TIMEOUT` (**600s**) during a switch. Switches are rare and a long-context request can legitimately run for minutes, which is why the timeout is generous — but do not increase it further without understanding the concurrency impact, and note that hitting it returns a 503 to the caller.
 - `get_model()` reads the request body via `ngx.req.read_body()` in the access phase. This does not consume the body — nginx still forwards it to the upstream. If body parsing fails (malformed JSON, no `model` field), `get_model()` returns nil and the coordinator proceeds conservatively (unloads on backend mismatch, skips on same-backend model change).
 - `models-max` must NOT be set on llama.cpp. If the router limits concurrent children, it auto-unloads models when the limit is exceeded, which races against the coordinator's explicit `/models/unload` and leaves residual VRAM (orphan child process). The coordinator is the sole source of truth for unloads — remove `models-max` entirely to disable router-initiated teardown.
 - `OLLAMA_MAX_LOADED_MODELS=1` is set in compose.yml. `OLLAMA_KEEP_ALIVE` is NOT set — defaults to 5m.
