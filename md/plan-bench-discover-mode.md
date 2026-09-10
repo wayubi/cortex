@@ -1768,3 +1768,149 @@ The crash at 4096 is now a rung failure, the ladder ends there, the ceiling edge
 - Run `--reset-parent` on the 8K family so `-think` inherits, and `bench` the head. That completes the catalogue: 73 of 73.
 - One cosmetic note: the ladder now logs `OOM at $B (prefill probe)` for any non-stall failure, including a crash or an unparseable response. The label is imprecise but conveys the actionable meaning and drives the ceiling logic correctly. If it is ever touched, `FAILED at $B (prefill probe: OOM or crash)` would read better.
 - §49.2a (coarse refinement default for CPU-compute models) remains a user decision, not an implementation item.
+
+---
+
+## 55. A first-download timeout reported as "NOT MTP" (2026-09-10)
+
+`bench_20260909-2234.log`, model `tiel-coder-35b-a3b-q4-mtp-128k-think`. MTP detection did not fail on the model's capability. It never got to test it.
+
+### 55.1 What happened
+
+```
+=== MTP DETECTION: tiel-coder-35b-a3b-q4-mtp-128k-think ===
+  --- MTP load attempt 1 (batch=) ---
+  mtp-detect: cold-load hang (no proxy line in 260s) — retrying as attempt 2
+  mtp-detect: cold-load hang (no proxy line in 260s) — retrying as attempt 3
+  mtp-detect: cold-load hang (no proxy line in 260s) — retrying as attempt 4
+  mtp-detect: STALL — model never served after restart+retry (network/HF fetch)
+  STALL during MTP detection (network/HF fetch) — aborting
+  22:48:30 mtpcheck: NOT MTP for tiel-coder-35b-a3b-q4-mtp-128k-think
+```
+
+This was the model's first ever load, so llama.cpp was **downloading the GGUF from Hugging Face**. The cache directory `models--peculiar-ragdoll--Tiel-Coder-35B-A3B-GGUF-MTP` is 22 GB and its mtime is 22:46, inside the 22:34 to 22:48 failure window. `SERVED_GRACE` at 128K ctx is 260 s. A 22 GB download does not finish in 260 s, and **each retry restarts the container, which restarts the download**, so three attempts guaranteed failure. The run consumed 14 minutes and never had a chance.
+
+The re-bench the user is running now succeeds because the model is already in the cache and loads in seconds. Nothing about the model or the detection logic changed.
+
+### 55.2 The misreport, and what it cost
+
+`detect_mtp` exits 1 on five distinct conditions: no MTP layers in the GGUF, MTP-context OOM down to the 2048 floor, probe failed twice with no OOM marker, MTP did not engage, and **STALL**. `cmd_mtpcheck` maps every non-zero exit to the same outcome: `return 1` and a status file of `{"status": "not_mtp"}`. The caller then prints `mtpcheck: NOT MTP`.
+
+So a network timeout is indistinguishable from a genuine capability verdict. The consequence is a wrong record, not just a wrong log line. The run went on to bisect and bench the model with `spec-type` restored away, and the JSON it wrote at 23:26 says `tuning_status: not_mtp`, `drafter: none`, no acceptance — for a model whose ini section declares `spec-type = draft-mtp`. The verdict table showed the mtp step as skipped because the model is not MTP, which is false.
+
+### 55.3 Change N (required)
+
+1. **Separate STALL from NOT MTP.** `detect_mtp` should signal a stall distinctly (exit 2, matching the `fire_request` convention). `cmd_mtpcheck` writes `{"status": "stall"}` and returns a distinct code; the orchestrators report `mtpcheck: STALL (model never served)` and **skip the model entirely** rather than benching it as non-MTP. A model whose weights will not load must not produce a record at all.
+2. **Tolerate a first download.** The grace formula scales with context, but a cold download scales with file size and link speed and can run for tens of minutes. Two options, either acceptable:
+   - Do not `restart` between stall retries when nothing has failed — a restart aborts an in-flight download. Retry the request against the same instance instead, and only restart if the log shows an actual load error.
+   - Add a one-off pre-flight: before `mtpcheck`, if the model's Hugging Face cache directory is absent or smaller than the expected file size, fire a single load request with a very long grace (or no bound) and log `first load: downloading weights`, then proceed.
+3. **Fix the empty batch in the log line.** `--- MTP load attempt 1 (batch=) ---` printed empty because the section had no `batch-size` at that point. Fall back to the `[*]` default in the message so the line is not misleading.
+
+**Acceptance.** Add a model whose weights are not yet cached and run `bench.sh mtpcheck` on it: the first load must be allowed to complete, and if it genuinely cannot, the verdict must read STALL and the model must be skipped rather than recorded as non-MTP.
+
+### 55.4 Cleanup for the existing record
+
+`llama-cpp/models/tiel-coder-35b-a3b-q4-mtp-128k-think.json` (23:26) is wrong: it describes an MTP model benched with MTP off. The re-bench in progress replaces it. Any sibling that inherited from it should be regenerated too.
+
+---
+
+## 56. Change O — wait for a first download before benching anything (2026-09-10)
+
+Supersedes §55.3 item 2, which offered two half-measures. The requirement is stronger: the script must recognise that a model is still downloading and not begin any timed work until the weights are present.
+
+### 56.1 The signal to use
+
+llama.cpp's `-hf` loader writes into the standard Hugging Face cache, mounted at `./.local/llama-cpp_data` on the host, so `bench.sh` can inspect it directly with no `docker exec`. Layout for a completed model:
+
+```
+hub/models--<org>--<repo>/refs/main            40 bytes, the resolved revision
+hub/models--<org>--<repo>/blobs/<sha256>       the GGUF, 23 GB for the 35B Q4
+hub/models--<org>--<repo>/snapshots/<rev>/     symlinks into blobs/
+```
+
+Mapping from models.ini is mechanical and was verified against the whole catalogue: take `hf`, drop the `:QUANT` suffix, replace `/` with `--`, prefix `models--`. All 13 distinct repos resolve to an existing directory with a `refs/main`, 13 of 13.
+
+**Corrected 2026-09-10 (see §56.5).** An earlier draft of this section said not to key the check on a partial-file marker, on the grounds that the convention was downloader-specific and unobservable. That was wrong, and it was wrong because I did not look it up. llama.cpp's own downloader, `common/download.cpp` at the commit this image builds from, writes:
+
+```
+const std::string path_temporary = path + ".downloadInProgress";     // line 369
+...
+std::rename(path_temporary.c_str(), path.c_str());                   // line 404, only on success
+```
+
+The marker is **created before the transfer and renamed away only on success**. There is no cleanup path on failure or abort, so an interrupted download leaves the file on disk. The downloader also opens it with `std::ios::app` and supports range requests, so a resumed fetch continues the same file. That makes it a far better primary signal than sampling directory growth:
+
+- **instant** — no sample interval on the common cached path;
+- **persistent** — it survives the container restarts that caused the original failure, so a half-downloaded model is still recognisable on the next run;
+- **unambiguous** — it separates "never fetched" from "fetched partially" from "complete", which growth alone cannot do.
+
+Note the suffix is `.downloadInProgress`, **not** `.incomplete`. `.incomplete` is the Hugging Face *Python* library's convention; llama.cpp does not use it, so a check for that name would never match and would not have prevented anything.
+
+The three states to distinguish:
+
+- **Complete:** `refs/main` exists and no `*.downloadInProgress` anywhere under the model's cache dir.
+- **Fetching or half-fetched:** a `*.downloadInProgress` file exists.
+- **Never fetched:** neither.
+
+Growth also covers the separate-drafter case (gemma-4 QAT pulls a second GGUF that `-hf` auto-discovers) with no extra logic.
+
+### 56.2 Change O
+
+Add `ensure_model_cached()` and call it **once per model, before `mtpcheck`**, in `reset_parent_full`, in `run_full_suite`'s main loop, and at the top of each subcommand so direct invocations get it too. Nothing timed runs before it returns.
+
+```
+ensure_model_cached:
+  DIR  = .local/llama-cpp_data/hub/models--<hf repo with / → -->
+  PART = find DIR -name '*.downloadInProgress'          # the primary signal
+
+  if PART is empty and DIR/refs/main exists:
+      log "  weights cached (<size>)"; return 0          # instant, no sampling
+
+  if PART is empty:                                      # never fetched
+      log "  first load: weights not cached — downloading before any benching"
+      fire ONE load request (tiny probe payload); do NOT wait_served on it
+      wait up to 60s for a *.downloadInProgress file to appear
+  else:
+      log "  resuming interrupted download: <partial size> already fetched"
+      fire ONE load request (tiny probe payload); do NOT wait_served on it
+
+  loop every DL_POLL_SEC (30s):
+      PART gone and DIR/refs/main exists → log "  download complete (<size>, <elapsed>)"; return 0
+      PART grew        → log "    downloading: <size>/<total?> (+<delta>, <rate> MB/s)"; idle = 0
+      PART not growing → idle++
+      idle >= DL_IDLE_MAX (6 → 3 min of no progress) → return 2      # genuine stall
+  never restart the container while the partial file is growing
+```
+
+Growth is still sampled, but only as a **liveness** test on the partial file: it separates a download that is progressing from a dead partial left by an aborted run. The marker, not growth, decides whether a download is outstanding at all.
+
+Key points, each of which is a thing the 22:34 run got wrong:
+
+- **No restart while downloading.** The old retry loop restarted the container three times, and each restart aborted the in-flight fetch, so the download could never finish. `ensure_model_cached` restarts nothing.
+- **No grace based on ctx.** `SERVED_GRACE` scales with context, which has nothing to do with download time. Progress is the timeout signal here, not a clock.
+- **A stall is a stall, not a verdict.** Returning 2 must skip the model, per §55.3 item 1, never record it as non-MTP.
+
+New constants: `DL_POLL_SEC=30`, `DL_IDLE_MAX=6`. No absolute cap — a download making progress is allowed to take as long as it takes, and 3 minutes of zero bytes is a much better stall signal than any fixed deadline.
+
+### 56.3 Acceptance
+
+1. **Cached model, the common case.** `bench.sh mtpcheck gemma-4-12b-q4-qat-mtp-16k` logs `weights cached` and proceeds **immediately** — no sample interval, since the marker check is a single `find`.
+2. **Uncached model.** Move one repo's cache directory aside, run `bench.sh mtpcheck` on a model that uses it, and confirm: it logs the first-load message, a `*.downloadInProgress` file appears, progress lines show it growing, the container is never restarted mid-download, and a correct MTP verdict follows once the marker is renamed away. Restore the directory afterwards.
+2b. **Interrupted download resumes.** Kill the run partway through case 2, leaving a `*.downloadInProgress` on disk. Re-run and confirm it logs `resuming interrupted download` with the partial size, rather than treating the model as never fetched or as complete.
+3. **Genuine stall.** Point an entry's `hf` at a nonexistent repo. Expect no growth, `return 2` after about 3 minutes, a STALL verdict, and the model skipped with no JSON written.
+
+### 56.4 Why this is worth the code
+
+The catalogue is 13 repos and 73 entries. Every new model added from here is a first download, and today that means a 14-minute failure producing a factually wrong record which then propagates to siblings by inheritance. The pre-flight makes the first run of a new model the same as any other, and turns the one genuinely unrecoverable case into an honest skip.
+
+### 56.5 Process note — a correct instruction was dropped, then countermanded
+
+The user had already given this instruction: **if a `.downloadInProgress` file exists, do not start benching.** That is exactly right, it names the exact marker llama.cpp writes, and it would have prevented the 22:34 failure outright. What happened to it:
+
+1. **It was never written down.** `grep` over the plan, `AGENTS.md`, every committed file and every commit message finds no occurrence of `downloadInProgress` other than the text added today. Given in conversation, it never reached an implementing agent.
+2. **I then countermanded it.** The first draft of §56.1 told the implementer, in bold, *not* to key the check on a partial-file marker, justifying it with "that is downloader-specific and none were observable here." Both halves of that were wrong. The convention is not ambiguous, it is one line in `common/download.cpp`, and that file was already checked out locally from the §18 speculative-decoding work. I asserted instead of reading.
+3. **I also misnamed it** as `.incomplete`, the Hugging Face Python convention. That wrong name then propagated back into the conversation and into the user's own recollection of what they had asked for.
+
+So this is not a case of a vague instruction being reasonably missed. A precise, correct instruction was lost because it was never recorded, and the gap was then filled with a worse design defended by an assumption I could have checked in thirty seconds. §56.1 and §56.2 are corrected to use the marker as the primary signal.
+
+**Standing rule going forward:** any instruction the user gives in conversation that changes behaviour gets written into this plan in the same turn it is given, in the user's own terms. An instruction that lives only in chat is an instruction that will be lost. And before writing "do not do X" into a plan, verify X against the source rather than an assumption — a plan that countermands a correct instruction is worse than a plan that omits it.
