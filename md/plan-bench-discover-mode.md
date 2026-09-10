@@ -2024,6 +2024,16 @@ Both §58.2 and §58.3 applied directly to `tools/bench.sh`:
 - `cmd_mtpcheck` now runs `rm -f "$(mtp_status_file)"` as its first statement, before `detect_mtp`. Every exit path then writes a fresh status, so the file can only describe the current run and a stall recorded during a download can no longer skip a genuinely non-MTP model on a later run.
 - `reset_parent_full` and `run_full_suite` now obtain the path from `mtp_status_file` instead of rebuilding `/tmp/mtp_status_${...}.json` inline. `MODEL` holds the right name at both points, so behaviour is unchanged; the path is now defined once.
 
-`bash -n` clean. Edited in place while a bench was running: the fix is safe because the write replaces the inode and the running shell continues reading the old one, so it takes effect on the next invocation.
+`bash -n` clean, and committed as `6999fbc`. Edited in place while a bench was running: safe because the write replaces the inode and the running shell continues reading the old one, so it takes effect on the next invocation — **the suite in flight is still executing the pre-fix code**.
 
 The ten status files currently in `/tmp` were left alone — none contains `"stall"`, so none can trigger the defect, and removing files under a live run is not worth the risk. The `written_at` staleness guard from §54 remains as a backstop for a `bench` run with no preceding `mtpcheck`.
+
+### 58.6 Status of the §55 issue chain (2026-09-10)
+
+**Code: complete.** Every finding from §55 through §58 is implemented and committed (`8111dbf`, `24ebb5b`, `6d51422`, `6999fbc`): stall separated from NOT MTP, a stalled model skipped rather than benched, the download pre-flight keyed on `*.downloadInProgress`, no unsafe "assume cached" fallback, pre-flight on every subcommand, and the stale status file cleared before detection.
+
+**Verification: none.** Not one of the five §56.3 acceptance cases has been run. They need the GPU and a suite is live. Until they run, the download path is reviewed but unproven — in particular nobody has yet watched `ensure_model_cached` observe a real `*.downloadInProgress` file, because no download has happened since the code was written.
+
+**The triggering model is being re-benched correctly**, but by luck rather than by the fix. `bench_20260910-0622.log` shows `✓ MTP-SUPPORTED` and `mtpcheck OK` for `tiel-coder-35b-a3b-q4-mtp-128k-think` at 06:25; it is in MTP tuning now. That run started at 06:22, before the pre-flight was committed, and it succeeds only because the weights finished downloading during the failed 22:34 run. Its wrong record from 09-09 23:26 (`tuning_status: not_mtp`, `drafter: none`) will be replaced when the bench step completes.
+
+**Open:** run the §56.3 acceptance set once the GPU is free.
