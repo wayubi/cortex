@@ -1688,3 +1688,47 @@ Change K, Change L and the §49.4 poll fix are all complete. `bash -n` clean, wo
 1. §49.2a, whether CPU-compute models should default to coarse refinement. **A design decision for the user. No agent should act on it.**
 2. §50.2 acceptance is still live-untested: force a head failure and confirm siblings are skipped with their files untouched. The isolated test above proves the logic; a real run would prove the plumbing.
 3. Remaining catalogue: gpt-oss, lfm, zamai, and the qwen MTP families.
+
+---
+
+## 53. `qwen-3.6-35b-a3b-q4-mtp-8k` keeps failing: a server crash misread as a network stall (2026-09-09)
+
+Four failures now, both attempts in `bench_20260909-1109.log` and both in `bench_20260909-1606.log`, all identical: the ladder reaches rung 4096, the tiny probe passes, and the run aborts with `prefill probe STALL at 4096 — aborting discover` about 40 seconds later. This is the last unbenched family in the catalogue.
+
+### 53.1 What actually happens
+
+The server hard-crashes on the sized prefill request. From the container log at the moment of the second failure:
+
+```
+0.31.626.642 I srv  proxy_reques: proxying request to model qwen-3.6-35b-a3b-q4-mtp-8k on port 52251
+[52251] ggml/src/ggml-cuda/ggml-cuda.cu:107: CUDA error
+[52251] E CUDA error: an illegal memory access was encountered
+[52251] E   in function ggml_backend_cuda_synchronize
+        ... ggml_abort backtrace through llama_decode / process_ubatch ...
+0.32.123.292 E srv  operator(): http client error: Failed to read connection
+0.34.529.435 I srv  operator(): instance name=qwen-3.6-35b-a3b-q4-mtp-8k exited with status 1
+```
+
+The 14-token tiny probe succeeds; the 6144-token probe at batch 4096 faults and kills the child. That is a genuine, reproducible property of this model at this batch, and it is exactly the condition the ladder's OOM branch exists to handle.
+
+### 53.2 Why it is reported as a STALL
+
+Two separate gaps.
+
+**The crash signature is not in `OMG_GREP`.** The pattern list contains `CUDA error: out of memory` but the crash says `CUDA error: an illegal memory access was encountered`. Verified: none of `CUDA error: an illegal memory access was encountered`, `exited with status 1`, or `ggml_abort` match the current expression. So `oom_count_since_mark` returns 0 and the caller falls through to its STALL branch.
+
+**`prefill_probe_sized` cannot signal *why* it returned 0.** It echoes `0` for a genuine `fire_request` stall (rc 2), for an OOM, and for an unparseable response alike. The caller distinguishes them only by re-checking the OOM grep, so any failure the grep does not recognise is labelled a stall. `gpu_saturation_sweep`'s `test_rung` already solved this by echoing the literal strings `OOM` and `STALL`; the discover probe never got the same treatment.
+
+The cost is the difference between a rung failure and a run failure. A recognised OOM records `4096 OOM`, breaks the ladder, refines the 2048/4096 edge and confirms a pick — which is precisely what the 128K and 256K siblings of this same family did at 16384 in the same run. An unrecognised crash aborts the whole bisect, so the model is never benched. The timing gives it away: a real stall costs three attempts at `SERVED_GRACE`, at least 540 s here, not 40 s.
+
+### 53.3 Change M (required — this is the last model blocking a complete catalogue)
+
+1. **Extend `OMG_GREP`** to cover backend faults and child death, not just allocation failures. Add `CUDA error` (broadened, subsuming the existing out-of-memory pattern and catching illegal-access faults), `ggml_abort`, and `exited with status 1`. All three mean the same thing to the tuner: this batch does not work.
+2. **Make the probe's failure reason explicit.** Have `prefill_probe_sized` echo `STALL` when `fire_request` returns 2 and `0` otherwise, mirroring `test_rung`. In `cmd_bisect_discover`, abort only on `STALL`; treat `0` as a rung failure that sets the ceiling, whether or not the grep recognised the signature. That keeps a genuine network stall fatal while making any server-side failure a normal ceiling, which is the safe default: the tiny probe already proved the model loads, so a probe that returns nothing means the batch is bad, not the network.
+3. Apply the same reasoning to the ladder's other `exit 1` on a probe returning 0.
+
+**Acceptance.** `./tools/bench.sh bisect qwen-3.6-35b-a3b-q4-mtp-8k` must log `OOM at 4096 (prefill probe)`, end the ladder there, refine between 2048 and 4096, confirm a pick, and reach `=== DONE ===`. Then the full family with `--reset-parent`, so the `-think` sibling inherits. Expect a pick near 2048 to 3072 on the ladder shown in the 16:06 log (256=355, 512=558, 1024=821, 2048=1099).
+
+### 53.4 Note
+
+The `-think` sibling was correctly reported as `SKIPPED (parent bench failed)` in the verdict table and its record was left untouched. Change L is working as intended on a live failure.
