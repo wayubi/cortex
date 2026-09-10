@@ -1,0 +1,276 @@
+{
+  "model": "qwen-3.6-35b-a3b-q4-mtp-8k-think",
+  "ctx": 8192,
+  "batch": 2176,
+  "ubatch": 2176,
+  "placement": "CPU",
+  "bench_date": "2026-09-09T19:40:21.788573",
+  "bench_method": "bench_model.sh v2",
+  "config": {
+    "temp": "0.6",
+    "top_k": "20",
+    "top_p": "0.95",
+    "min_p": "0.00",
+    "repeat_penalty": "1.0",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL",
+    "quant": "UD-Q4_K_XL",
+    "reasoning": "on",
+    "ctx": "8192",
+    "batch": "2176"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 6144,
+    "decode_prompt_tokens": 108,
+    "model_file_size_gb": 21.28,
+    "build_info": "b1-3737e41",
+    "wall_time_s": 104
+  },
+  "speed": {
+    "prefill_t_s": 1097.53,
+    "prefill_ms": 5487.79,
+    "prefill_ms_per_tok": 0.9111,
+    "decode_t_s": 39.8,
+    "decode_ms": 100488.14,
+    "decode_ms_per_tok": 25.1283
+  },
+  "request": {
+    "prefill_prompt_tokens": 6023,
+    "decode_prompt_tokens": 108,
+    "max_tokens": 4000,
+    "completion_tokens": 4000,
+    "total_tokens": 4108,
+    "cached_tokens": 0,
+    "cache_n": 0,
+    "predicted_n": 4000,
+    "finish_reason": "length",
+    "truncated": true,
+    "degeneracy": 0.0
+  },
+  "mtp": {
+    "acceptance": 0.87202,
+    "draft_accepted": 1867,
+    "draft_generated": 2141,
+    "draft_mean_len": 2.34,
+    "n_max_loaded": 2,
+    "p_min_loaded": 0.7,
+    "tuning_status": "ok",
+    "tuning_reason": null,
+    "tuned_n_max": 2,
+    "tuned_p_min": 0.7,
+    "placement_baseline": "CPU",
+    "tuning_samples": [
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 42.0,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.90352,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.41
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 40.7,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.85238,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.71
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 40.8,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.86301,
+        "degeneracy": 0.002,
+        "oom": 0,
+        "mean_draft_len": 2.56
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 37.1,
+        "tokens": 3888,
+        "placement": "CPU",
+        "accept": 0.85657,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.54
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 40.0,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.88002,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.35
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.5,
+        "tps": 40.3,
+        "tokens": 3633,
+        "placement": "CPU",
+        "accept": 0.78056,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.34
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.9,
+        "tps": 37.9,
+        "tokens": 3831,
+        "placement": "CPU",
+        "accept": 0.97347,
+        "degeneracy": 0.0007,
+        "oom": 0,
+        "mean_draft_len": 2.33
+      }
+    ],
+    "tuning_written_at": "2026-09-09T19:37:52.754532",
+    "configured_n_max": 2,
+    "configured_p_min": 0.7,
+    "drafter": "in-model"
+  },
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 353.67
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 555.72
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 825.79
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 1102.15
+      },
+      {
+        "batch": 4096,
+        "status": "OOM",
+        "prefill": null
+      },
+      {
+        "batch": 2176,
+        "status": "REFINE",
+        "prefill": 1106.81
+      },
+      {
+        "batch": 2880,
+        "status": "REFINE",
+        "prefill": 1105.57
+      },
+      {
+        "batch": 1728,
+        "status": "REFINE",
+        "prefill": 985.69
+      },
+      {
+        "batch": 2112,
+        "status": "REFINE",
+        "prefill": 1104.65
+      },
+      {
+        "batch": 2432,
+        "status": "REFINE",
+        "prefill": 1092.42
+      },
+      {
+        "batch": 1984,
+        "status": "REFINE",
+        "prefill": 1012.56
+      },
+      {
+        "batch": 2240,
+        "status": "REFINE",
+        "prefill": 1102.76
+      }
+    ],
+    "best_prefill": 1102.15,
+    "pick": 2176,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      1728,
+      1984,
+      2112,
+      2176,
+      2240,
+      2432,
+      2880
+    ],
+    "ceiling_coarse": "2048 PASS / 4096 OOM",
+    "ladder_break": "1",
+    "written_at": "2026-09-09T19:22:09.553024"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 1443.0,
+      "avg_gpu_util_pct": 37.6,
+      "avg_gpu_mem_util_pct": 31.3,
+      "cpu_stddev_pct": 98.5,
+      "peak_vram_mib": 10889,
+      "peak_power_w": 92.82,
+      "peak_temp_c": 54,
+      "peak_clocks_sm_mhz": 1950,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 10889,
+      "final_temp_c": 51,
+      "final_power_w": 42.04,
+      "ram_used_mib": 64484,
+      "rss_mib": 13906,
+      "sample_count": 42
+    }
+  },
+  "propagated": true,
+  "propagated_from": "qwen-3.6-35b-a3b-q4-mtp-8k",
+  "propagated_date": "2026-09-09T19:40:21.965270"
+}
