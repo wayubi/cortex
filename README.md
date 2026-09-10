@@ -20,8 +20,11 @@ A `llama-build` profile is also available (build-only, not normally running).
 `coordinator.lua` runs in the access phase and tracks which backend and model are currently loaded. Every **POST** (inference) request is evaluated; GET/HEAD/OPTIONS probes (e.g. Open WebUI polling) pass through freely without triggering any state changes.
 
 When a switch is needed:
-1. The coordinator drains active requests on the current backend (polls `request_counts` dict, up to 30s).
-2. It calls the active backend's unload API (`POST /api/generate keep_alive=0` for ollama, `POST /models/unload` for llama.cpp).
+1. The coordinator drains active requests on the current backend (polls the `request_counts` dict, up to `DRAIN_TIMEOUT` = 600s). If the backend is still busy when that expires, the incoming request gets a 503 rather than an unload under load.
+2. It calls the active backend's unload API. All three backends are full participants:
+   - ollama — `POST /api/generate` with `keep_alive=0`
+   - llama.cpp — `POST /models/unload`
+   - nllb — `GET /v1/models` to find loaded models, then `POST /v1/models/unload` for each
 3. It updates `backend_state` to the new target.
 
 No containers are stopped or started — only the loaded model is evicted from VRAM.
@@ -39,11 +42,12 @@ git clone <url> && cd cortex
 docker compose up -d
 
 # Verify the three endpoints
-curl http://localhost:8080/v1/models          # llama.cpp models
+curl http://localhost:8080/v1/models           # llama.cpp models
 curl http://localhost:11434/api/tags           # Ollama models
+curl http://localhost:5002/v1/models           # NLLB models
 ```
 
-Both model pickers populate without triggering a backend switch. Inference requests automatically switch as needed.
+All three model pickers populate without triggering a backend switch. Inference requests automatically switch as needed.
 
 ## Rebuilding
 
@@ -63,36 +67,86 @@ docker compose up -d
 
 ## Benchmarking
 
-The benchmarking pipeline is a single script: `tools/bench.sh`.
+The benchmarking pipeline is a single script: `tools/bench.sh`. It finds and validates a practical `batch-size` / `ubatch-size` and, for MTP models, `spec-draft-n-max` / `spec-draft-p-min`, then records a benchmark for each entry in `llama-cpp/models.ini`.
+
+### Running it
+
+```bash
+./tools/bench.sh                          # interactive: pick models, then the full suite
+./tools/bench.sh all <models...>          # non-interactive full suite
+./tools/bench.sh bisect <model>           # batch tuning only
+./tools/bench.sh mtp <model>              # MTP tuning only
+./tools/bench.sh bench <model>            # benchmark record only
+./tools/bench.sh mtpcheck <model>         # MTP capability check only
+./tools/bench.sh mtpverify <model>        # diagnostic: MTP-on vs off output check
+```
+
+Global flags go before the subcommand:
+
+| Flag | Effect |
+|------|--------|
+| `--no-inherit` | Bench every selected model independently; no family inheritance |
+| `--reset-parent` | Re-bench each family head first, so siblings inherit fresh data |
+| `--strict` | Skip `bench` for a model whose MTP tuning failed (for publishable records) |
+| `--refine=64\|coarse\|off` | Batch refinement depth; default `64` |
+| `--thorough` | Use the legacy exhaustive search instead of discover mode |
+
+Environment equivalents: `BENCH_THOROUGH=1`, `BENCH_REFINE=64|coarse|off`.
 
 ### Pipeline
 
-Each model goes through four steps in order: `mtpcheck → bisect → mtp → bench`:
+Each family head goes through four steps in order:
 
-| Step | Command | What it does |
-|------|---------|-------------|
-| mtpcheck | `bench.sh mtpcheck <model>` | Empirically determines MTP capability, sets spec-type in models.ini |
-| bisect | `bench.sh bisect <model> [test-batch]` | Saturation-gated batch ceiling search (tiny probe → full-context saturation) |
-| mtp | `bench.sh mtp <model>` | MTP n_max/p_min sweep (only if MTP-capable) |
-| bench | `bench.sh bench <model>` | Full benchmark JSON record (prefill, decode, placement, hardware) |
+| Step | What it does |
+|------|-------------|
+| mtpcheck | Empirically determines MTP capability; sets or clears `spec-type` in models.ini |
+| bisect | Finds and validates the batch size (see below) |
+| mtp | Tunes `n_max` / `p_min` (MTP-capable models only) |
+| bench | Writes the benchmark record: prefill, decode, placement, hardware |
 
-**Full suite (recommended):** `./tools/bench.sh all <models...>` runs all four steps per model with inheritance for siblings. Interactive mode (`./tools/bench.sh`) prompts for model selection.
+### Batch tuning (discover mode, the default)
+
+Batch is a **prefill** knob. Single-stream decode does not change with batch unless something spills off the GPU, so the search optimises prefill and guards residency:
+
+1. **Coarse ladder** of powers of two from 256 up to `min(ctx-size, 16384)`. Each rung restarts the server once and takes three cheap measurements: a tiny probe (OOM at load or first decode), a residency probe (binary GPU or CPU verdict), and a sized prefill probe using the same prompt length on every rung so rungs rank on identical work. Every prefill probe runs an untimed warm-up first, and fast probes take the median of three.
+2. **Pick** the best-measured point, then a **golden-section refinement** down to 64-token granularity. Refinement skips residency inside a bracket where both ends passed, since memory use is monotonic in batch.
+3. **Confirm at the pick, one restart**: full-context saturation at 99% of ctx, a sustained long-decode, and on MTP GPU models a decode-cliff check against a batch-256 baseline. On failure it steps down to the next lower measured point, at most twice, then fails the model with models.ini restored.
+
+`--refine=coarse` stops refinement once a step no longer beats the noise floor; `--refine=off` picks the best ladder rung. `--thorough` restores the original exhaustive search (golden-section prefill sweep, 64-token ceiling bisect, top-5 shortlist decode gate).
+
+### MTP tuning
+
+`n_max` and `p_min` are **speed-only** knobs. llama.cpp's speculative decoding samples every position from the target model and keeps a draft token only when it matches, so the output distribution is unchanged. The tuner therefore ranks configurations on decode speed measured on natural-stop output, and the only hard rejections are OOM, a too-short sample, and — on GPU-resident models — a draft that spills to CPU. An 8-gram degeneracy ratio is recorded as a diagnostic and never gates anything. `bench.sh mtpverify` checks the speed-only claim empirically for a given model.
+
+### Family inheritance
+
+Two entries are in the same family when they share both `hf` and `ctx-size`, so coder and think variants of the same weights and context inherit from one head. The head is benched; siblings copy its record in seconds and get their own `config` block rebuilt from their own models.ini section. Cost therefore scales with distinct weight-and-context combinations, not with the number of entries. A head whose bench fails does not feed its record to siblings; they are skipped and reported.
+
+Rough per-head times on an RTX 3060: 5 to 10 minutes for a small GPU-resident model, 25 to 30 for a dense MTP head, and 40 to 100 for a large CPU-offloaded MoE at long context. Siblings are free.
 
 ### Results
 
-Results are written to `llama-cpp/models/<model>.json` (one file per model). The consolidated table lives in `full-metrics.md`, regenerated from the JSONs:
+Results are written to `llama-cpp/models/<model>.json`, one file per model, with these top-level keys:
+
+| Key | Contents |
+|-----|----------|
+| `config` | The model's own models.ini settings |
+| `bench` | Prompt sizes, model file size, build info, wall time |
+| `speed` | Prefill and decode throughput |
+| `request` | Token counts, finish reason, degeneracy |
+| `mtp` | Acceptance, loaded vs tuned values, `tuning_status`, every tuning sample |
+| `discover` | The full batch ladder, refinement points, pick and pick rule |
+| `hardware` | GPU, CPU, RAM, and the run's power, thermal and VRAM peaks |
+
+The consolidated table lives in `full-metrics.md`:
 
 ```bash
-./tools/gen_metrics.sh    # regenerates full-metrics.md from models/*.json
+./tools/gen_metrics.sh    # regenerates full-metrics.md from llama-cpp/models/*.json
 ```
 
-### Methodology notes
+Current state: 71 of the 73 models.ini entries have a record.
 
-- **Batch bisect:** `bench.sh bisect` starts at `ctx` (the hard ceiling), halves on OOM, then bisects to 64-granularity. Saturation-gated: every candidate passes both tiny probe AND full-context saturation (99% of ctx). An early-rate decode gate rejects models whose decode collapses at full context.
-- **Placement check:** early residency gate (batch=256) classifies CPU vs GPU residency. GPU models proceed to a decode-guarded prefill sweep; CPU models run a pure-prefill saturation sweep.
-- **Long-decode check:** after bisect, a 4000+ token essay decode verifies decode survives at the chosen batch (catches late OOM from flash-attn workspace growth).
-
-Full methodology, gotchas, and stress-test procedures: see `AGENTS.md`.
+Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The design history and rationale behind the current pipeline: see `md/plan-bench-discover-mode.md`.
 
 ## File layout
 
@@ -101,8 +155,10 @@ Full methodology, gotchas, and stress-test procedures: see `AGENTS.md`.
 ├── README.md
 ├── LICENSE
 ├── compose.yml               # Docker Compose — openresty, ollama, llama-cpp, nllb
+├── compose.override.yml      # local volume mounts (model caches, models.ini)
 ├── CPU_POLLING.md            # CPU/GPU placement verification methodology
 ├── full-metrics.md           # benchmark table for all models (regenerate via tools/gen_metrics.sh)
+├── logs/                     # bench.sh run logs, one per invocation
 ├── tools/
 │   ├── bench.sh              # canonical pipeline: mtpcheck → bisect → mtp → bench
 │   └── gen_metrics.sh        # regenerate full-metrics.md from llama-cpp/models/*.json
@@ -118,7 +174,11 @@ Full methodology, gotchas, and stress-test procedures: see `AGENTS.md`.
 │   ├── Dockerfile
 │   ├── nginx.conf            # 3 server blocks + lua_shared_dict
 │   └── coordinator.lua       # VRAM coordinator — API-based model unload
-└── md/                       # internal planning docs (bench audits, fix plans)
+└── md/                       # planning and design docs
+    ├── plan-bench-discover-mode.md   # current benchmarking pipeline: design, reviews, decisions
+    ├── plan-bench-sh-audit-fixes.md  # earlier bench.sh audit
+    ├── plan-batch-sweep.md           # earlier batch sweep design
+    └── nllb-translation-service.md
 ```
 
 ## Debugging
@@ -126,7 +186,7 @@ Full methodology, gotchas, and stress-test procedures: see `AGENTS.md`.
 View coordinator decisions in real time:
 
 ```bash
-docker logs -f cortex-openresty-1 | grep -E "request:|skip:|switch:|drain|state:|ollama:|llama-cpp:"
+docker logs -f cortex-openresty-1 | grep -E "request:|skip:|switch:|drain|state:|ollama:|llama-cpp:|nllb:"
 ```
 
 Example output:
@@ -143,20 +203,24 @@ request: GET ollama current=llama_cpp
 skip: GET ollama — only POST triggers switch
 ```
 
+Benchmarking runs log to `logs/bench_<timestamp>.log`, one file per invocation, containing every probe and decision.
+
 ## Known VRAM considerations
 
-- Both containers run simultaneously but no model is loaded at boot.
+- All containers run simultaneously but no model is loaded at boot.
 - Models only consume VRAM during active inference.
 - Ollama's `OLLAMA_KEEP_ALIVE` controls how long a model stays resident after the last request (default 5m).
 - llama.cpp keeps one model loaded at a time — the coordinator is the sole source of truth for unloads, so `models-max` must NOT be set (see `AGENTS.md`).
-- If a backend switch happens mid-inference, the request counter drain waits up to 30s for completion before unloading.
+- If a backend switch happens mid-inference, the drain waits up to 600s for completion before unloading, and returns 503 if the backend is still busy.
+- The largest models in this catalogue run their experts on the CPU rather than the GPU. That is expected and is recorded per model as `placement: CPU`; the tuner treats it as the model's baseline, not a fault.
 
 ## Model tuning
 
-Each `[model]` entry in `llama-cpp/models.ini` can override `batch-size` / `ubatch-size`. The proven stress-test procedure — including the two-phase validation (tiny decode probe, then full-context saturation) needed because `-fit on` leaves ~zero VRAM headroom — is documented in `AGENTS.md`.
-
-Results are recorded in `llama-cpp/models/<model>.json` and summarized in `full-metrics.md`. To update results after re-benching:
+Each `[model]` entry in `llama-cpp/models.ini` can override `batch-size` / `ubatch-size` and, for MTP models, `spec-draft-n-max` / `spec-draft-p-min`. Do not set these by hand: `-fit on` leaves near-zero VRAM headroom, so a value that survives a short probe can still OOM at full context or silently push the MTP draft onto the CPU. Run the pipeline instead:
 
 ```bash
-./tools/gen_metrics.sh
+./tools/bench.sh all <model>    # tunes, validates and records in one pass
+./tools/gen_metrics.sh          # refresh the consolidated table
 ```
+
+The validation gates that make a value trustworthy — the OOM log grep as source of truth, the residency check, full-context saturation, and the sustained long-decode — are documented in `AGENTS.md`.
