@@ -35,7 +35,7 @@ mkdir -p "$LOG_DIR" "$MODELS_DIR"
 LOG_FILE="$LOG_DIR/bench_$(date +%Y%m%d-%H%M).log"
 DOCKER_LOG="cortex-llama-cpp-1"
 # smpbo and nbytes_shared added in commit 18415cf — grep pattern for server crash/error markers
-OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error: out of memory|cuMemCreate|GGML_ASSERT|nbytes_shared|smpbo"
+OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error|cuMemCreate|GGML_ASSERT|ggml_abort|exited with status 1|nbytes_shared|smpbo"
 POLL_MIN_SAMPLES=3
 POLL_MAX_SAMPLES=80
 MAX_BATCH=16384          # batch search cap: never probe above min(ctx, MAX_BATCH)
@@ -3220,7 +3220,9 @@ cmd_bisect_test_batch() {
 # No separate warm-up: the caller's tiny_probe already loaded and warmed the
 # instance. Reuses prefill_probe's body approach — log-parsed 'prompt eval time',
 # overflow-shrink retry, OOM check.
-# Echoes prefill_t_s to stdout; "0" on OOM/stall/parse-fail. Progress → stderr.
+# Echoes prefill_t_s to stdout; "0" on OOM/crash/parse-fail, "STALL" on a genuine
+# network/cold-load stall (fire_request rc 2 — Change M, §53.3). Callers keep
+# STALL fatal and treat 0 as a rung failure. Progress → stderr.
 # §39.2#1 (Change G): the SAME measurement rule applies to every point in the JSON
 # — a ladder rung and a refinement candidate are measured identically. So the
 # "first probe under 5 s → median of three" policy lives HERE (in the one function
@@ -3235,10 +3237,12 @@ cmd_bisect_test_batch() {
 prefill_probe_sized() {
   local CTX=${1:-65536} WARM T0 RAW0 RAW1 RAW2
   WARM=$(prefill_probe_sized_raw "$CTX")
+  if [ "$WARM" = "STALL" ]; then echo "STALL"; return 0; fi
   if [ "$WARM" = "0" ] || [ -z "$WARM" ]; then echo "0"; return 0; fi
   log "  prefill-sized: warm-up done (~${WARM} t/s)" >&2
   T0=$(date +%s)
   RAW0=$(prefill_probe_sized_raw "$CTX")
+  if [ "$RAW0" = "STALL" ]; then echo "STALL"; return 0; fi
   if [ "$RAW0" = "0" ] || [ -z "$RAW0" ] || [ $(( $(date +%s) - T0 )) -ge 5 ]; then
     echo "${RAW0:-0}"
     return 0
@@ -3286,7 +3290,10 @@ with open('/tmp/pp_sized.json','w') as f: json.dump(payload, f)
 "
     fire_request /tmp/pp_sized.json /tmp/pp_sized_out.json "prefill-sized" "$(adaptive_timeout 1)"
     local RC=$?
-    if [ "$RC" -eq 2 ]; then echo "0"; return 0; fi
+    # Change M (§53.3): a genuine network/cold-load stall (fire_request rc 2) is
+    # signalled as STALL so the caller can keep it fatal; every other failure
+    # (OOM, crash, unparseable response) returns 0 and becomes a rung failure.
+    if [ "$RC" -eq 2 ]; then echo "STALL"; return 0; fi
 
     local WATCH=0
     while kill -0 $FIRE_PID 2>/dev/null; do
@@ -3447,17 +3454,21 @@ cmd_bisect_discover() {
     fi
 
     # Sized prefill probe (identical prompt length on every rung).
+    # Change M (§53.3): STALL (genuine network/cold-load) stays fatal; any 0 —
+    # OOM, crash (recognised by OMG_GREP or not), or unparseable — is a rung
+    # failure that sets the ceiling. The tiny probe already proved the model loads,
+    # so a probe that returns nothing means the batch is bad, not the network.
     local PF=0
     PF=$(prefill_probe_sized "$CTX")
-    if [ "$PF" = "0" ]; then
-      if [ "$(oom_count_since_mark)" -gt 0 ]; then
-        log "  OOM at $B (prefill probe)"
-        echo "$B OOM" >> "$POINTS"
-        CEIL_FAIL_B=$B; CEIL_FAIL_R="OOM"; CEIL_BREAK=1
-        break
-      fi
+    if [ "$PF" = "STALL" ]; then
       log "  prefill probe STALL at $B — aborting discover"
       exit 1
+    fi
+    if [ "$PF" = "0" ]; then
+      log "  OOM at $B (prefill probe)"
+      echo "$B OOM" >> "$POINTS"
+      CEIL_FAIL_B=$B; CEIL_FAIL_R="OOM"; CEIL_BREAK=1
+      break
     fi
     local SINGLE=""
     [ "$B" -ge "$PROBE_TOKENS" ] && SINGLE=" (single-ubatch)"
@@ -3561,8 +3572,11 @@ print(' '.join(out))
     fi
     # §39.2#1: prefill_probe_sized now does the <5s median-of-3 itself (the SAME
     # rule the ladder uses), so every batch is measured identically.
+    # Change M (§53.3): a genuine stall aborts (rc 2); any 0 is a failed candidate
+    # (the caller makes it the new upper bound).
     local CPF
     CPF=$(prefill_probe_sized "$CTX")
+    if [ "$CPF" = "STALL" ]; then log "  STALL at $CB (prefill) — aborting" >&2; return 2; fi
     if [ "$CPF" = "0" ] || [ -z "$CPF" ]; then echo "0"; return 0; fi
     echo "$CPF"
     return 0
