@@ -2225,6 +2225,13 @@ print(v.group(1) if v else '')
 # detect_mtp is run in a subshell because it exits (not returns) on the
 # not-capable paths; we need its exit code so we can stamp the status file.
 cmd_mtpcheck() {
+  # §58.2: clear any prior status BEFORE detection, so the file can only ever
+  # describe this run. detect_mtp writes a status only on its own STALL path —
+  # its other four failure exits (no MTP layers, MTP-context OOM, probe failed
+  # twice, MTP did not engage) leave whatever was there before. Without this, a
+  # stall recorded while the weights were still downloading would be re-read on
+  # the next run and skip a model that is simply not MTP, permanently.
+  rm -f "$(mtp_status_file)"
   if ( detect_mtp ); then
     # MTP-capable: stamp a fresh not_run status so a later cmd_bench that runs
     # without mtp tuning (or after a crash) does not report a stale prior tune as
@@ -4758,7 +4765,7 @@ reset_parent_full() {
     log "  $(date +%H:%M:%S) mtpcheck OK for $P (MTP-capable)"
   else
     # Change N (§55.3): check if mtpcheck wrote a stall status.
-    local MTP_SF="/tmp/mtp_status_${P}.json"
+    local MTP_SF; MTP_SF=$(mtp_status_file)   # §58.3: MODEL=$P here
     if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
       log "  $(date +%H:%M:%S) mtpcheck STALL for $P — skipping model (weights never served)"
       return 2
@@ -4877,7 +4884,7 @@ run_full_suite() {
       # on STALL. Check it to report the true reason, and skip the model entirely
       # — a model whose weights will not load must not produce a record at all
       # (§55.3 item 1).
-      local MTP_SF; MTP_SF="/tmp/mtp_status_${NAME}.json"
+      local MTP_SF; MTP_SF=$(mtp_status_file)   # §58.3: MODEL=$NAME here
       if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
         lshow "  $NAME: mtpcheck STALL — skipping model (weights never served)"
         for s in mtpcheck bisect mtp bench; do

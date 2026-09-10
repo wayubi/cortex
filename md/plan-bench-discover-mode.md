@@ -1960,3 +1960,70 @@ If no `*.downloadInProgress` appears within 60 s **and `refs/main` does not exis
 ### 57.5 Acceptance
 
 The §56.3 cases still stand and none have been run yet. Case 2 (move a repo's cache aside) is the one that matters, and it should now also confirm that a stalled model produces **no** JSON record and **no** models.ini change. Add a fourth: with the cache moved aside, run `bench.sh bisect <model>` directly and confirm the pre-flight fires there too.
+
+---
+
+## 58. Author review of the §57 fixes (2026-09-10)
+
+Commits `24ebb5b` and `6d51422`. **All three §57 gaps are closed correctly. One new defect, narrow but real, introduced by the way the stall status is detected.** Reviewed by reading only; a live bench was running, so nothing was executed.
+
+### 58.1 The three gaps, closed
+
+| §57 item | Fix | Correct |
+|---|---|---|
+| 57.2 stall must skip the model | `run_full_suite` now sets all four verdicts to `SKIPPED (mtpcheck stall)` and `continue`s; `reset_parent_full` returns 2 before its bisect step | yes |
+| 57.3 unsafe 60s fallback | The marker wait now runs for `DL_IDLE_MAX × DL_POLL_SEC` (180 s) and returns **2**, never 0, when no marker appeared and `refs/main` is absent | yes |
+| 57.4 pre-flight on every subcommand | Added to `bisect`, `mtp`, `bench` and `mtpverify`; `bench`'s call sits after the inheritance gate so siblings still cost nothing | yes |
+
+The cached fast path still returns before firing any request, and a pre-existing marker is found on the loop's first iteration with no added delay.
+
+### 58.2 New defect — a stale `stall` status file poisons the next run
+
+`cmd_mtpcheck` decides between "stalled" and "not MTP" by reading the status file **after** `detect_mtp` has already failed:
+
+```
+    local SF; SF=$(mtp_status_file)
+    if [ -f "$SF" ] && grep -q '"stall"' "$SF" 2>/dev/null; then
+      ... return 2
+    fi
+```
+
+Nothing clears the file first. `detect_mtp` does not remove it on entry, and it writes a status only on its own STALL path — its four other failure exits (no MTP layers, MTP-context OOM to the 2048 floor, probe failed twice, MTP did not engage) leave whatever was there before.
+
+The failure sequence is reachable and is exactly the situation this catalogue is in:
+
+1. Run 1: a model's weights are still downloading, `detect_mtp` stalls, `{"status":"stall"}` is written to `/tmp/mtp_status_<model>.json`.
+2. Run 2: the download has completed. `detect_mtp` now runs properly and determines the GGUF genuinely has no MTP layers, exiting 1.
+3. `cmd_mtpcheck` finds the **stale** stall file, returns 2, and the model is skipped as a download stall — permanently, on every subsequent run, because nothing ever overwrites the file.
+
+A genuinely non-MTP model would be excluded from the catalogue with a misleading reason, and the reason would be self-perpetuating. Status files live in `/tmp` and survive for the life of the boot; ten are on disk right now from the 8th and 9th.
+
+**Fix:** clear the status file at the start of `cmd_mtpcheck`, before calling `detect_mtp`, so the file can only ever describe the current run:
+
+```
+cmd_mtpcheck() {
+  rm -f "$(mtp_status_file)"
+  if ( detect_mtp ); then
+  ...
+```
+
+That is sufficient: every path out of `cmd_mtpcheck` writes a fresh status (`not_run`, `stall` via `detect_mtp`, or `not_mtp`). It also makes the §54-era `written_at` staleness guard in `cmd_bench` a backstop rather than the only defence.
+
+### 58.3 Minor
+
+`reset_parent_full` builds the status path inline as `/tmp/mtp_status_${P}.json` rather than calling `mtp_status_file`, and `run_full_suite` does the same with `${NAME}`. Both happen to match because `MODEL` equals the model name at those points, but the helper exists precisely so the path is defined once. Use it.
+
+### 58.4 Acceptance still outstanding
+
+None of the §56.3 cases have been run. They need the GPU, so they should wait for the live bench to finish. The set is: cached model returns immediately; cache moved aside downloads and then benches correctly; an interrupted download resumes and says so; a nonexistent repo stalls and leaves no JSON and no models.ini change; and a direct `bench.sh bisect` on an uncached model triggers the pre-flight.
+
+### 58.5 Fixed by the author (2026-09-10)
+
+Both §58.2 and §58.3 applied directly to `tools/bench.sh`:
+
+- `cmd_mtpcheck` now runs `rm -f "$(mtp_status_file)"` as its first statement, before `detect_mtp`. Every exit path then writes a fresh status, so the file can only describe the current run and a stall recorded during a download can no longer skip a genuinely non-MTP model on a later run.
+- `reset_parent_full` and `run_full_suite` now obtain the path from `mtp_status_file` instead of rebuilding `/tmp/mtp_status_${...}.json` inline. `MODEL` holds the right name at both points, so behaviour is unchanged; the path is now defined once.
+
+`bash -n` clean. Edited in place while a bench was running: the fix is safe because the write replaces the inode and the running shell continues reading the old one, so it takes effect on the next invocation.
+
+The ten status files currently in `/tmp` were left alone — none contains `"stall"`, so none can trigger the defect, and removing files under a live run is not worth the risk. The `written_at` staleness guard from §54 remains as a backstop for a `bench` run with no preceding `mtpcheck`.
