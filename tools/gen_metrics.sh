@@ -66,7 +66,6 @@ def bench_row(d):
     return {
         'ctx': d.get('ctx'),
         'batch': d.get('batch'),
-        'n_cpu_moe': cfg.get('n_cpu_moe'),
         'n_max': m.get('configured_n_max'),
         'p_min': m.get('configured_p_min'),
         'drafter': m.get('drafter'),
@@ -98,14 +97,13 @@ for name in names:
         meta = {
             'ctx': int(kv(sec, 'ctx-size')) if kv(sec, 'ctx-size') else None,
             'batch': kv(sec, 'batch-size'),
-            'n_cpu_moe': kv(sec, 'n-cpu-moe'),
             'n_max': kv(sec, 'spec-draft-n-max'),
             'p_min': kv(sec, 'spec-draft-p-min'),
             'reasoning': kv(sec, 'reasoning', 'off'),
             'drafter': 'in-model' if 'draft-mtp' in sec else 'none',
         }
         b = {
-            'ctx': meta['ctx'], 'batch': meta['batch'], 'n_cpu_moe': meta['n_cpu_moe'],
+            'ctx': meta['ctx'], 'batch': meta['batch'],
             'n_max': meta['n_max'], 'p_min': meta['p_min'],
             'drafter': meta['drafter'], 'reasoning': meta['reasoning'],
             'decode': None, 'prefill': None, 'pre_ms': None, 'dec_ms': None,
@@ -140,7 +138,6 @@ lines.append("|---|---|")
 lines.append("| model | Section header name from models.ini |")
 lines.append("| ctx | Context window size |")
 lines.append("| batch | batch-size |")
-lines.append("| n_cpu_moe | n-cpu-moe (CPU-MoE offload layers; MoE models only) |")
 lines.append("| n_max | spec-draft-n-max (MTP models only) |")
 lines.append("| p_min | spec-draft-p-min (MTP models only) |")
 lines.append("| drafter | in-model / Q4_0 root / none |")
@@ -169,15 +166,14 @@ lines.append("- decode_t/s measured over a full 4000-token window (150-token dec
 lines.append("")
 lines.append("## Benchmark Data")
 lines.append("")
-lines.append("| model | ctx | batch | n_cpu_moe | n_max | p_min | drafter | reasoning | decode_t/s | prefill_t/s | prefill_ms | decode_ms | pre_tok_ms | dec_tok_ms | acc | placement | cpu% | gpu% | temp_c | power_w | vram | ram | rss |")
-lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+lines.append("| model | ctx | batch | n_max | p_min | drafter | reasoning | decode_t/s | prefill_t/s | prefill_ms | decode_ms | pre_tok_ms | dec_tok_ms | acc | placement | cpu% | gpu% | temp_c | power_w | vram | ram | rss |")
+lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
 for name, b in rows:
     lines.append("| " + " | ".join([
         f"`{name}`",
         fmt_ctx(b['ctx']),
         f(b['batch']),
-        f(b['n_cpu_moe']),
         f(b['n_max']),
         f(b['p_min']),
         f(b['drafter']),

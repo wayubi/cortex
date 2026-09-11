@@ -187,90 +187,6 @@ print(mm.group(1) if mm else '')
 "
 }
 
-# Generic single-key reader (mirrors read_batch/read_ctx for an arbitrary key).
-read_key() {
-  local KEY=$1
-  python3 -c "
-import re
-with open('$INI') as f: content = f.read()
-m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', content, re.DOTALL)
-sec = m.group(1) if m else ''
-mm = re.search(r'^\s*'+re.escape('$KEY')+r'\s*=\s*(\S+)', sec, re.MULTILINE)
-print(mm.group(1) if mm else '')
-"
-}
-
-# plan-moe-gpu-underutilization §19: resolve the model's hf repo to its local GGUF
-# blob (same resolution cmd_bench uses for MODEL_FILE_SIZE) and parse just the GGUF
-# header — no llama.cpp/gguf dependency — for <arch>.block_count. Used as the
-# practical ceiling for the --n-cpu-moe search (cmd_cpumoe_discover).
-# NOTE: for an MTP GGUF, block_count may include a trailing MTP/nextn draft block
-# appended after the real transformer stack (confirmed against a live model in the
-# plan's revision notes) — --n-cpu-moe governs the MAIN model only, the draft has
-# its own --spec-draft-n-cpu-moe. Treat the returned count as an upper bound to
-# search under, not an exact layer semantics guarantee.
-# Echoes the integer, or empty string if it can't be resolved/parsed.
-gguf_block_count() {
-  python3 -c "
-import os, re, glob, struct
-with open('$INI') as f: c = f.read()
-m = re.search(r'\['+re.escape('$MODEL')+r'\].*?hf\s*=\s*(\S+)', c, re.DOTALL)
-if not m: exit()
-repo = m.group(1).split(':')[0]
-hub = os.path.join('$ROOT', '.local', 'llama-cpp_data', 'hub', 'models--' + repo.replace('/', '--'))
-paths = []
-for snap in sorted(glob.glob(os.path.join(hub, 'snapshots', '*'))):
-    for gguf in glob.glob(os.path.join(snap, '*.gguf')):
-        base = os.path.basename(gguf)
-        if 'mmproj' in base or base.startswith('mtp-'):
-            continue
-        paths.append(gguf)
-if not paths: exit()
-path = paths[0]
-
-TYPE_SIZES = {0:1,1:1,2:2,3:2,4:4,5:4,6:4,7:1,10:8,11:8,12:8}
-TYPE_FMT = {0:'<B',1:'<b',2:'<H',3:'<h',4:'<I',5:'<i',6:'<f',7:'<?',10:'<Q',11:'<q',12:'<d'}
-try:
-    with open(path, 'rb') as f:
-        if f.read(4) != b'GGUF': exit()
-        f.read(4)   # version
-        f.read(8)   # tensor_count
-        kv_count = struct.unpack('<Q', f.read(8))[0]
-        def read_str():
-            n = struct.unpack('<Q', f.read(8))[0]
-            return f.read(n).decode('utf-8', 'replace')
-        def read_val(vtype):
-            if vtype == 8:
-                return read_str()
-            if vtype == 9:
-                atype = struct.unpack('<I', f.read(4))[0]
-                alen = struct.unpack('<Q', f.read(8))[0]
-                if atype == 8:
-                    for _ in range(alen): read_str()
-                else:
-                    f.seek(TYPE_SIZES[atype] * alen, 1)
-                return None
-            sz = TYPE_SIZES[vtype]
-            return struct.unpack(TYPE_FMT[vtype], f.read(sz))[0]
-        arch = None
-        counts = {}
-        for _ in range(kv_count):
-            key = read_str()
-            vtype = struct.unpack('<I', f.read(4))[0]
-            val = read_val(vtype)
-            if key == 'general.architecture':
-                arch = val
-            elif key.endswith('.block_count'):
-                counts[key] = val
-        bc = counts.get((arch or '') + '.block_count')
-        if bc is None and len(counts) == 1:
-            bc = next(iter(counts.values()))
-        print(bc if bc is not None else '')
-except Exception:
-    pass
-" 2>/dev/null
-}
-
 # Set a key value, preserving the existing line's key+padding prefix
 set_key() {
   local KEY=$1 VALUE=$2
@@ -298,24 +214,6 @@ if not found:
 with open(ini, 'w') as f:
     f.write(content[:m.start(2)] + '\n'.join(new_lines) + content[m.end(2):])
 print(f'  {key} = {value}')
-"
-}
-
-# Remove a key's line entirely (used to undo set_key when the key did not exist
-# before — e.g. cmd_cpumoe_discover restoring a model that had no n-cpu-moe key).
-# No-op (prints nothing, doesn't error) if the key isn't present.
-remove_key() {
-  local KEY=$1
-  python3 -c "
-import re, sys
-key='$KEY'; model='$MODEL'; ini='$INI'
-with open(ini) as f: content = f.read()
-m = re.search(r'(\['+re.escape(model)+r'\])(.*?)(?=\n\[|\Z)', content, re.DOTALL)
-if not m: sys.exit(0)
-section = m.group(2)
-new_lines = [l for l in section.split('\n') if not re.match(r'\s*'+re.escape(key)+r'\s*=', l)]
-with open(ini, 'w') as f:
-    f.write(content[:m.start(2)] + '\n'.join(new_lines) + content[m.end(2):])
 "
 }
 
@@ -489,7 +387,6 @@ data['config'] = {
     'cache_type_k': kv(sec, 'cache-type-k', kv(star, 'cache-type-k')),
     'cache_type_v': kv(sec, 'cache-type-v', kv(star, 'cache-type-v')),
     'ngl': kv(sec, 'ngl', kv(star, 'ngl')),
-    'n_cpu_moe': int(kv(sec, 'n-cpu-moe')) if kv(sec, 'n-cpu-moe') and kv(sec, 'n-cpu-moe').isdigit() else None,
     'hf': hf,
     'quant': hf.split(':')[-1] if hf and ':' in hf else None,
     'reasoning': kv(sec, 'reasoning', 'off'),
@@ -570,37 +467,6 @@ with open('$INI','w') as f: f.write(c[:m.start(2)] + '\n'.join(new_lines) + c[m.
     log "  MTP values NOT inherited (parent JSON predates tuning_status; re-run 'bench.sh mtp $PARENT' to stamp it)"
   else
     log "  MTP values NOT inherited (parent tuning_status=$PARENT_TUNING)"
-  fi
-
-  # plan-moe-gpu-underutilization §19: propagate n-cpu-moe to the child ONLY when
-  # the parent's cpu_moe search actually applied a winner (mirrors the MTP
-  # tuning_status gate above — an untested/no-improvement parent must not push a
-  # stale or meaningless key onto siblings).
-  local PARENT_CPUMOE_STATUS
-  PARENT_CPUMOE_STATUS=$(python3 -c "
-import json
-try:
-    d = json.load(open('$MODELS_DIR/$PARENT.json'))
-except Exception:
-    print('missing'); exit()
-print((d.get('cpu_moe') or {}).get('status') or 'unknown')
-")
-  if [ "$PARENT_CPUMOE_STATUS" = "applied" ]; then
-    local PARENT_NCPUMOE
-    PARENT_NCPUMOE=$(python3 -c "
-import re
-with open('$INI') as f: c = f.read()
-m = re.search(r'(\['+re.escape('$PARENT')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
-sec = m.group(2) if m else ''
-v = re.search(r'n-cpu-moe\s*=\s*(\S+)', sec)
-print(v.group(1) if v else '')
-")
-    if [ -n "$PARENT_NCPUMOE" ]; then
-      local SAVE_MODEL="$MODEL"; MODEL="$CHILD"
-      set_key n-cpu-moe "$PARENT_NCPUMOE" >/dev/null 2>&1
-      MODEL="$SAVE_MODEL"
-      log "  Inherited parent CPU-MoE config: n-cpu-moe=$PARENT_NCPUMOE"
-    fi
   fi
 }
 
@@ -2261,7 +2127,6 @@ run_decode_test() {
 # read everything that was measured) and folded into the status JSON by
 # write_mtp_status.
 mtp_status_file() { echo "/tmp/mtp_status_${MODEL}.json"; }
-cpumoe_status_file() { echo "/tmp/cpumoe_status_${MODEL}.json"; }
 mtp_sample_file() { echo "/tmp/mtp_samples_${MODEL}.tsv"; }
 
 mtp_init_samples() {
@@ -3669,14 +3534,9 @@ cmd_bisect_discover() {
   # sample / cliff check can change the batch answer. Skip residency after rung
   # 256 and skip the decode baseline + pick decode-sample/cliff for these models.
   # Saturation, long-decode and the OOM gates are unchanged.
-  # plan-moe-gpu-underutilization §19: a model with cpu-moe/n-cpu-moe set also has
-  # CPU-resident expert compute (same reason as override-tensor) and is therefore
-  # NOT batch-independent — must be excluded from SIMPLE_NONMTP the same way.
   local SIMPLE_NONMTP=0
   if ! grep -q "spec-type.*draft-mtp" <(read_section) \
-     && ! grep -q "override-tensor" <(read_section) \
-     && ! grep -q "^\s*n-cpu-moe\s*=" <(read_section) \
-     && ! grep -q "^\s*cpu-moe\s*=" <(read_section); then
+     && ! grep -q "override-tensor" <(read_section); then
     SIMPLE_NONMTP=1
   fi
 
@@ -4289,240 +4149,6 @@ with open('$DISC_JSON','w') as f:
   exit 0
 }
 
-# ── SUBCOMMAND: cpumoe discover (md/plan-moe-gpu-underutilization-cpu-moe-optimization.md) ──
-# Conditional --n-cpu-moe search. Only acts on a model whose EXISTING bench record
-# (models/<model>.json, from a prior `cmd_bench` run) shows CPU-bound execution with
-# GPU headroom to recover — plan §7 gate: placement=="CPU" AND avg_gpu_util_pct<50.
-# NOT wired into `all`/run_full_suite (plan §17: conservative, opt-in) — invoke
-# explicitly: `bench.sh cpumoe <model...>`.
-#
-# Search: --n-cpu-moe bisected over [0, block_count], where block_count comes from
-# the model's own GGUF header (gguf_block_count) — a monotonic single-integer knob,
-# not the regex ladder originally proposed (see the plan's Revision Notes). Both the
-# baseline (N=0) and every candidate are measured with the SAME probe
-# (decode_guarded_probe, full mode) so the significance comparison in §14 is
-# apples-to-apples — NOT compared against cmd_bench's own decode figure, which uses
-# a different prompt/window and would bias the comparison.
-#
-# Batch-size is NOT re-optimized here — plan §12 says retest batch (bisect) AFTER a
-# CPU-MoE winner is picked, as a separate follow-up run; likewise an MTP model's
-# n_max/p_min should be re-tuned after (plan §11 step 8.5) — this function only
-# prints that reminder, it does not auto-chain into bisect/mtp.
-#
-# A candidate is adopted only if it beats the fresh N=0 baseline by more than
-# CPUMOE_SIGNIFICANCE percent (plan §14); otherwise models.ini is restored exactly
-# to its pre-run state (remove_key, not set_key 0 — so a "no improvement" verdict
-# doesn't turn a SIMPLE_NONMTP model into a non-simple one for future bisect runs).
-#
-# Writes n-cpu-moe=<N> to models.ini only on a real win, plus a status file
-# /tmp/cpumoe_status_${MODEL}.json (mirrors /tmp/mtp_status_${MODEL}.json) for
-# cmd_bench to merge into the JSON record as top-level `cpu_moe` (§19).
-CPUMOE_SIGNIFICANCE=5   # percent decode improvement required to adopt a non-baseline N
-
-# $1=status $2=n_cpu_moe(int or empty) $3=reason. Reads BASE_DECODE/WIN_DECODE/
-# BLOCK_COUNT from the caller's local scope (bash dynamic scoping — same pattern
-# restore_batch/restore_mtp already rely on elsewhere in this file).
-write_cpumoe_status() {
-  local STATUS=$1 NCPUMOE=$2 REASON=$3
-  python3 -c "
-import json, datetime
-ncm = '$NCPUMOE'
-def numor(v):
-    try: return float(v) if v not in ('', 'null') else None
-    except Exception: return None
-json.dump({
-    'status': '$STATUS',
-    'n_cpu_moe': int(ncm) if ncm not in ('', 'null') else None,
-    'reason': '''$REASON''',
-    'baseline_decode_t_s': numor('${BASE_DECODE:-}'),
-    'winner_decode_t_s': numor('${WIN_DECODE:-}'),
-    'block_count': numor('${BLOCK_COUNT:-}'),
-    'written_at': datetime.datetime.now().isoformat(),
-}, open('/tmp/cpumoe_status_${MODEL}.json', 'w'), indent=2)
-" 2>/dev/null
-}
-
-cmd_cpumoe_discover() {
-  local CTX=$(read_ctx)
-  [ -z "$CTX" ] && { log "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
-  SERVED_GRACE=$(served_grace "$CTX")
-  # Pre-declared so write_cpumoe_status never hits `set -u` on an early exit path.
-  local BASE_DECODE="" WIN_DECODE="" BLOCK_COUNT=""
-
-  # ── §7 trigger: read the model's EXISTING bench record ──
-  local JSON_FILE="${MODELS_DIR}/${MODEL}.json"
-  if [ ! -f "$JSON_FILE" ]; then
-    log "  $MODEL: no existing bench record ($JSON_FILE) — run 'bench.sh bench $MODEL' first"
-    write_cpumoe_status "not_triggered" "" "no bench record"
-    exit 0
-  fi
-  local BASE_PLACEMENT BASE_GPU RECORDED_DECODE
-  read -r BASE_PLACEMENT BASE_GPU RECORDED_DECODE < <(python3 -c "
-import json
-d = json.load(open('$JSON_FILE'))
-print(d.get('placement','?'), d.get('hardware',{}).get('run',{}).get('avg_gpu_util_pct',0), d.get('speed',{}).get('decode_t_s',0))
-" 2>/dev/null)
-  log "Model: $MODEL | ctx: $CTX | recorded: placement=$BASE_PLACEMENT gpu=${BASE_GPU}% decode=${RECORDED_DECODE}t/s"
-
-  if [ "$BASE_PLACEMENT" != "CPU" ] || ! python3 -c "exit(0 if float('${BASE_GPU:-100}') < 50 else 1)" 2>/dev/null; then
-    log "  Trigger not met (placement=$BASE_PLACEMENT, avg_gpu_util_pct=$BASE_GPU — need CPU + <50%) — skipping"
-    write_cpumoe_status "not_triggered" "" "placement=$BASE_PLACEMENT avg_gpu_util_pct=$BASE_GPU"
-    exit 0
-  fi
-
-  # ── Ceiling: block_count from the model's GGUF header ──
-  BLOCK_COUNT=$(gguf_block_count)
-  if [ -z "$BLOCK_COUNT" ] || [ "$BLOCK_COUNT" -le 0 ] 2>/dev/null; then
-    log "  ERROR: could not resolve block_count from GGUF header for $MODEL — check hf= resolves to a local .gguf blob"
-    write_cpumoe_status "failed" "" "block_count unresolved"
-    exit 1
-  fi
-  log "  block_count=$BLOCK_COUNT (search ceiling for --n-cpu-moe)"
-
-  # Snapshot for restore-on-failure/no-improvement.
-  local ORIG_NCPUMOE=$(read_key n-cpu-moe)
-  local RESTORED=0
-  restore_ncpumoe() {
-    [ "${RESTORED:-0}" -eq 1 ] && return
-    if [ -n "${ORIG_NCPUMOE:-}" ]; then
-      log "  Restoring original n-cpu-moe=$ORIG_NCPUMOE"
-      set_key n-cpu-moe "$ORIG_NCPUMOE" >/dev/null 2>&1
-    else
-      remove_key n-cpu-moe >/dev/null 2>&1
-    fi
-    RESTORED=1
-  }
-  trap 'RC=$?; if [ "$RC" -ne 0 ]; then restore_ncpumoe; fi; exit $RC' EXIT
-
-  # Measure candidate N: write the key, restart, tiny-probe (OOM/stall gate), then
-  # decode_guarded_probe (full mode) → "prefill|decode|cpu" in $MEASURE_RESULT
-  # ("STALL" on cold-load hang, "0|0|0" on tiny-probe OOM/fail).
-  # Deliberately NOT called via command substitution: restart/tiny_probe print
-  # their own progress straight to the terminal/log (by design, like every other
-  # restart call in this file) — wrapping this whole function in $(...) would
-  # capture that chatter into the result string right along with it (caught live
-  # against glm-4.7-30b-a3b-flash-q4-64k: "prefill=  Restarting llama-cpp... t/s").
-  # Only decode_guarded_probe's own output is meant to be captured, so it alone is
-  # assigned via $(...), and callers read $MEASURE_RESULT rather than a return value.
-  MEASURE_RESULT=""
-  measure_n() {
-    local N=$1
-    set_key n-cpu-moe "$N" >/dev/null
-    restart
-    local T_RC=0
-    tiny_probe || T_RC=$?
-    if [ "$T_RC" -eq 2 ]; then MEASURE_RESULT="STALL"; return 0; fi
-    if [ "$T_RC" -ne 0 ]; then MEASURE_RESULT="0|0|0"; return 0; fi
-    MEASURE_RESULT=$(decode_guarded_probe "$CTX")
-  }
-
-  log ""; log "=== CPU-MOE BASELINE (N=0, same probe as every candidate) ==="
-  local RESULT PF DC CP
-  measure_n 0
-  RESULT=$MEASURE_RESULT
-  if [ "$RESULT" = "STALL" ]; then
-    log "  N=0: STALL — aborting cpu-moe search"
-    write_cpumoe_status "failed" "" "stall at baseline N=0"
-    exit 1
-  fi
-  IFS='|' read -r PF DC CP <<< "$RESULT"
-  BASE_DECODE=${DC:-0}
-  log "  N=0: prefill=${PF:-0} t/s decode=${BASE_DECODE} t/s cpu=${CP:-0}%"
-
-  log ""; log "=== CPU-MOE LADDER (ceiling=$BLOCK_COUNT) ==="
-  local BEST_N=0 BEST_DECODE=$BASE_DECODE
-  local -a LAD_N=()
-  # Coarse ladder: quarters of block_count (plan §8 — coarse-to-fine, not exhaustive).
-  local STEP=$(( (BLOCK_COUNT + 3) / 4 )); [ "$STEP" -lt 1 ] && STEP=1
-  local N=$STEP
-  while [ "$N" -le "$BLOCK_COUNT" ]; do
-    log "  --- N=$N ---"
-    measure_n "$N"
-    RESULT=$MEASURE_RESULT
-    if [ "$RESULT" = "STALL" ]; then
-      log "  N=$N: STALL — aborting cpu-moe search"
-      write_cpumoe_status "failed" "" "stall at N=$N"
-      exit 1
-    fi
-    IFS='|' read -r PF DC CP <<< "$RESULT"
-    log "  N=$N: prefill=${PF:-0} t/s decode=${DC:-0} t/s cpu=${CP:-0}%"
-    LAD_N+=("$N")
-    if python3 -c "exit(0 if float(${DC:-0}) > float($BEST_DECODE) else 1)" 2>/dev/null; then
-      BEST_N=$N; BEST_DECODE=$DC
-    fi
-    N=$((N + STEP))
-  done
-  # Always include full offload (--cpu-moe equivalent) if the ladder didn't land on it.
-  if [ "${LAD_N[-1]:-0}" -ne "$BLOCK_COUNT" ]; then
-    log "  --- N=$BLOCK_COUNT (full offload, --cpu-moe equivalent) ---"
-    measure_n "$BLOCK_COUNT"
-    RESULT=$MEASURE_RESULT
-    if [ "$RESULT" != "STALL" ]; then
-      IFS='|' read -r PF DC CP <<< "$RESULT"
-      log "  N=$BLOCK_COUNT: prefill=${PF:-0} t/s decode=${DC:-0} t/s cpu=${CP:-0}%"
-      if python3 -c "exit(0 if float(${DC:-0}) > float($BEST_DECODE) else 1)" 2>/dev/null; then
-        BEST_N=$BLOCK_COUNT; BEST_DECODE=$DC
-      fi
-    fi
-  fi
-
-  # ── Bounded refine: probe the two ladder-step midpoints around BEST_N (plan §8 —
-  # a single bounded pass, not exhaustive golden-section). Skipped at either edge. ──
-  if [ "$BEST_N" -gt 0 ] && [ "$BEST_N" -lt "$BLOCK_COUNT" ]; then
-    local MID_LO=$((BEST_N - STEP / 2)) MID_HI=$((BEST_N + STEP / 2))
-    [ "$MID_LO" -lt 1 ] && MID_LO=1
-    [ "$MID_HI" -gt "$BLOCK_COUNT" ] && MID_HI=$BLOCK_COUNT
-    local CAND
-    for CAND in "$MID_LO" "$MID_HI"; do
-      [ "$CAND" -eq "$BEST_N" ] && continue
-      log "  --- refine N=$CAND ---"
-      measure_n "$CAND"
-      RESULT=$MEASURE_RESULT
-      [ "$RESULT" = "STALL" ] && continue
-      IFS='|' read -r PF DC CP <<< "$RESULT"
-      log "  N=$CAND: prefill=${PF:-0} t/s decode=${DC:-0} t/s cpu=${CP:-0}%"
-      if python3 -c "exit(0 if float(${DC:-0}) > float($BEST_DECODE) else 1)" 2>/dev/null; then
-        BEST_N=$CAND; BEST_DECODE=$DC
-      fi
-    done
-  fi
-
-  # ── §14 significance gate ──
-  local IMPROVEMENT_PCT
-  IMPROVEMENT_PCT=$(python3 -c "
-b = float($BASE_DECODE) if float($BASE_DECODE) > 0 else 0.0001
-print(round((float($BEST_DECODE) - b) / b * 100, 1))
-")
-  log ""; log "=== RESULT ==="
-  log "  baseline decode=${BASE_DECODE} t/s (N=0, freshly measured)"
-  log "  best found: N=$BEST_N decode=${BEST_DECODE} t/s (${IMPROVEMENT_PCT}% vs baseline)"
-
-  if [ "$BEST_N" -eq 0 ] || ! python3 -c "exit(0 if $IMPROVEMENT_PCT > $CPUMOE_SIGNIFICANCE else 1)" 2>/dev/null; then
-    log "  Improvement (${IMPROVEMENT_PCT}%) does not exceed the ${CPUMOE_SIGNIFICANCE}% significance threshold — not adopting"
-    restore_ncpumoe
-    trap - EXIT
-    write_cpumoe_status "no_improvement" "0" "best N=$BEST_N improvement ${IMPROVEMENT_PCT}% (threshold ${CPUMOE_SIGNIFICANCE}%)"
-    log ""; log "  Next: no change. Batch/MTP retest (§12) not needed."
-    log "=== DONE ==="
-    exit 0
-  fi
-
-  local WIN_DECODE=$BEST_DECODE
-  set_key n-cpu-moe "$BEST_N" >/dev/null
-  trap - EXIT
-  write_cpumoe_status "applied" "$BEST_N" "improvement ${IMPROVEMENT_PCT}% over baseline"
-  log ""; log "  *** APPLIED n-cpu-moe=$BEST_N (${IMPROVEMENT_PCT}% decode improvement) ***"
-  log ""; log "  Next (plan §11/§12):"
-  log "    1. bench.sh bisect $MODEL   (batch retest — CPU-MoE changed available VRAM)"
-  if grep -q "spec-type.*draft-mtp" <(read_section); then
-    log "    2. bench.sh mtp $MODEL       (MTP was tuned against the old VRAM/compute balance)"
-    log "    3. bench.sh bench $MODEL     (record the final configuration)"
-  else
-    log "    2. bench.sh bench $MODEL     (record the final configuration)"
-  fi
-  log "=== DONE ==="
-}
-
 # ── SUBCOMMAND: bench (full benchmark record) ───────────────
 cmd_bench() {
   local JSON_FILE="${MODELS_DIR}/${MODEL}.json"
@@ -4646,7 +4272,6 @@ print(json.dumps({
         'cache_type_k': kv(sec, 'cache-type-k', kv(star, 'cache-type-k')),
         'cache_type_v': kv(sec, 'cache-type-v', kv(star, 'cache-type-v')),
         'ngl': kv(sec, 'ngl', kv(star, 'ngl')),
-        'n_cpu_moe': int(kv(sec, 'n-cpu-moe')) if kv(sec, 'n-cpu-moe') and kv(sec, 'n-cpu-moe').isdigit() else None,
         'hf': hf,
         'quant': hf.split(':')[-1] if hf and ':' in hf else None,
         'reasoning': kv(sec, 'reasoning', 'off'),
@@ -5053,34 +4678,6 @@ if os.path.exists(_disc_path):
     except Exception:
         discover = {}
 
-# Merge the CPU-MoE search status file (/tmp/cpumoe_status_<model>.json) if
-# present (applied / no_improvement / not_triggered / failed). Defaults to
-# not_run when absent — cmd_cpumoe_discover never ran for this bench (plan
-# md/plan-moe-gpu-underutilization-cpu-moe-optimization.md §19).
-_cpumoe_status = {}
-_cpumoe_path = '/tmp/cpumoe_status_${MODEL}.json'
-if os.path.exists(_cpumoe_path):
-    try:
-        with open(_cpumoe_path) as _cf: _cpumoe_status = json.load(_cf)
-    except Exception:
-        _cpumoe_status = {}
-_cpu_moe = {
-    'status': _cpumoe_status.get('status') if _cpumoe_status else 'not_run',
-    'n_cpu_moe': _cpumoe_status.get('n_cpu_moe') if _cpumoe_status else None,
-    'reason': _cpumoe_status.get('reason') if _cpumoe_status else None,
-    'baseline_decode_t_s': _cpumoe_status.get('baseline_decode_t_s') if _cpumoe_status else None,
-    'winner_decode_t_s': _cpumoe_status.get('winner_decode_t_s') if _cpumoe_status else None,
-    'block_count': _cpumoe_status.get('block_count') if _cpumoe_status else None,
-    'checked_at': _cpumoe_status.get('written_at') if _cpumoe_status else None,
-}
-# Stale guard, same idea as the MTP one above: an "applied" status whose n_cpu_moe
-# no longer matches the configured ini value is not in effect for this record.
-if _cpu_moe['status'] == 'applied' and _cpu_moe['n_cpu_moe'] != meta['config'].get('n_cpu_moe'):
-    _why = 'configured n_cpu_moe (%s) != applied (%s)' % (meta['config'].get('n_cpu_moe'), _cpu_moe['n_cpu_moe'])
-    _cpu_moe['status'] = 'stale'
-    _cpu_moe['reason'] = _why
-    sys.stderr.write('[bench] WARNING: cpu_moe status stale (%s)\n' % _why)
-
 data = {
     'model': '$MODEL',
     'ctx': $CTX,
@@ -5108,7 +4705,6 @@ data = {
         'drafter': meta['mtp']['drafter'],
     },
     'discover': discover if discover else {},
-    'cpu_moe': _cpu_moe,
     'hardware': {
         **env,
         'run': {
@@ -5210,43 +4806,10 @@ reset_parent_full() {
     RESET_DONE["$P"]=1
   else
     log "  $(date +%H:%M:%S) bench FAILED for $P"
-    return 1
-  fi
-
-  # step 5: conditional CPU-MoE search (md/plan-moe-gpu-underutilization-cpu-moe-
-  # optimization.md). cmd_cpumoe_discover's own §7 trigger gate makes this a
-  # near-instant no-op for the large majority of GPU-resident models — it only
-  # does real work (restarts + a ladder search) for models the just-written bench
-  # JSON shows are CPU-bound with GPU headroom. On a real win, batch (and MTP, if
-  # applicable) must be retested against the new VRAM/compute balance and bench
-  # rerun to record accurate final numbers (§12) — done inline here, not left for
-  # a human to remember to run separately.
-  log "  $(date +%H:%M:%S) starting cpumoe for $P"
-  ( cmd_cpumoe_discover ) || true
-  local CPUMOE_STATUS
-  CPUMOE_STATUS=$(python3 -c "
-import json
-try:
-    print(json.load(open('$(cpumoe_status_file)')).get('status','unknown'))
-except Exception:
-    print('unknown')
-" 2>/dev/null)
-  log "  $(date +%H:%M:%S) cpumoe: $CPUMOE_STATUS for $P"
-  if [ "$CPUMOE_STATUS" = "applied" ]; then
-    log "  cpumoe applied — retesting batch (+mtp) and re-recording"
-    ( cmd_bisect ) || log "  cpumoe follow-up bisect FAILED for $P"
-    if [ "$IS_MTP" -eq 1 ]; then
-      ( cmd_mtp ) || log "  cpumoe follow-up mtp FAILED for $P"
-    fi
-    if ( cmd_bench ); then
-      log "  $(date +%H:%M:%S) bench (post-cpumoe) OK for $P"
-    else
-      log "  $(date +%H:%M:%S) bench (post-cpumoe) FAILED for $P"
-    fi
   fi
 }
 
-# ── Full-suite orchestrator (mtpcheck → bisect → mtp → bench → cpumoe*) ──
+# ── Full-suite orchestrator (mtpcheck → bisect → mtp → bench) ──
 run_full_suite() {
   declare -A VERDICTS
   local i NAME s
@@ -5279,22 +4842,22 @@ run_full_suite() {
       PARENT_NAME=$(family_of "$NAME")
       if [ "${RESET_DONE[$NAME]:-0}" -eq 1 ]; then
         lshow "  $NAME: already reset-benched in pre-pass"
-        for s in mtpcheck bisect mtp bench cpumoe; do
+        for s in mtpcheck bisect mtp bench; do
           VERDICTS["$NAME|$s"]="OK (reset)"
         done
       elif [ "$NAME" = "$PARENT_NAME" ]; then
         lshow "  $NAME: family head, already benched (skip)"
-        for s in mtpcheck bisect mtp bench cpumoe; do
+        for s in mtpcheck bisect mtp bench; do
           VERDICTS["$NAME|$s"]="SKIPPED (family head)"
         done
       elif [ "${INHERIT_PARENT_FAILED:-0}" -eq 1 ]; then
         lshow "  $NAME: skipped — parent $PARENT_NAME was not benched this run"
-        for s in mtpcheck bisect mtp bench cpumoe; do
+        for s in mtpcheck bisect mtp bench; do
           VERDICTS["$NAME|$s"]="SKIPPED (parent bench failed)"
         done
       else
         lshow "  $NAME: inheriting from $PARENT_NAME (JSON copied, no bench)"
-        for s in mtpcheck bisect mtp bench cpumoe; do
+        for s in mtpcheck bisect mtp bench; do
           VERDICTS["$NAME|$s"]="SKIPPED (inherited from $PARENT_NAME)"
         done
       fi
@@ -5304,7 +4867,7 @@ run_full_suite() {
     # Change O (§56): wait for weights to be cached before any timed work.
     ensure_model_cached "$NAME" || {
       lshow "  $(date +%H:%M:%S) $NAME: download stall — skipping model"
-      for s in mtpcheck bisect mtp bench cpumoe; do
+      for s in mtpcheck bisect mtp bench; do
         VERDICTS["$NAME|$s"]="SKIPPED (download stall)"
       done
       continue
@@ -5324,7 +4887,7 @@ run_full_suite() {
       local MTP_SF; MTP_SF=$(mtp_status_file)   # §58.3: MODEL=$NAME here
       if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
         lshow "  $NAME: mtpcheck STALL — skipping model (weights never served)"
-        for s in mtpcheck bisect mtp bench cpumoe; do
+        for s in mtpcheck bisect mtp bench; do
           VERDICTS["$NAME|$s"]="SKIPPED (mtpcheck stall)"
         done
         continue
@@ -5363,7 +4926,6 @@ run_full_suite() {
 
     # step 4: bench. With --strict, a failed mtp tune skips bench (§6.4 part 3);
     # otherwise bench still runs and its JSON records tuning_status:failed.
-    VERDICTS["$NAME|cpumoe"]="SKIPPED (bench not run)"
     if [ "$BISECT_FAILED" -eq 1 ]; then
       lshow "  bench: SKIPPED (bisect failed — models.ini batch unreliable)"
       VERDICTS["$NAME|bench"]="SKIPPED (bisect failed)"
@@ -5384,43 +4946,6 @@ run_full_suite() {
         # head (family_of returns the first matching section), so this is always set
         # before any sibling reads it.
         [ "$NAME" = "$(family_of "$NAME")" ] && RESET_DONE["$NAME"]=1
-
-        # step 5: conditional CPU-MoE search (md/plan-moe-gpu-underutilization-
-        # cpu-moe-optimization.md). cmd_cpumoe_discover's own §7 trigger gate makes
-        # this a near-instant no-op for the large majority of GPU-resident models
-        # — it only does real work (restarts + a ladder search) for models the
-        # bench JSON just written above shows are CPU-bound with GPU headroom. On
-        # a real win, batch (and MTP) must be retested against the new VRAM/
-        # compute balance and bench rerun to record accurate final numbers (§12)
-        # — done inline here, not left for a human to remember separately.
-        lshow "  $(date +%H:%M:%S) starting cpumoe for $NAME"
-        ( cmd_cpumoe_discover ) || true
-        local CPUMOE_STATUS
-        CPUMOE_STATUS=$(python3 -c "
-import json
-try:
-    print(json.load(open('$(cpumoe_status_file)')).get('status','unknown'))
-except Exception:
-    print('unknown')
-" 2>/dev/null)
-        VERDICTS["$NAME|cpumoe"]="$CPUMOE_STATUS"
-        lshow "  $(date +%H:%M:%S) cpumoe: $CPUMOE_STATUS for $NAME"
-        if [ "$CPUMOE_STATUS" = "applied" ]; then
-          lshow "  cpumoe applied — retesting batch (+mtp) and re-recording"
-          if ( cmd_bisect ); then
-            if [ "$IS_MTP" -eq 1 ]; then
-              ( cmd_mtp ) || lshow "  cpumoe follow-up mtp FAILED for $NAME"
-            fi
-            if ( cmd_bench ); then
-              VERDICTS["$NAME|bench"]="OK (post-cpumoe)"
-              lshow "  $(date +%H:%M:%S) bench (post-cpumoe) OK for $NAME"
-            else
-              lshow "  $(date +%H:%M:%S) bench (post-cpumoe) FAILED for $NAME — prior bench record stands"
-            fi
-          else
-            lshow "  cpumoe follow-up bisect FAILED for $NAME — models.ini n-cpu-moe applied but batch/bench not retested"
-          fi
-        fi
       else
         VERDICTS["$NAME|bench"]="FAIL"
       fi
@@ -5431,11 +4956,11 @@ except Exception:
   # ── Verdict summary ─────────────────────────────────────────
   lshow ""
   lshow "=== VERDICT SUMMARY ==="
-  lshow "$(printf '%-45s %-8s %-8s %-8s %-8s %-8s' MODEL mtpcheck bisect mtp bench cpumoe)"
+  lshow "$(printf '%-45s %-8s %-8s %-8s %-8s' MODEL mtpcheck bisect mtp bench)"
   for i in $MODEL_IDXS; do
     NAME=$(model_name "$i")
     ROW=$(printf "%-45s" "$NAME")
-    for s in mtpcheck bisect mtp bench cpumoe; do
+    for s in mtpcheck bisect mtp bench; do
       ROW="$ROW  $(printf '%-8s' "${VERDICTS["$NAME|$s"]:-—}")"
     done
     lshow "$ROW"
@@ -5547,14 +5072,14 @@ if [ "$#" -eq 0 ]; then
 
   lshow "=== MASTER PLAN ==="
   lshow "  models: $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)"
-  lshow "  steps: mtpcheck bisect mtp bench cpumoe(conditional, re-bisect+re-bench on a win) (full suite)"
+  lshow "  steps: mtpcheck bisect mtp bench (full suite)"
   if [ "$THOROUGH" -eq 1 ]; then lshow "  depth: thorough"; else lshow "  depth: discover, refine: $REFINE_MODE"; fi
   lshow "  log: $LOG_FILE"
 
   echo ""
   echo "=== PLAN ==="
   for i in $MODEL_IDXS; do
-    echo "  $(model_name "$i"): mtpcheck → bisect → mtp → bench → cpumoe*"
+    echo "  $(model_name "$i"): mtpcheck → bisect → mtp → bench"
   done
   echo ""
   confirm "Proceed with this plan?" || { echo "Aborted."; exit 1; }
@@ -5604,19 +5129,6 @@ case "$CMD" in
       ( cmd_mtp ) || { echo "  $m: mtp tuning FAILED"; continue; }
     done
     ;;
-  cpumoe)
-    # md/plan-moe-gpu-underutilization-cpu-moe-optimization.md — conditional
-    # --n-cpu-moe search. Also runs automatically as step 5 after a successful
-    # bench in `all`/interactive/reset-parent (self-gated by the §7 trigger, so
-    # it's a near-instant no-op for GPU-resident models); this standalone
-    # invocation is for running it directly against an already-benched model
-    # without repeating the whole suite.
-    for m in "$@"; do
-      MODEL=$m
-      ensure_model_cached "$m" || { echo "  $m: STALL (download failed — skipping)"; continue; }
-      ( cmd_cpumoe_discover ) || { echo "  $m: cpumoe search FAILED"; continue; }
-    done
-    ;;
   bench)
     # Pre-pass: if RESET_PARENT, bench each selected model's parent first
     if [ "$RESET_PARENT" -eq 1 ]; then
@@ -5643,14 +5155,13 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|mtp|cpumoe|bench] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|mtp|bench] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
     echo "       bench.sh mtpverify <models...>              # MTP-on vs off output check (premise test)"
     echo "       bench.sh bisect <model> [test-batch]"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
-    echo "       bench.sh cpumoe <models...>                 # conditional --n-cpu-moe search (also runs automatically after bench in 'all'/interactive)"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
     echo "       global flags: --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
