@@ -1,7 +1,109 @@
 # MoE GPU Underutilization and CPU-MoE Optimization Plan
 
 **Date:** 2026-09-10 (revised 2026-09-10 — see Revision Notes)
+**Status: TESTED AND REJECTED (2026-09-10). See §0 below before doing anything with this plan.**
 **Purpose:** Determine whether targeted CPU-MoE offloading can improve inference performance for large MoE models on an RTX 3060 12 GB, and determine how this should fit into the existing `bench.sh` optimization process.
+
+## 0. Outcome (2026-09-10) — Implemented, Tested Live, Reverted
+
+**Do not re-implement this on the current hardware (RTX 3060 12 GB + Xeon E5-2697 v3, 20 of
+28 logical CPUs allocated to llama.cpp) without first addressing the root cause identified
+below — it is very unlikely to help, and the reason is architectural, not a tuning gap.**
+
+### What was built
+
+`bench.sh cpumoe <model>` (a new subcommand, plus wiring into `run_full_suite`/`all`/
+interactive as an automatic conditional step 5 after `bench`) implementing exactly what §7–§11
+below describe: a §7 trigger gate (`placement=="CPU" AND avg_gpu_util_pct<50`, read from the
+model's existing bench JSON), a coarse ladder + bounded refine search over `--n-cpu-moe N`
+(0 → `block_count`, parsed directly from the model's GGUF header), a §14 significance gate
+(>5% decode improvement required to adopt), full status tracking (`/tmp/cpumoe_status_
+<model>.json`, merged into `cmd_bench`'s JSON as `cpu_moe`), and inheritance propagation to
+sibling models. All of this worked correctly and was validated live against the real container
+(including catching and fixing one real bug in the process — a command-substitution capture
+issue in the measurement helper, and a fully unrelated pre-existing bug in `ensure_model_cached`
+that mis-detected every already-cached model as a download failure — see below).
+
+The implementation is fully reverted (`git revert` of commit `1114896421980f0ee3d6ed33ee351d598d54ca8f`,
+recorded as `9f0deb7`). The unrelated `ensure_model_cached` fix was salvaged and re-committed
+separately (`fa5e7be`) since it benefits every subcommand and has nothing to do with CPU-MoE.
+This document is kept, unreverted, specifically so nobody re-derives the same negative result
+from scratch.
+
+### What the live tests showed
+
+Tested for real against 2 of the 3 candidate models (§6). `tiel-coder-35b-a3b-q4-mtp-128k-think`
+was never tested, but given the same result appeared twice on two very differently-sized models
+sharing the same underlying hardware constraint (below), there is no reason to expect it to
+differ — test it only if you have a specific reason to think this model's profile is different
+(e.g., meaningfully lower baseline CPU%).
+
+**Fixed-batch `--n-cpu-moe` sweep (the search as designed, §8):**
+
+| Model | N=0 (baseline) | intermediate N | N=full-offload |
+|---|---|---|---|
+| `glm-4.7-30b-a3b-flash-q4-64k` (block_count=47) | **33.5 t/s** (winner) | N=12,24: OOM · N=36: 30.3 t/s | N=47: 24.1 t/s |
+| `qwen-3.6-35b-a3b-q4-mtp-64k` (block_count=41) | **44.5 t/s** (winner) | N=11,22: OOM · N=33: 38.1 t/s | N=41: 33.3 t/s |
+
+Both models: decode declines monotonically as N increases past the OOM region; nothing ever
+beat baseline. Both already show CPU at 1400–1900% (of a 2000% = 20-thread cap) and GPU at
+only 34–36% utilization **at the baseline, before any CPU-MoE offload is added.**
+
+**Root cause:** the CPU is already the bottleneck at baseline — it is not sitting idle waiting
+for work. This almost certainly means the *current default* (`ngl=-1`, no explicit override)
+already spills whole layers (attention **and** experts together, not just experts) to CPU for
+however many layers don't fit in 12 GB, and those already-CPU-resident layers already load the
+CPU close to its configured ceiling. `--n-cpu-moe N` unconditionally forces *additional* expert
+compute onto that already-saturated CPU — there is no spare CPU capacity for the technique to
+exploit, so every increment of N can only make the slowest pipeline stage slower. Note: 8 of the
+host's 28 logical CPUs are deliberately reserved for other workloads (not a misconfiguration to
+"fix") — the CPU ceiling here is a real, intentional constraint, not slack being left on the
+table.
+
+**Deeper test — does freed VRAM at least let the GPU do more work (bigger batch), even if
+decode doesn't improve?** This was the more interesting question, and was tested directly rather
+than assumed: `n-cpu-moe=36` was set by hand on `glm-4.7-30b-a3b-flash-q4-64k`, and a full batch
+bisect (`bench.sh bisect`) was run at that configuration. The bisect found batch could go all
+the way from 8192 to **16384** (the search cap — VRAM freed by the offloaded experts genuinely
+does unlock a much bigger batch). The bisect's own informal ranking probe (a short, fixed
+~16384-token prompt) showed prefill jumping from ~368 t/s to ~822 t/s — which looked like a
+dramatic win, **but this was a measurement artifact**, not a real one: it compared prefill at a
+short prompt against the baseline's recorded figure at a 49152-token (75%-ctx) prompt, and
+prefill throughput is highly prompt-length-dependent.
+
+Re-measured with the *identical* methodology as the baseline record (real `cmd_bench`, 49152
+tokens, same everything except the new config) —
+
+| | baseline (N=0, batch=8192) | N=36, batch=16384 |
+|---|---|---|
+| prefill t/s | 368.04 | 368.85 (+0.2%, noise) |
+| decode t/s | 33.95 | 32.16 (−5.3%) |
+| avg GPU% | 35.0 | 34.3 (flat) |
+| avg CPU% | 1567 | 1684 (worse) |
+| VRAM (MiB) | 10985 | 11511 (higher, despite freeing weight VRAM — the bigger batch needs a bigger compute buffer) |
+
+**The bigger batch that CPU-MoE unlocks doesn't translate into more real GPU throughput at
+realistic (long) context lengths on this hardware.** Most likely explanation: prefill at 49k+
+tokens is already attention/memory-bandwidth-bound, not batch-parallelism-bound, so the extra
+logical batch capacity has nothing useful to do with itself at that context length — it only
+looked useful in the short synthetic ranking probe used for cheap relative-ranking during search,
+which does not represent a real workload. Net result of the whole experiment: no GPU benefit,
+measurably worse decode, and slightly higher CPU/VRAM usage.
+
+### When this might be worth revisiting
+
+Only if one of the two root-cause preconditions changes:
+- **More CPU headroom becomes available** to llama.cpp specifically (e.g., the 8 reserved
+  logical CPUs are freed up, or a future host has more cores) — even then, re-verify the
+  *decode* case still fails the same way rather than assuming headroom alone fixes it.
+- **A workload emerges where prefill throughput at short-to-medium context actually matters**
+  (the freed-VRAM/bigger-batch mechanism might still show something real there, since that's
+  closer to the length the bisect's own ranking probe used) — this was never tested; everything
+  above measured near-full-context (49k–65k token) prefill, which is what this fleet's models
+  are actually configured and used for.
+
+Absent one of those, re-attempting this exact approach on this exact hardware will very likely
+reproduce the same negative result at the cost of another multi-restart live search per model.
 
 ## Revision Notes (2026-09-10)
 
