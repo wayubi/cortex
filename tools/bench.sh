@@ -381,6 +381,38 @@ with open(ini, 'w') as f:
 "
 }
 
+# Like set_key, but writes into an arbitrary named section rather than the
+# global $MODEL — needed by inherit_json to write into $CHILD's section while
+# $MODEL may be set to something else. Insert-or-replace (mirrors set_key).
+set_key_for() {
+  local SECTION=$1 KEY=$2 VALUE=$3
+  python3 -c "
+import re, sys
+section='$SECTION'; key='$KEY'; value='$VALUE'; ini='$INI'
+with open(ini) as f: content = f.read()
+m = re.search(r'(\['+re.escape(section)+r'\])(.*?)(?=\n\[|\Z)', content, re.DOTALL)
+if not m: print('ERROR: section not found'); sys.exit(1)
+section_text = m.group(2)
+new_lines = []
+found = False
+for line in section_text.split('\n'):
+    if re.match(r'\s*'+re.escape(key)+r'\s*=', line):
+        prefix = line.split('=')[0] + '='
+        new_lines.append(prefix + ' ' + value)
+        found = True
+    else:
+        new_lines.append(line)
+if not found:
+    keys = [l.split('=')[0].strip() for l in section_text.split('\n') if '=' in l and not l.strip().startswith(('#',';'))]
+    max_len = max((len(k) for k in keys), default=len(key))
+    pad = max_len - len(key) + 1
+    new_lines.insert(1, key + ' ' * pad + '= ' + value)
+with open(ini, 'w') as f:
+    f.write(content[:m.start(2)] + '\n'.join(new_lines) + content[m.end(2):])
+print('written')
+"
+}
+
 # Copy parent JSON to child: overwrite model, apply child's sampling config, mark propagated.
 inherit_json() {
   local PARENT=$1 CHILD=$2
@@ -456,7 +488,15 @@ ts = (d.get('mtp') or {}).get('tuning_status')
 print(ts if ts else 'unknown')
 ")
   if [ "$PARENT_TUNING" = "ok" ]; then
-    local PARENT_NMAX PARENT_PMIN
+    local PARENT_SPEC_TYPE PARENT_NMAX PARENT_PMIN
+    PARENT_SPEC_TYPE=$(python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+m = re.search(r'(\['+re.escape('$PARENT')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
+sec = m.group(2) if m else ''
+v = re.search(r'spec-type\s*=\s*(\S+)', sec)
+print(v.group(1) if v else '')
+")
     PARENT_NMAX=$(python3 -c "
 import re
 with open('$INI') as f: c = f.read()
@@ -473,23 +513,14 @@ sec = m.group(2) if m else ''
 v = re.search(r'spec-draft-p-min\s*=\s*(\S+)', sec)
 print(v.group(1) if v else '')
 ")
-    python3 -c "
-import re
-with open('$INI') as f: c = f.read()
-m = re.search(r'(\['+re.escape('$CHILD')+r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
-if not m: exit()
-sec = m.group(2); new_lines = []
-nmax = '${PARENT_NMAX}'; pmin = '${PARENT_PMIN}'
-for line in sec.split('\n'):
-    if re.match(r'\s*spec-draft-n-max\s*=', line) and nmax:
-        new_lines.append('spec-draft-n-max = ' + nmax)
-    elif re.match(r'\s*spec-draft-p-min\s*=', line) and pmin:
-        new_lines.append('spec-draft-p-min = ' + pmin)
-    else:
-        new_lines.append(line)
-with open('$INI','w') as f: f.write(c[:m.start(2)] + '\n'.join(new_lines) + c[m.end(2):])
-" 2>/dev/null
-    log "  Inherited parent MTP config: spec-draft-n-max=${PARENT_NMAX:-?} spec-draft-p-min=${PARENT_PMIN:-?}"
+    if [ -n "$PARENT_SPEC_TYPE" ] && [ -n "$PARENT_NMAX" ] && [ -n "$PARENT_PMIN" ]; then
+      set_key_for "$CHILD" spec-type "$PARENT_SPEC_TYPE" >/dev/null
+      set_key_for "$CHILD" spec-draft-n-max "$PARENT_NMAX" >/dev/null
+      set_key_for "$CHILD" spec-draft-p-min "$PARENT_PMIN" >/dev/null
+      log "  Inherited parent MTP config: spec-type=$PARENT_SPEC_TYPE spec-draft-n-max=$PARENT_NMAX spec-draft-p-min=$PARENT_PMIN"
+    else
+      log "  MTP values NOT inherited (parent tuning_status=ok but spec-type/n-max/p-min incomplete in parent section — inspect $PARENT's ini entry)"
+    fi
   elif [ "$PARENT_TUNING" = "unknown" ]; then
     log "  MTP values NOT inherited (parent JSON predates tuning_status; re-run 'bench.sh mtp $PARENT' to stamp it)"
   else
