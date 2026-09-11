@@ -172,7 +172,16 @@ with open('$INI') as f: content = f.read()
 m = re.search(r'\['+re.escape('$MODEL')+r'\](.*?)(?=\n\[|\Z)', content, re.DOTALL)
 sec = m.group(1) if m else ''
 mm = re.search(r'^\s*ctx-size\s*=\s*(\d+)', sec, re.MULTILINE)
-print(mm.group(1) if mm else '')
+if mm:
+    print(mm.group(1))
+else:
+    # Pre-existing bug (found 2026-09-10): a model section may validly omit
+    # ctx-size and inherit [*]'s default instead — this must fall back to [*],
+    # not report 'not found', or every downstream ctx-size check breaks.
+    star_m = re.search(r'\[\*\](.*?)(?=\n\[|\Z)', content, re.DOTALL)
+    star_sec = star_m.group(1) if star_m else ''
+    sm = re.search(r'^\s*ctx-size\s*=\s*(\d+)', star_sec, re.MULTILINE)
+    print(sm.group(1) if sm else '')
 "
 }
 
@@ -291,23 +300,41 @@ family_of() {
 import re
 with open('$INI') as f: c = f.read()
 sections = re.split(r'(?m)^\[', c)
+
+# Pre-existing bug (found 2026-09-10): a model section may validly omit
+# ctx-size and inherit [*]'s default. The original version only looked at each
+# section's own ctx-size, so my_ctx stayed None for such a model, the second
+# loop's 'ctx.group(1) == my_ctx' (str vs None) never matched, the function
+# printed nothing, and the caller's family_of result was '' — which then blew
+# up any \"\${RESET_DONE[\$PARENT]}\" lookup as a bad (empty) array subscript.
+# effective_ctx() falls back to [*] the same way every other per-model key
+# (temp, top-p, threads, ...) already falls back elsewhere in this file.
+star_ctx = None
+for s in sections[1:]:
+    if s.split(']')[0].strip() == '*':
+        m = re.search(r'ctx-size\s*=\s*(\S+)', s)
+        if m: star_ctx = m.group(1)
+        break
+
+def effective_ctx(s):
+    m = re.search(r'ctx-size\s*=\s*(\S+)', s)
+    return m.group(1) if m else star_ctx
+
 my_hf = my_ctx = None
 for s in sections[1:]:
     name = s.split(']')[0].strip()
     if name == '*' or not name: continue
     if name == '$MODEL':
         hf = re.search(r'hf\s*=\s*(\S+)', s)
-        ctx = re.search(r'ctx-size\s*=\s*(\S+)', s)
         if hf: my_hf = hf.group(1)
-        if ctx: my_ctx = ctx.group(1)
+        my_ctx = effective_ctx(s)
         break
 if my_hf is None: print('$MODEL'); exit()
 for s in sections[1:]:
     name = s.split(']')[0].strip()
     if name == '*' or not name: continue
     hf = re.search(r'hf\s*=\s*(\S+)', s)
-    ctx = re.search(r'ctx-size\s*=\s*(\S+)', s)
-    if hf and ctx and hf.group(1) == my_hf and ctx.group(1) == my_ctx:
+    if hf and hf.group(1) == my_hf and effective_ctx(s) == my_ctx:
         print(name); break
 "
 }
