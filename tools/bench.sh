@@ -1732,7 +1732,15 @@ print(hf.group(1) if hf else '')
 " 2>/dev/null || echo "")
   [ -z "$HF" ] && return 0
   local REPO="${HF%%:*}"
-  local HUB_DIR="$ROOT/.local/llama-cpp_data/hub/models--$(echo "$REPO" | tr '/' '--')"
+  # `tr '/' '--'` here was a pre-existing bug: tr maps character-by-character, so
+  # a 1-char SET1 only ever uses the FIRST char of SET2 — it produced a single
+  # dash (e.g. "models--unsloth-GLM-4.7-Flash-GGUF"), not HF's real double-dash
+  # convention ("models--unsloth--GLM-4.7-Flash-GGUF"), so this always missed the
+  # real hub dir and made ensure_model_cached report every already-cached model as
+  # a stall after the full DL_IDLE_MAX×DL_POLL_SEC wait. cmd_bench's
+  # MODEL_FILE_SIZE resolution does this correctly via Python's .replace('/', '--')
+  # — mirror that intent with bash parameter substitution.
+  local HUB_DIR="$ROOT/.local/llama-cpp_data/hub/models--${REPO/\//--}"
   local REFS_MAIN="$HUB_DIR/refs/main"
 
   # Check for an active or interrupted download (primary signal).
