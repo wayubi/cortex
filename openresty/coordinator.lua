@@ -7,6 +7,23 @@ local HOST = { ollama = "ollama", llama_cpp = "llama-cpp", nllb = "nllb" }
 
 local DRAIN_TIMEOUT = 600
 
+-- How long to wait, after issuing an unload, for the backend to actually
+-- confirm the old model is gone (VRAM released) before letting the next
+-- model's load begin. Unload today is fire-and-forget: the HTTP call
+-- returning only means the exit/unload command was accepted, not that the
+-- child process has actually torn down and released its GPU memory yet.
+-- Observed live: a model can take 10+ seconds to exit, and the router will
+-- force-kill it after its own internal grace period if it doesn't. Without
+-- this wait, a new model's --n-gpu-layers=-1 auto-fit can run while the old
+-- model's VRAM is still allocated, silently deciding to put far more layers
+-- on CPU than it would with a clean slate — a decision that then sticks for
+-- that instance's entire lifetime (llama.cpp does not rebalance placement
+-- after load). UNLOAD_CONFIRM_TIMEOUT is set comfortably above the router's
+-- own ~10s force-kill grace so we wait through that plus a margin for the
+-- driver to actually reclaim the memory afterward.
+local UNLOAD_CONFIRM_TIMEOUT = 20
+local UNLOAD_CONFIRM_POLL = 0.5
+
 
 local function get_model()
     local ok = pcall(ngx.req.read_body)
@@ -192,6 +209,69 @@ local function unload_nllb()
 end
 
 
+-- Each returns true once the backend confirms nothing is left loaded, false
+-- if something still shows loaded, or nil+err if the backend couldn't be
+-- reached/parsed (treated the same as "not yet clear" by the caller, so a
+-- transiently-unreachable backend doesn't get treated as instantly clear).
+
+local function is_ollama_clear()
+    local res, err = http_request("GET", HOST.ollama, 11434, "/api/ps")
+    if not res then return nil, err end
+    local ok, data = pcall(cjson.decode, res.body)
+    if not ok or type(data) ~= "table" then return nil, "bad response" end
+    if not data.models or #data.models == 0 then return true end
+    return false
+end
+
+local function is_llamacpp_clear()
+    local res, err = http_request("GET", HOST.llama_cpp, 8080, "/v1/models")
+    if not res then return nil, err end
+    local ok, data = pcall(cjson.decode, res.body)
+    if not ok or type(data) ~= "table" or not data.data then return nil, "bad response" end
+    for _, m in ipairs(data.data) do
+        if m.status and m.status.value == "loaded" then
+            return false
+        end
+    end
+    return true
+end
+
+local function is_nllb_clear()
+    local res, err = http_request("GET", HOST.nllb, 5002, "/v1/models")
+    if not res then return nil, err end
+    local ok, data = pcall(cjson.decode, res.body)
+    if not ok or type(data) ~= "table" or not data.data then return nil, "bad response" end
+    for _, m in ipairs(data.data) do
+        if m.status and m.status.value == "loaded" then
+            return false
+        end
+    end
+    return true
+end
+
+
+-- Poll check_fn() until it confirms the old model is gone, or give up after
+-- UNLOAD_CONFIRM_TIMEOUT and proceed anyway (today's behavior) rather than
+-- turning a slow-to-exit backend into a hard failure for the new request.
+local function wait_until_clear(check_fn, backend_name)
+    local waited = 0
+    while waited < UNLOAD_CONFIRM_TIMEOUT do
+        local clear, err = check_fn()
+        if clear == true then
+            return true
+        end
+        if clear == nil then
+            ngx.log(ngx.WARN, backend_name, ": unload-confirm check failed: ", (err or "?"))
+        end
+        ngx.sleep(UNLOAD_CONFIRM_POLL)
+        waited = waited + UNLOAD_CONFIRM_POLL
+    end
+    ngx.log(ngx.WARN, backend_name, ": still reports loaded after ", UNLOAD_CONFIRM_TIMEOUT,
+            "s unload-confirm wait — proceeding anyway")
+    return false
+end
+
+
 local function drain_backend(backend, target_count, timeout)
     local waited = 0
     while waited < timeout do
@@ -278,10 +358,13 @@ local function coordinate()
 
     if current_backend == "ollama" then
         unload_ollama()
+        wait_until_clear(is_ollama_clear, "ollama")
     elseif current_backend == "llama_cpp" then
         unload_llamacpp()
+        wait_until_clear(is_llamacpp_clear, "llama_cpp")
     elseif current_backend == "nllb" then
         unload_nllb()
+        wait_until_clear(is_nllb_clear, "nllb")
         if not same_backend then
             http_request("POST", HOST.nllb, 5002, "/shutdown")
         end
