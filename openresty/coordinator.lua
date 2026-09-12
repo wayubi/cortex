@@ -226,6 +226,19 @@ local function coordinate()
     ngx.ctx.counted = true
     counts_dict:incr(target, 1, 0)
 
+    -- Release the in-flight count as soon as the client disconnects, instead of
+    -- holding it until DRAIN_TIMEOUT. A request waiting here for a model swap
+    -- does not otherwise notice a client-side timeout, and the stale count
+    -- blocks every later switch. log_by_lua also decrements, but only when
+    -- ngx.ctx.counted is still true, so the count is released exactly once.
+    ngx.on_abort(function()
+        if ngx.ctx.counted then
+            ngx.ctx.counted = false
+            counts_dict:incr(target, -1, 0)
+        end
+        ngx.exit(499)
+    end)
+
     local current_backend = state_dict:get("backend")
     local current_model   = state_dict:get("model")
     local target_model    = get_model()
