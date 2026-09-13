@@ -1,0 +1,287 @@
+{
+  "model": "ornith-1.5-9b-q4-mtp-64k-coder",
+  "ctx": 65536,
+  "batch": 1664,
+  "ubatch": 1664,
+  "placement": "GPU",
+  "bench_date": "2026-09-08T21:10:59.474976",
+  "bench_method": "bench_model.sh v2",
+  "config": {
+    "temp": "0.6",
+    "top_k": "20",
+    "top_p": "0.95",
+    "min_p": null,
+    "repeat_penalty": "1.0",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "ornith-ai/Ornith-1.5-9B-GGUF:Q4_K_M",
+    "quant": "Q4_K_M",
+    "reasoning": "off",
+    "ctx": "65536",
+    "batch": "1664"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 49152,
+    "decode_prompt_tokens": 106,
+    "model_file_size_gb": 5.38,
+    "build_info": "b1-3737e41",
+    "wall_time_s": 97
+  },
+  "speed": {
+    "prefill_t_s": 1372.11,
+    "prefill_ms": 35050.43,
+    "prefill_ms_per_tok": 0.7288,
+    "decode_t_s": 42.28,
+    "decode_ms": 94583.51,
+    "decode_ms_per_tok": 23.6518
+  },
+  "request": {
+    "prefill_prompt_tokens": 48093,
+    "decode_prompt_tokens": 106,
+    "max_tokens": 4000,
+    "completion_tokens": 4000,
+    "total_tokens": 4106,
+    "cached_tokens": 0,
+    "cache_n": 0,
+    "predicted_n": 4000,
+    "finish_reason": "length",
+    "truncated": true,
+    "degeneracy": 0.0
+  },
+  "mtp": {
+    "acceptance": 0.82353,
+    "draft_accepted": 1470,
+    "draft_generated": 1785,
+    "draft_mean_len": 2.27,
+    "n_max_loaded": 3,
+    "p_min_loaded": 0.7,
+    "tuning_status": "ok",
+    "tuning_reason": null,
+    "tuned_n_max": 3,
+    "tuned_p_min": 0.7,
+    "placement_baseline": "GPU",
+    "tuning_samples": [
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 42.2,
+        "tokens": 4000,
+        "placement": "GPU",
+        "accept": 0.82299,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.16
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 43.6,
+        "tokens": 4000,
+        "placement": "GPU",
+        "accept": 0.81845,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.44
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 42.4,
+        "tokens": 4000,
+        "placement": "GPU",
+        "accept": 0.79345,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.38
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 41.9,
+        "tokens": 4000,
+        "placement": "GPU",
+        "accept": 0.80392,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.41
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 43.2,
+        "tokens": 4000,
+        "placement": "GPU",
+        "accept": 0.81971,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.4
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.5,
+        "tps": 44.4,
+        "tokens": 4000,
+        "placement": "GPU",
+        "accept": 0.68082,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.38
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.9,
+        "tps": 41.9,
+        "tokens": 4000,
+        "placement": "GPU",
+        "accept": 0.93862,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.46
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.5,
+        "tps": 43.9,
+        "tokens": 4000,
+        "placement": "GPU",
+        "accept": 0.65232,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.31
+      }
+    ],
+    "tuning_written_at": "2026-09-08T21:08:29.590004",
+    "configured_n_max": 3,
+    "configured_p_min": 0.7,
+    "drafter": "in-model"
+  },
+  "discover": {
+    "mode": "GPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 1464.35
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 1509.02
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 1535.84
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 1527.33
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1475.81
+      },
+      {
+        "batch": 1088,
+        "status": "REFINE",
+        "prefill": 1501.58
+      },
+      {
+        "batch": 1408,
+        "status": "REFINE",
+        "prefill": 1555.35
+      },
+      {
+        "batch": 1664,
+        "status": "REFINE",
+        "prefill": 1557.01
+      },
+      {
+        "batch": 1600,
+        "status": "REFINE",
+        "prefill": 1522.19
+      },
+      {
+        "batch": 1792,
+        "status": "REFINE",
+        "prefill": 1556.52
+      },
+      {
+        "batch": 1728,
+        "status": "REFINE",
+        "prefill": 1519.69
+      },
+      {
+        "batch": 1856,
+        "status": "REFINE",
+        "prefill": 1510.62
+      }
+    ],
+    "best_prefill": 1535.84,
+    "pick": 1664,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      1088,
+      1408,
+      1600,
+      1664,
+      1728,
+      1792,
+      1856
+    ],
+    "ceiling_coarse": "4096 PASS (not probed higher)",
+    "ladder_break": "2",
+    "written_at": "2026-09-08T20:54:06.254238"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 98.2,
+      "avg_gpu_util_pct": 72.3,
+      "avg_gpu_mem_util_pct": 70.9,
+      "cpu_stddev_pct": 2.1,
+      "peak_vram_mib": 7183,
+      "peak_power_w": 162.0,
+      "peak_temp_c": 66,
+      "peak_clocks_sm_mhz": 1950,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 7183,
+      "final_temp_c": 60,
+      "final_power_w": 47.24,
+      "ram_used_mib": 47354,
+      "rss_mib": 3100,
+      "sample_count": 40
+    }
+  },
+  "propagated": true,
+  "propagated_from": "ornith-1.5-9b-q4-mtp-64k-think",
+  "propagated_date": "2026-09-12T20:19:27.697326"
+}
