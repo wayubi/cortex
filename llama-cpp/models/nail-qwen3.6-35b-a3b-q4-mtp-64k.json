@@ -19,7 +19,7 @@
     "ngl": "-1",
     "hf": "peculiar-ragdoll/Nail-Qwen3.6-35B-A3B-GGUF-MTP:UD-Q4_K_XL",
     "quant": "UD-Q4_K_XL",
-    "reasoning": "on",
+    "reasoning": "off",
     "ctx": "65536",
     "batch": "11584"
   },
