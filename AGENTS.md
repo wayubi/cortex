@@ -9,6 +9,7 @@
 - The shared `backend_state` dict stores two keys: `"backend"` (which backend last handled inference) and `"model"` (which model name was last requested). Both are used to decide whether an unload is needed.
 - Before unloading on cross-backend switches, coordinator drains active POST requests on the current backend (polls `request_counts` up to `DRAIN_TIMEOUT` = **600s** at 500ms intervals). If the backend is still busy when that expires the incoming request gets a 503, rather than unloading under load. Same-backend model changes skip drain (only one backend involved).
 - Active requests are counted at access phase and decremented via `log_by_lua_block` in each nginx server block.
+- **`GET :8080/availability`** reports `{busy, in_flight, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. It is an exact-match location, so it never reaches `coordinator.lua` or llama-cpp; `busy` reflects in-flight POSTs (inference) only. Bind-mounted config, so a `docker compose restart openresty` picks it up — no rebuild.
 
 ## Critical naming
 
