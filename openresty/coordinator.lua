@@ -24,6 +24,21 @@ local DRAIN_TIMEOUT = 600
 local UNLOAD_CONFIRM_TIMEOUT = 20
 local UNLOAD_CONFIRM_POLL = 0.5
 
+-- Switching AWAY from nllb hard-kills its process (POST /shutdown -> os._exit),
+-- because torch cannot hand the CUDA context back any other way. Its supervisor
+-- (nllb/entrypoint.sh) then restarts it, which measured 5.8-6.0s across four
+-- restarts on 2026-09-17. Nothing waited for that, so the first request switching
+-- BACK to nllb proxied into a closed port and the client got a 502:
+--
+--   openresty: connect() failed (111: Connection refused) ... upstream nllb:5002
+--   nllb:      POST /v1/models/unload 200 OK / Server exited, restarting...
+--
+-- The /shutdown request itself is never logged, because os._exit kills the worker
+-- before uvicorn writes the access line -- which is what made this hard to see.
+-- 60s is ten times the observed restart, so a slow cold start still clears it.
+local NLLB_READY_TIMEOUT = 60
+local NLLB_READY_POLL = 0.25
+
 
 local function get_model()
     local ok = pcall(ngx.req.read_body)
@@ -250,6 +265,27 @@ local function is_nllb_clear()
 end
 
 
+local function wait_until_nllb_up()
+    -- A closed port is the normal state mid-restart, so a failed connect is not
+    -- logged as an error until the whole budget is gone.
+    local waited = 0
+    while waited < NLLB_READY_TIMEOUT do
+        local res = http_request("GET", HOST.nllb, 5002, "/v1/models")
+        if res and res.status == 200 then
+            if waited > 0 then
+                ngx.log(ngx.INFO, "nllb: ready after ", waited, "s")
+            end
+            return true
+        end
+        ngx.sleep(NLLB_READY_POLL)
+        waited = waited + NLLB_READY_POLL
+    end
+    ngx.log(ngx.ERR, "nllb: not listening after ", NLLB_READY_TIMEOUT,
+            "s -- proxying anyway, expect 502")
+    return false
+end
+
+
 -- Poll check_fn() until it confirms the old model is gone, or give up after
 -- UNLOAD_CONFIRM_TIMEOUT and proceed anyway (today's behavior) rather than
 -- turning a slow-to-exit backend into a hard failure for the new request.
@@ -368,6 +404,13 @@ local function coordinate()
         if not same_backend then
             http_request("POST", HOST.nllb, 5002, "/shutdown")
         end
+    end
+
+    -- We may have killed nllb ourselves on an earlier switch away from it, so a
+    -- free GPU is not enough: the process has to be listening again before this
+    -- request is proxied to it.
+    if target == "nllb" then
+        wait_until_nllb_up()
     end
 
     state_dict:set("backend", target)

@@ -265,3 +265,37 @@ The client always connects to `cortex-openresty-1:5002`. OpenResty proxies throu
 3. Unloads the current backend's model from VRAM via its API
 4. Forwards the request to the NLLB server
 5. The NLLB server loads the requested model into the freed VRAM
+
+## Restart window on backend switch (fixed 2026-09-17)
+
+Clients saw intermittent `502 Bad Gateway` from `:5002` on a service that was, by
+every outward sign, up: the container reported `Up 3 days`, `docker inspect` gave
+`OOMKilled=false ExitCode=0 Restarts=0`, and a manual `POST /v1/models/unload`
+did not reproduce it.
+
+**What actually happens.** When the coordinator switches away from nllb it calls
+`POST /shutdown`, which is `os._exit(0)` — the only way to hand the CUDA context
+back, since `torch.cuda.empty_cache()` releases the allocator pool but not the
+context. `nllb/entrypoint.sh` restarts the process, measured at **5.8-6.0s**
+across four restarts. Nothing waited for that, so the first request switching
+*back* to nllb was proxied into a closed port:
+
+```
+openresty: connect() failed (111: Connection refused) ... upstream nllb:5002
+nllb:      POST /v1/models/unload 200 OK
+           Server exited, restarting...
+```
+
+The `/shutdown` request never appears in the nllb access log, because `os._exit`
+kills the worker before uvicorn writes the line. That missing line is what made
+the cause hard to see: the log reads as if `unload` itself were fatal.
+
+**Fix.** `coordinator.lua` gained `wait_until_nllb_up()`, called when the target
+backend is nllb, which polls `nllb:5002/v1/models` (direct socket, not through
+the proxy) until it answers — up to `NLLB_READY_TIMEOUT = 60`, ten times the
+observed restart. Verified: forcing nllb -> llama_cpp -> nllb produced a genuine
+restart (`Server exited` 18:23:17, `Application startup complete` 18:23:23) with
+**zero 502s** and `[lua] nllb: ready after 2.25s` in the error log.
+
+The shutdown itself is left alone. It is deliberate and correct on a 12 GB card —
+the alternative is leaking a CUDA context's worth of VRAM per swap.
