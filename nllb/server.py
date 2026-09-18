@@ -23,6 +23,15 @@ class TranslateRequest(BaseModel):
     src_lang: str = DEFAULT_SRC
     tgt_lang: str
     max_length: int = 4096
+    # Decoding is greedy unless asked otherwise, so the same text always comes
+    # back the same way. A caller that got a faulty translation — a dropped
+    # figure, a word broken by a missing character — gains nothing by asking
+    # again unless the decode actually differs. These let it ask for a
+    # different one. Defaults preserve the previous behaviour exactly.
+    do_sample: bool = False
+    temperature: float | None = None
+    num_beams: int | None = None
+    seed: int | None = None
 
 
 def get_model(name: str):
@@ -58,11 +67,19 @@ def translate(req: TranslateRequest):
     tok.src_lang = req.src_lang
     encoded = tok(req.text, return_tensors="pt").to(mdl.device)
     tgt_lang_id = tok.convert_tokens_to_ids(req.tgt_lang)
-    result = mdl.generate(
-        **encoded,
-        forced_bos_token_id=tgt_lang_id,
-        max_length=req.max_length,
-    )
+    if req.seed is not None:
+        torch.manual_seed(req.seed)
+    gen_kwargs = {
+        "forced_bos_token_id": tgt_lang_id,
+        "max_length": req.max_length,
+    }
+    if req.do_sample:
+        gen_kwargs["do_sample"] = True
+        if req.temperature is not None:
+            gen_kwargs["temperature"] = req.temperature
+    if req.num_beams is not None:
+        gen_kwargs["num_beams"] = req.num_beams
+    result = mdl.generate(**encoded, **gen_kwargs)
     translated = tok.batch_decode(result, skip_special_tokens=True)[0]
     return {"translated": translated}
 
