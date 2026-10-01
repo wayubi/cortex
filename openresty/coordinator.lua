@@ -1,4 +1,5 @@
 local cjson = require "cjson"
+local cortex = require "cortex"
 
 local state_dict   = ngx.shared.backend_state
 local counts_dict  = ngx.shared.request_counts
@@ -62,15 +63,6 @@ local function get_model()
     if not ok or type(data) ~= "table" then return nil end
 
     return data.model
-end
-
-
-local function get_target()
-    local port = ngx.var.server_port
-    if port == "11434" then return "ollama"
-    elseif port == "8080" then return "llama_cpp"
-    elseif port == "5002" then return "nllb" end
-    return nil
 end
 
 
@@ -363,54 +355,104 @@ local function is_non_inference(target, uri)
     return false
 end
 
-local function coordinate()
-    local target = get_target()
-    if not target then
-        ngx.exit(503)
-        return
+
+
+-- Would proxying this request change what is resident? The same test the
+-- switch below makes: anything but the same backend AND the same model.
+local function would_switch(target, target_model)
+    local cm = state_dict:get("model")
+    return not (state_dict:get("backend") == target and cm ~= nil and cm == target_model)
+end
+
+
+-- Why a bot request must not go ahead yet, or nil. See cortex.lua for the
+-- policy: humans first, bots never interrupted.
+local function bot_hold_reason(target, target_model)
+    -- A human waiting for the GPU waits only for the bot calls already in
+    -- flight. Without this a bot's next call for the resident model skips the
+    -- drain and adds to the count, and a steady chain keeps the human out.
+    if (counts_dict:get("human_waiting") or 0) > 0 then
+        return "a human request is waiting"
     end
-
-    local method = ngx.var.request_method
-
-    if method ~= "POST" then
-        return
+    -- Sharing the resident model evicts nothing.
+    if not would_switch(target, target_model) then
+        return nil
     end
-    if is_non_inference(target, ngx.var.uri) then
-        ngx.log(ngx.INFO, "pass: ", target, " ", ngx.var.uri, " (no inference; not counted, no switch)")
-        return
+    if (counts_dict:get("human_running") or 0) > 0 then
+        return "a human request is running"
     end
-
-    ngx.ctx.counted = true
-    -- Marks this request as inference for the log phase's idle_for stamp; unlike
-    -- `counted`, it stays set when the count is released early (abort, 503).
-    ngx.ctx.inference = true
-    counts_dict:incr(target, 1, 0)
-
-    -- Release the in-flight count as soon as the client disconnects, instead of
-    -- holding it until DRAIN_TIMEOUT. A request waiting here for a model swap
-    -- does not otherwise notice a client-side timeout, and the stale count
-    -- blocks every later switch. log_by_lua also decrements, but only when
-    -- ngx.ctx.counted is still true, so the count is released exactly once.
-    ngx.on_abort(function()
-        if ngx.ctx.counted then
-            ngx.ctx.counted = false
-            counts_dict:incr(target, -1, 0)
+    local last = state_dict:get("human_last")
+    if last then
+        local ago = ngx.now() - last
+        if ago < cortex.HUMAN_HOLD then
+            return string.format("a human was active %.0fs ago", ago)
         end
-        ngx.exit(499)
-    end)
+    end
+    return nil
+end
 
+
+-- Hold a bot until bot_hold_reason() clears. -> true to go ahead; false when
+-- the request was answered here (503 after BOT_HOLD_CAP). A held request is
+-- not counted in flight: counting it would make the human's drain wait for
+-- the very request that is waiting for the human.
+local function hold_bot(target, target_model)
+    local why = bot_hold_reason(target, target_model)
+    if not why then
+        return true
+    end
+    ngx.log(ngx.INFO, "hold: bot ", target, " ", ngx.var.uri, " -> ",
+            (target_model or "none"), " (", why, ")")
+    local held = 0
+    while why do
+        if held >= cortex.BOT_HOLD_CAP then
+            ngx.log(ngx.WARN, "hold: bot ", target, " still held after ", held,
+                    "s (", why, "), returning 503")
+            ngx.status = 503
+            ngx.header["Content-Type"] = "application/json"
+            ngx.header["X-Cortex-Held"] = "human"
+            ngx.header["Retry-After"] = tostring(cortex.HUMAN_HOLD)
+            ngx.say(cjson.encode({ error = "cortex is held for a human: " .. why }))
+            ngx.exit(ngx.HTTP_OK)
+            return false
+        end
+        ngx.sleep(cortex.HOLD_POLL)
+        held = held + cortex.HOLD_POLL
+        why = bot_hold_reason(target, target_model)
+    end
+    ngx.log(ngx.INFO, "hold: bot ", target, " released after ", held, "s")
+    return true
+end
+
+
+-- A human request has its backend: it stops counting as waiting (which holds
+-- every bot) and starts counting as running (which holds only bots that would
+-- evict it).
+local function human_admitted()
+    if ngx.ctx.human_waiting then
+        ngx.ctx.human_waiting = false
+        counts_dict:incr("human_waiting", -1, 0)
+        ngx.ctx.human_running = true
+        counts_dict:incr("human_running", 1, 0)
+    end
+end
+
+
+-- Drain, unload and switch for a request already counted in flight.
+-- -> "go" (proxy it), "yield" (a bot that must go back to the hold because a
+-- human arrived while it drained), or "done" (answered here).
+local function switch_to(target, target_model, bot)
     local current_backend = state_dict:get("backend")
     local current_model   = state_dict:get("model")
-    local target_model    = get_model()
     local same_backend    = (current_backend == target)
 
-    ngx.log(ngx.INFO, "POST ", target,
+    ngx.log(ngx.INFO, "POST ", target, (bot and " (bot)" or " (human)"),
             " backend=", (current_backend or "none"),
             " model: ", (current_model or "none"),
             " -> ", (target_model or "none"))
 
     if same_backend and current_model ~= nil and current_model == target_model then
-        return
+        return "go"
     end
 
     if current_backend ~= nil then
@@ -426,11 +468,15 @@ local function coordinate()
 
         if not drained then
             ngx.log(ngx.WARN, current_backend, " still active after ", DRAIN_TIMEOUT, "s, returning 503")
-            counts_dict:incr(target, -1, 0)
-            ngx.ctx.counted = false
             ngx.exit(503)
-            return
+            return "done"
         end
+    end
+
+    -- The drain can take as long as the call it waits for. A human who
+    -- arrived meanwhile goes first; this bot has unloaded nothing yet.
+    if bot and (counts_dict:get("human_waiting") or 0) > 0 then
+        return "yield"
     end
 
     ngx.log(ngx.INFO, "switch: ", (current_backend or "none"), " -> ", target,
@@ -462,6 +508,65 @@ local function coordinate()
         state_dict:set("model", target_model)
     end
     ngx.log(ngx.INFO, "state: backend=", target, " model=", (target_model or "none"))
+    return "go"
+end
+
+
+local function coordinate()
+    local target = cortex.target_for_port(ngx.var.server_port)
+    if not target then
+        ngx.exit(503)
+        return
+    end
+
+    if ngx.var.request_method ~= "POST" then
+        return
+    end
+    if is_non_inference(target, ngx.var.uri) then
+        ngx.log(ngx.INFO, "pass: ", target, " ", ngx.var.uri, " (no inference; not counted, no switch)")
+        return
+    end
+
+    local bot = cortex.is_bot()
+    -- A client that hangs up while held or draining is finalised at once;
+    -- log.lua then releases whatever this request had taken (counts, the
+    -- human-waiting mark), so a dead request blocks no later switch.
+    ngx.on_abort(function()
+        ngx.exit(499)
+    end)
+
+    local target_model = get_model()
+
+    if not bot then
+        ngx.ctx.human = true
+        ngx.ctx.inference = true
+        ngx.ctx.human_waiting = true
+        counts_dict:incr("human_waiting", 1, 0)
+    end
+
+    while true do
+        if bot then
+            if not hold_bot(target, target_model) then
+                return
+            end
+            -- Set only once past the hold, so a bot turned away there does not
+            -- count as activity in idle_for.
+            ngx.ctx.inference = true
+        end
+        ngx.ctx.counted = true
+        counts_dict:incr(target, 1, 0)
+
+        local outcome = switch_to(target, target_model, bot)
+        if outcome ~= "yield" then
+            if outcome == "go" then
+                human_admitted()
+            end
+            return
+        end
+        ngx.ctx.counted = false
+        counts_dict:incr(target, -1, 0)
+        ngx.log(ngx.INFO, "hold: bot ", target, " yields to a human that arrived during its drain")
+    end
 end
 
 

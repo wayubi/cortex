@@ -81,6 +81,9 @@ services:
       - ./openresty/coordinator.lua:/etc/nginx/lua/coordinator.lua
       # GET /availability, served on all three ports (see nginx.conf)
       - ./openresty/availability.lua:/etc/nginx/lua/availability.lua
+      # human/bot policy (required by the other three) and the log phase
+      - ./openresty/cortex.lua:/etc/nginx/lua/cortex.lua
+      - ./openresty/log.lua:/etc/nginx/lua/log.lua
     networks:
       - cortex_network
       - enhasa_network

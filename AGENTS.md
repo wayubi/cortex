@@ -8,8 +8,9 @@
 - Unload flow: `POST /api/generate` with `keep_alive: 0` (ollama), `POST /models/unload` (llama-cpp), or `GET /v1/models` + `POST /v1/models/unload` (nllb). All three backends are queried first to find exactly which model(s) are loaded. When switching away from nllb, a `/shutdown` is also sent.
 - The shared `backend_state` dict stores two keys: `"backend"` (which backend last handled inference) and `"model"` (which model name was last requested). Both are used to decide whether an unload is needed.
 - Before unloading on cross-backend switches, coordinator drains active POST requests on the current backend (polls `request_counts` up to `DRAIN_TIMEOUT` = **600s** at 500ms intervals). If the backend is still busy when that expires the incoming request gets a 503, rather than unloading under load. Same-backend model changes skip drain (only one backend involved).
-- Active requests are counted at access phase and decremented via `log_by_lua_block` in each nginx server block.
-- **`GET /availability`**, on **every** openresty port (`:11434`, `:5002`, `:8080`) so a client asks the port it already uses, reports `{busy, idle_for, in_flight, slots, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. The logic is one file, `openresty/availability.lua` (`content_by_lua_file`); each server block has an exact-match `location = /availability`, so it never reaches `coordinator.lua` or a backend, plus its own internal `/__slots` (a subrequest stays within its server). `busy` is in-flight POSTs on any backend OR any llama.cpp slot reporting `processing` (via `/__slots`, handling both the bare-array and `{"slots":[...]}` shapes; `slots: null` when the endpoint is absent, disabled (`--no-slots`) or slow). `idle_for` is seconds since the last inference POST finished on any backend (each server's `log_by_lua_block` stamps `backend_state` key `last_done`), `0` while one is in flight, `null` when none has finished since openresty started — so a scheduler can tell a client merely between requests of a longer run from a GPU that is really free, and wait out the gap if it chooses. Bind-mounted config; adding `availability.lua` added a volume, so the first deploy needs `docker compose up -d openresty` (recreate), later edits only `docker compose restart openresty`.
+- Active requests are counted at access phase and released in the log phase (`openresty/log.lua`, `log_by_lua_file` in every server block) — the only place counts are released. A client that hangs up while held or draining is finalised via `ngx.on_abort` → `ngx.exit(499)`, which runs the log phase at once.
+- **Humans first, bots never interrupted** (`openresty/cortex.lua` holds the policy and constants). A request carrying `X-Cortex-Client: bot` (afghanica, the mastodon x_bridge) is a bot; anything else is a human (Open WebUI, opencode), so an unmodified client gets priority. A human waits only for the bot calls already in flight: while one is waiting (`human_waiting`), every new bot request is held, including one for the resident model, which would otherwise skip the drain and keep the human out. Once a human request has run (`human_running`, then `human_last`), a bot request that would **evict** the resident model is held until no human request has finished for `HUMAN_HOLD` (**120s**); a bot sharing the resident model goes straight through. A held bot is not counted in flight (so the human's drain never waits for it) and does not stamp `idle_for`; after `BOT_HOLD_CAP` (**600s**) it gets `503` with `X-Cortex-Held: human` and `Retry-After`, which bots treat as "stand aside", not an error. A bot that finishes draining after a human arrived goes back to the hold before unloading anything. Offline test: `python3 tools/test_coordinator.py` (throwaway openresty + `tools/coord_mock.py` on a private docker network; `--ref HEAD` runs it against a commit).
+- **`GET /availability`**, on **every** openresty port (`:11434`, `:5002`, `:8080`) so a client asks the port it already uses, reports `{busy, idle_for, human_pending, human_idle_for, in_flight, slots, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. The logic is one file, `openresty/availability.lua` (`content_by_lua_file`); each server block has an exact-match `location = /availability`, so it never reaches `coordinator.lua` or a backend, plus its own internal `/__slots` (a subrequest stays within its server). `busy` is in-flight POSTs on any backend OR any llama.cpp slot reporting `processing` (via `/__slots`, handling both the bare-array and `{"slots":[...]}` shapes; `slots: null` when the endpoint is absent, disabled (`--no-slots`) or slow). `idle_for` is seconds since the last inference POST finished on any backend (`log.lua` stamps `backend_state` key `last_done`), `0` while one is in flight, `null` when none has finished since openresty started — so a scheduler can tell a client merely between requests of a longer run from a GPU that is really free, and wait out the gap if it chooses. `human_pending` is a human request waiting or running; `human_idle_for` is seconds since the last human request finished (`0` while pending, `null` before the first) — bots stand aside at their own boundaries while it is recent. Bind-mounted config; adding `availability.lua` added a volume, so the first deploy needs `docker compose up -d openresty` (recreate), later edits only `docker compose restart openresty`.
 
 ## Critical naming
 
@@ -19,8 +20,7 @@ The compose service is `llama-cpp` (hyphen), but the Lua internal key is `llama_
 
 If adding a new backend, update:
 - `HOST` table (DNS hostname for TCP calls)
-- `get_target()` in `coordinator.lua` (port → key mapping)
-- `log_by_lua_block` in `nginx.conf` (matching decrement key)
+- `TARGET` in `cortex.lua` (port → key mapping, used by `coordinator.lua` and `log.lua`)
 - Unload function (API call to free VRAM on that backend)
 
 ## Docker compose commands
@@ -42,7 +42,9 @@ If adding a new backend, update:
 ├── CPU_POLLING.md         # why the measurement constants are what they are (empirical rationale)
 ├── tools/                 # ALL scripts go here (bench, metrics)
 │   ├── bench.sh               # unified pipeline: mtpcheck → bisect → mtp → bench (canonical)
-│   └── gen_metrics.sh         # regenerate full-metrics.md from llama-cpp/models/*.json
+│   ├── gen_metrics.sh         # regenerate full-metrics.md from llama-cpp/models/*.json
+│   ├── test_coordinator.py    # offline test of the human/bot policy (docker, no GPU)
+│   └── coord_mock.py          # stand-in for all three backends, used by that test
 ├── llama-cpp/
 │   ├── models.ini          # llama.cpp models preset file
 │   ├── models/             # per-model benchmark JSONs (written by bench.sh)
@@ -57,7 +59,9 @@ If adding a new backend, update:
     ├── Dockerfile           # FROM openresty/openresty:bookworm-fat, sed patches error_log
     ├── nginx.conf           # lua_shared_dict directives, 3 server blocks (11434/5002/8080)
     ├── coordinator.lua      # VRAM coordinator — API-based model unload
-    └── availability.lua     # GET /availability on every port (busy, idle_for, ...)
+    ├── availability.lua     # GET /availability on every port (busy, idle_for, human_*, ...)
+    ├── cortex.lua           # human/bot policy and constants (HUMAN_HOLD, BOT_HOLD_CAP)
+    └── log.lua              # log phase: releases counts, stamps last_done / human_last
 ```
 
 **Rule: All scripts, tools, and utility files go in the `tools/` folder.**

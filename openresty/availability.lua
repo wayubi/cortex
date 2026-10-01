@@ -61,9 +61,26 @@ elseif last_done then
     idle_for = math.floor((ngx.now() - last_done) * 10 + 0.5) / 10
 end
 
+-- The human side of the same picture (cortex.lua has the policy). A request
+-- without `X-Cortex-Client: bot` is a human's. human_pending: one is waiting
+-- for the GPU or running; human_idle_for: seconds since the last one ended, 0
+-- while pending, null when none since openresty started. A bot that stands
+-- aside while these are recent is never held here.
+local human_pending = ((counts:get("human_waiting") or 0) +
+                       (counts:get("human_running") or 0)) > 0
+local human_idle_for = cjson.null
+local human_last = state:get("human_last")
+if human_pending then
+    human_idle_for = 0
+elseif human_last then
+    human_idle_for = math.floor((ngx.now() - human_last) * 10 + 0.5) / 10
+end
+
 ngx.say(cjson.encode({
     busy      = busy,
     idle_for  = idle_for,
+    human_pending  = human_pending,
+    human_idle_for = human_idle_for,
     in_flight = in_flight,
     slots     = slots or cjson.null,
     backend   = state:get("backend") or cjson.null,
