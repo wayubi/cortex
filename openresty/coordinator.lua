@@ -326,6 +326,43 @@ local function drain_backend(backend, target_count, timeout)
 end
 
 
+-- POSTs that run no inference: model management and metadata. Every other POST
+-- is treated as inference -- counted as in flight, and allowed to drain, unload
+-- and switch backends. Treating these the same made an ollama model-info lookup
+-- (POST /api/show, which Open WebUI makes) unload whatever was resident on
+-- llama.cpp or nllb, and kept /availability `busy` for the whole of a model
+-- download (POST /api/pull). They now pass through like a GET.
+--
+-- Deliberately NOT listed: ollama /api/generate, /api/chat, /api/embed (an empty
+-- /api/generate is how ollama LOADS a model), and llama.cpp's /models/load,
+-- /tokenize and /detokenize -- in router mode those load the model they name,
+-- so they must go through the coordinator like any inference.
+local NON_INFERENCE = {
+    ollama = {
+        ["/api/show"]   = true,
+        ["/api/pull"]   = true,
+        ["/api/push"]   = true,
+        ["/api/create"] = true,
+        ["/api/copy"]   = true,
+    },
+}
+local NON_INFERENCE_PREFIX = {
+    ollama = { "^/api/blobs/" },     -- layer uploads during /api/create
+}
+
+local function is_non_inference(target, uri)
+    local exact = NON_INFERENCE[target]
+    if exact and exact[uri] then
+        return true
+    end
+    for _, pat in ipairs(NON_INFERENCE_PREFIX[target] or {}) do
+        if uri:find(pat) then
+            return true
+        end
+    end
+    return false
+end
+
 local function coordinate()
     local target = get_target()
     if not target then
@@ -338,8 +375,15 @@ local function coordinate()
     if method ~= "POST" then
         return
     end
+    if is_non_inference(target, ngx.var.uri) then
+        ngx.log(ngx.INFO, "pass: ", target, " ", ngx.var.uri, " (no inference; not counted, no switch)")
+        return
+    end
 
     ngx.ctx.counted = true
+    -- Marks this request as inference for the log phase's idle_for stamp; unlike
+    -- `counted`, it stays set when the count is released early (abort, 503).
+    ngx.ctx.inference = true
     counts_dict:incr(target, 1, 0)
 
     -- Release the in-flight count as soon as the client disconnects, instead of
