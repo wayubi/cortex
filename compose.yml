@@ -79,6 +79,8 @@ services:
     volumes:
       - ./openresty/nginx.conf:/etc/nginx/conf.d/default.conf
       - ./openresty/coordinator.lua:/etc/nginx/lua/coordinator.lua
+      # GET /availability, served on all three ports (see nginx.conf)
+      - ./openresty/availability.lua:/etc/nginx/lua/availability.lua
     networks:
       - cortex_network
       - enhasa_network

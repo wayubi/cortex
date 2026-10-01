@@ -9,7 +9,7 @@
 - The shared `backend_state` dict stores two keys: `"backend"` (which backend last handled inference) and `"model"` (which model name was last requested). Both are used to decide whether an unload is needed.
 - Before unloading on cross-backend switches, coordinator drains active POST requests on the current backend (polls `request_counts` up to `DRAIN_TIMEOUT` = **600s** at 500ms intervals). If the backend is still busy when that expires the incoming request gets a 503, rather than unloading under load. Same-backend model changes skip drain (only one backend involved).
 - Active requests are counted at access phase and decremented via `log_by_lua_block` in each nginx server block.
-- **`GET :8080/availability`** reports `{busy, in_flight, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. It is an exact-match location, so it never reaches `coordinator.lua` or llama-cpp; `busy` is in-flight POSTs OR any llama.cpp slot reporting `processing` — it asks the backend via an internal `/__slots` subrequest, handling both the bare-array and `{"slots":[...]}` shapes, and reports `slots: null` when the endpoint is absent, disabled (`--no-slots`) or slow. Bind-mounted config, so a `docker compose restart openresty` picks it up — no rebuild.
+- **`GET /availability`**, on **every** openresty port (`:11434`, `:5002`, `:8080`) so a client asks the port it already uses, reports `{busy, idle_for, in_flight, slots, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. The logic is one file, `openresty/availability.lua` (`content_by_lua_file`); each server block has an exact-match `location = /availability`, so it never reaches `coordinator.lua` or a backend, plus its own internal `/__slots` (a subrequest stays within its server). `busy` is in-flight POSTs on any backend OR any llama.cpp slot reporting `processing` (via `/__slots`, handling both the bare-array and `{"slots":[...]}` shapes; `slots: null` when the endpoint is absent, disabled (`--no-slots`) or slow). `idle_for` is seconds since the last inference POST finished on any backend (each server's `log_by_lua_block` stamps `backend_state` key `last_done`), `0` while one is in flight, `null` when none has finished since openresty started — so a scheduler can tell a client merely between requests of a longer run from a GPU that is really free, and wait out the gap if it chooses. Bind-mounted config; adding `availability.lua` added a volume, so the first deploy needs `docker compose up -d openresty` (recreate), later edits only `docker compose restart openresty`.
 
 ## Critical naming
 
@@ -56,7 +56,8 @@ If adding a new backend, update:
 └── openresty/
     ├── Dockerfile           # FROM openresty/openresty:bookworm-fat, sed patches error_log
     ├── nginx.conf           # lua_shared_dict directives, 3 server blocks (11434/5002/8080)
-    └── coordinator.lua      # VRAM coordinator — API-based model unload
+    ├── coordinator.lua      # VRAM coordinator — API-based model unload
+    └── availability.lua     # GET /availability on every port (busy, idle_for, ...)
 ```
 
 **Rule: All scripts, tools, and utility files go in the `tools/` folder.**
