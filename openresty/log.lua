@@ -33,6 +33,13 @@ if ctx.human_running then
     ctx.human_running = false
     release("human_running")
 end
+-- The switch key, if this request died holding it (abort mid-drain).
+if ctx.switch_token then
+    if state:get("switching") == ctx.switch_token then
+        state:delete("switching")
+    end
+    ctx.switch_token = nil
+end
 -- human_idle_for, and the hold on bots, run from the end of a human request.
 if ctx.human then
     state:set("human_last", ngx.now())

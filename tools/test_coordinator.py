@@ -234,6 +234,11 @@ def scenario_aborts_release_everything(stack):
     a = stack.get(8080, "/availability")
     check("human aborted mid-drain is not still pending", str(h.status).startswith("abort")
           and a.get("human_pending") is False, (h.status, a))
+    # it held the switch key while it drained; a leaked key would park every
+    # later switch for the key's TTL (~700s)
+    nxt = Call(stack, time.time(), 8080, "m-x", 0.1, bot=False, timeout=5)
+    nxt.start(); nxt.join()
+    check("the switch key it held is released", nxt.status == 200, nxt.status)
     # a human request now sets the hold; a bot gives up while held
     t0 = time.time()
     h2 = Call(stack, t0, 11434, "m-human", 0.1, bot=False)
@@ -245,6 +250,31 @@ def scenario_aborts_release_everything(stack):
     check("held bot that hung up is not counted", str(held.status).startswith("abort")
           and not any(stack.get(8080, "/availability")["in_flight"].values()),
           (held.status, stack.get(8080, "/availability")))
+    settle(stack)
+
+
+def scenario_concurrent_switches_do_not_deadlock(stack):
+    """opencode sends requests for different models on one backend at once.
+    Each counted itself in flight before draining and waited for the count to
+    fall to itself -- so two waiters waited on each other until a client gave
+    up (cortex logs 2026-10-01 23:49: "drain llama_cpp (3 active, target 1)")."""
+    print("concurrent requests for different models on one backend all complete")
+    t0 = time.time()
+    seed = Call(stack, t0, 8080, "m-a", 0.1, bot=False)
+    seed.start(); seed.join()
+    t0 = time.time()
+    calls = [Call(stack, t0, 8080, m, 0.3, bot=False, timeout=15)
+             for m in ("m-b", "m-c", "m-b", "m-d")]
+    for c in calls:
+        c.start()
+    for c in calls:
+        c.join()
+    check("every request served", all(c.status == 200 for c in calls),
+          [(c.status, c.end) for c in calls])
+    check("promptly", all(c.end is not None and c.end < 8 for c in calls),
+          [c.end for c in calls])
+    a = stack.get(8080, "/availability")
+    check("nothing left counted", not any(a["in_flight"].values()) and not a.get("human_pending"), a)
     settle(stack)
 
 
@@ -260,7 +290,8 @@ def main():
                    scenario_bot_sharing_the_human_model_is_not_held,
                    scenario_hold_cap_answers_503,
                    scenario_availability_reports_the_human,
-                   scenario_aborts_release_everything):
+                   scenario_aborts_release_everything,
+                   scenario_concurrent_switches_do_not_deadlock):
             try:
                 fn(stack)
             except Exception as e:

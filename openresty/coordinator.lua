@@ -438,38 +438,30 @@ local function human_admitted()
 end
 
 
--- Drain, unload and switch for a request already counted in flight.
--- -> "go" (proxy it), "yield" (a bot that must go back to the hold because a
--- human arrived while it drained), or "done" (answered here).
+-- One model switch at a time. The key holds the switcher's request id; its
+-- TTL outlives the longest switch (drain + unload confirm + nllb restart), so
+-- a worker that dies mid-switch cannot wedge cortex. log.lua releases it on
+-- every exit, abort included.
+local SWITCH_TTL = DRAIN_TIMEOUT + UNLOAD_CONFIRM_TIMEOUT + NLLB_READY_TIMEOUT + 30
+local SWITCH_POLL = 0.25
+
+
+-- Unload whatever `current_backend` holds and make `target` resident, for the
+-- request that holds the switch key. It is not counted in flight, so the
+-- drain waits for the requests actually running and nothing else.
+-- -> "ok", "yield" (a bot that must go back to the hold: a human arrived
+-- while it drained; nothing was unloaded yet) or "timeout".
 local function switch_to(target, target_model, bot)
     local current_backend = state_dict:get("backend")
     local current_model   = state_dict:get("model")
     local same_backend    = (current_backend == target)
 
-    ngx.log(ngx.INFO, "POST ", target, (bot and " (bot)" or " (human)"),
-            " backend=", (current_backend or "none"),
-            " model: ", (current_model or "none"),
-            " -> ", (target_model or "none"))
-
-    if same_backend and current_model ~= nil and current_model == target_model then
-        return "go"
-    end
-
     if current_backend ~= nil then
-        local target_count = 0
-        if same_backend then
-            target_count = 1
-        end
-
         ngx.log(ngx.INFO, "drain ", current_backend,
-                " (", (counts_dict:get(current_backend) or 0), " active, target ", target_count, ")")
-
-        local drained = drain_backend(current_backend, target_count, DRAIN_TIMEOUT)
-
-        if not drained then
+                " (", (counts_dict:get(current_backend) or 0), " active)")
+        if not drain_backend(current_backend, 0, DRAIN_TIMEOUT) then
             ngx.log(ngx.WARN, current_backend, " still active after ", DRAIN_TIMEOUT, "s, returning 503")
-            ngx.exit(503)
-            return "done"
+            return "timeout"
         end
     end
 
@@ -508,7 +500,81 @@ local function switch_to(target, target_model, bot)
         state_dict:set("model", target_model)
     end
     ngx.log(ngx.INFO, "state: backend=", target, " model=", (target_model or "none"))
-    return "go"
+    return "ok"
+end
+
+
+local function release_switch()
+    local token = ngx.ctx.switch_token
+    if token then
+        ngx.ctx.switch_token = nil
+        if state_dict:get("switching") == token then
+            state_dict:delete("switching")
+        end
+    end
+end
+
+
+-- Get this request onto a resident model, counted in flight. -> "go" (proxy
+-- it), "yield" (a bot to send back to the hold) or "done" (answered here).
+--
+-- A request is counted only once it is admitted. Counting it while it waited
+-- deadlocked concurrent switches: opencode sends requests for two or three
+-- models at once, each counted itself and then waited for the count to fall
+-- to itself (cortex logs 2026-10-01 23:49, "drain llama_cpp (3 active,
+-- target 1)") until the client gave up. Now waiters are invisible to the
+-- drain, and the switch key lets one of them switch at a time; when it has, a
+-- waiter for that model goes straight through and one for another model
+-- becomes the next switcher, which waits for the requests now running.
+local function admit(target, target_model, bot)
+    local waited = 0
+    local logged = false
+    while true do
+        -- Count first, then look: a switcher that starts draining between the
+        -- two sees this request and waits for it, rather than missing it.
+        counts_dict:incr(target, 1, 0)
+        ngx.ctx.counted = true
+        if not state_dict:get("switching") and not would_switch(target, target_model) then
+            return "go"
+        end
+        ngx.ctx.counted = false
+        counts_dict:incr(target, -1, 0)
+
+        if bot and (counts_dict:get("human_waiting") or 0) > 0 then
+            return "yield"
+        end
+
+        local token = ngx.var.request_id
+        if state_dict:add("switching", token, SWITCH_TTL) then
+            ngx.ctx.switch_token = token
+            local r = switch_to(target, target_model, bot)
+            if r == "ok" then
+                counts_dict:incr(target, 1, 0)
+                ngx.ctx.counted = true
+            end
+            release_switch()
+            if r == "ok" then
+                return "go"
+            elseif r == "yield" then
+                return "yield"
+            end
+            ngx.exit(503)
+            return "done"
+        end
+
+        if waited >= DRAIN_TIMEOUT then
+            ngx.log(ngx.WARN, "switch still in progress after ", DRAIN_TIMEOUT, "s, returning 503")
+            ngx.exit(503)
+            return "done"
+        end
+        if not logged then
+            ngx.log(ngx.INFO, "wait: ", target, " -> ", (target_model or "none"),
+                    " (another request is switching models)")
+            logged = true
+        end
+        ngx.sleep(SWITCH_POLL)
+        waited = waited + SWITCH_POLL
+    end
 end
 
 
@@ -528,14 +594,19 @@ local function coordinate()
     end
 
     local bot = cortex.is_bot()
-    -- A client that hangs up while held or draining is finalised at once;
-    -- log.lua then releases whatever this request had taken (counts, the
-    -- human-waiting mark), so a dead request blocks no later switch.
+    -- A client that hangs up while held, waiting or draining is finalised at
+    -- once; log.lua then releases whatever this request had taken (counts, the
+    -- human-waiting mark, the switch key), so a dead request blocks nothing.
     ngx.on_abort(function()
         ngx.exit(499)
     end)
 
     local target_model = get_model()
+
+    ngx.log(ngx.INFO, "POST ", target, (bot and " (bot)" or " (human)"),
+            " backend=", (state_dict:get("backend") or "none"),
+            " model: ", (state_dict:get("model") or "none"),
+            " -> ", (target_model or "none"))
 
     if not bot then
         ngx.ctx.human = true
@@ -553,19 +624,14 @@ local function coordinate()
             -- count as activity in idle_for.
             ngx.ctx.inference = true
         end
-        ngx.ctx.counted = true
-        counts_dict:incr(target, 1, 0)
-
-        local outcome = switch_to(target, target_model, bot)
+        local outcome = admit(target, target_model, bot)
         if outcome ~= "yield" then
             if outcome == "go" then
                 human_admitted()
             end
             return
         end
-        ngx.ctx.counted = false
-        counts_dict:incr(target, -1, 0)
-        ngx.log(ngx.INFO, "hold: bot ", target, " yields to a human that arrived during its drain")
+        ngx.log(ngx.INFO, "hold: bot ", target, " yields to a human")
     end
 end
 
