@@ -8,6 +8,7 @@
 #   ./tools/bench.sh mtpcheck <models...>       # MTP capability check only (writes spec-type)
 #   ./tools/bench.sh mtpverify <models...>      # MTP-on vs off output check (premise test)
 #   ./tools/bench.sh bisect <model> [test-batch]
+#   ./tools/bench.sh residency <model>          # fast GPU/CPU pre-check (no bench)
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
 #   ./tools/bench.sh bench <models...>          # full benchmark JSON record
 #
@@ -1777,6 +1778,30 @@ for b, p in pts[:$SHORTLIST_SIZE]:
 # download, then monitors the marker until it disappears (or the download stalls).
 # It never restarts the container (restarts abort in-flight downloads). Returns 0
 # when cached/downloaded, 2 on a genuine stall (3 min of no progress).
+#
+# File-scoped cache test: a repo's refs/main only proves SOME file was fetched,
+# so a multi-quant repo (e.g. bartowski/Mellum…:Q6_K_L cached) would otherwise
+# report every sibling quant as cached, skip the download-monitor, and let the
+# router cold-start a download that fire_request then aborts by restarting the
+# container. gguf_present() checks the specific quant's file in the snapshot.
+gguf_present() {
+  # $1 = HUB_DIR, $2 = quant tag (may be empty)
+  local HUB=$1 QUANT=$2 REF SNAP MATCH
+  [ -f "$HUB/refs/main" ] || return 1
+  REF=$(cat "$HUB/refs/main" 2>/dev/null) || return 1
+  [ -n "$REF" ] || return 1
+  SNAP="$HUB/snapshots/$REF"
+  [ -d "$SNAP" ] || return 1
+  if [ -n "$QUANT" ]; then
+    # Single-file: <name>-<quant>.gguf ; split: <name>-<quant>-00001-of-000NN.gguf
+    MATCH=$(find "$SNAP" -maxdepth 1 \
+      \( -iname "*-${QUANT}.gguf" -o -iname "*-${QUANT}-0*-of-*.gguf" \) \
+      -print -quit 2>/dev/null)
+  else
+    MATCH=$(find "$SNAP" -maxdepth 1 -iname "*.gguf" -print -quit 2>/dev/null)
+  fi
+  [ -n "$MATCH" ]
+}
 ensure_model_cached() {
   local M=$1
   local HF
@@ -1790,6 +1815,8 @@ print(hf.group(1) if hf else '')
 " 2>/dev/null || echo "")
   [ -z "$HF" ] && return 0
   local REPO="${HF%%:*}"
+  local QUANT=""
+  [ "$HF" != "$REPO" ] && QUANT="${HF##*:}"
   # `tr '/' '--'` here was a pre-existing bug: tr maps character-by-character, so
   # a 1-char SET1 only ever uses the FIRST char of SET2 — it produced a single
   # dash (e.g. "models--unsloth-GLM-4.7-Flash-GGUF"), not HF's real double-dash
@@ -1805,8 +1832,8 @@ print(hf.group(1) if hf else '')
   local PART=""
   PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
 
-  # Complete: refs/main exists and no partial file.
-  if [ -z "$PART" ] && [ -f "$REFS_MAIN" ]; then
+  # Complete: no partial file AND the specific quant's gguf is present.
+  if [ -z "$PART" ] && gguf_present "$HUB_DIR" "$QUANT"; then
     local SIZE
     SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
     log "  weights cached ($SIZE)"
@@ -1837,8 +1864,8 @@ with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
   while [ "$WAIT" -lt $((DL_IDLE_MAX * DL_POLL_SEC)) ]; do
     PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
     if [ -n "$PART" ]; then MARKER_FOUND=1; break; fi
-    # If refs/main appeared, the model loaded from cache.
-    if [ -f "$REFS_MAIN" ]; then
+    # If the model's file is already present, it loaded from cache.
+    if gguf_present "$HUB_DIR" "$QUANT"; then
       kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
       local SIZE
       SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
@@ -1870,8 +1897,8 @@ with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
     ELAPSED=$((ELAPSED + DL_POLL_SEC))
     PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
 
-    # Download complete: marker gone, refs/main present.
-    if [ -z "$PART" ] && [ -f "$REFS_MAIN" ]; then
+    # Download complete: marker gone AND the quant's file is present.
+    if [ -z "$PART" ] && gguf_present "$HUB_DIR" "$QUANT"; then
       local SIZE
       SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
       log "  download complete ($SIZE, ${ELAPSED}s)"
@@ -2282,6 +2309,52 @@ sec = m.group(1) if m else ''
 v = re.search(r'^\s*'+re.escape('$1')+r'\s*=\s*(\S+)', sec, re.MULTILINE)
 print(v.group(1) if v else '')
 "
+}
+
+# ── SUBCOMMAND: residency ───────────────────────────────────
+# Fast GPU/CPU pre-check for a quant or model: load it once at the batch
+# ladder's residency rung (batch 256 — the same rung cmd_bisect_discover uses to
+# set MODE) and print the binary verdict from residency_probe. No bench JSON, no
+# metrics, no tuning. The section is snapshotted and restored on EVERY exit path
+# (Ctrl-C included), so models.ini is never left modified — it only reports.
+# Use it to decide whether a quant fits in GPU before committing to a full
+# bisect+bench (a non-resident quant never OOMs; -fit silently spills it to CPU).
+# The restore state is global, not a cmd_residency local: the EXIT trap can fire
+# after the function returns, when locals are out of scope (set -u would abort).
+RESID_SNAP=""
+RESID_RESTORED=0
+resid_restore() {
+  if [ "${RESID_RESTORED:-0}" -eq 1 ]; then return 0; fi
+  if [ -n "$RESID_SNAP" ]; then
+    restore_section "$RESID_SNAP" >/dev/null 2>&1 || true
+    rm -f "$RESID_SNAP"
+  fi
+  RESID_RESTORED=1
+  return 0
+}
+cmd_residency() {
+  local CTX
+  CTX=$(read_ctx)
+  [ -z "$CTX" ] && { log "ERROR: ctx-size not found for [$MODEL]"; exit 1; }
+  SERVED_GRACE=$(served_grace "$CTX")
+
+  RESID_SNAP="/tmp/residency_section_$$.snap"
+  RESID_RESTORED=0
+  read_section > "$RESID_SNAP"
+  # Restore on any exit (success, error, Ctrl-C) so models.ini is never changed.
+  trap 'resid_restore' EXIT
+
+  log "Model: $MODEL | ctx: $CTX | residency rung: batch 256"
+  set_batch 256 >/dev/null
+  restart
+
+  local V
+  V=$(residency_probe)
+
+  log ""
+  log "=== RESIDENCY ==="
+  log "  $MODEL: $V (batch 256, ctx $CTX)"
+  resid_restore
 }
 
 # ── SUBCOMMAND: mtpcheck ────────────────────────────────────
@@ -5103,6 +5176,27 @@ if [ "$#" -eq 0 ]; then
   echo "Selected:"
   for i in $MODEL_IDXS; do echo "  $i) $(model_name "$i")"; done
 
+  # ── Action: full suite or a quick residency check ──
+  echo ""
+  read -r -p "Run? [f]ull suite / [r]esidency check (default f): " RUN_INPUT
+  case "${RUN_INPUT:-f}" in
+    [rR]*)
+      echo ""
+      echo "=== RESIDENCY PLAN ==="
+      for i in $MODEL_IDXS; do echo "  $(model_name "$i"): residency check (GPU/CPU)"; done
+      echo ""
+      confirm "Proceed with this plan?" || { echo "Aborted."; exit 1; }
+      for i in $MODEL_IDXS; do
+        MODEL=$(model_name "$i")
+        lshow ""
+        lshow "=== RESIDENCY: $MODEL ==="
+        ensure_model_cached "$MODEL" || { lshow "  $MODEL: STALL (download failed — skipping)"; continue; }
+        ( cmd_residency )
+      done
+      exit 0
+      ;;
+  esac
+
   # ── Interactive inheritance prompts ──
   echo ""
   read -r -p "Inherit values from family parent? [Y/n]: " INHERIT_INPUT
@@ -5188,6 +5282,12 @@ case "$CMD" in
     ensure_model_cached "$MODEL" || { echo "  $MODEL: STALL (download failed — skipping)"; exit 2; }
     cmd_bisect "$MODEL" "$@"
     ;;
+  residency)
+    MODEL=${1:-}
+    [ -z "$MODEL" ] && { echo "Usage: bench.sh residency <model>"; exit 1; }
+    ensure_model_cached "$MODEL" || { echo "  $MODEL: STALL (download failed — skipping)"; exit 2; }
+    cmd_residency
+    ;;
   mtp)
     for m in "$@"; do
       MODEL=$m
@@ -5221,12 +5321,13 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|mtp|bench] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|mtp|bench] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
     echo "       bench.sh mtpverify <models...>              # MTP-on vs off output check (premise test)"
     echo "       bench.sh bisect <model> [test-batch]"
+    echo "       bench.sh residency <model>                  # fast GPU/CPU pre-check (no bench)"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
     echo "       global flags: --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
