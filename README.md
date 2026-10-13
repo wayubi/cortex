@@ -79,6 +79,7 @@ The benchmarking pipeline is a single script: `tools/bench.sh`. It finds and val
 ./tools/bench.sh bench <model>            # benchmark record only
 ./tools/bench.sh mtpcheck <model>         # MTP capability check only
 ./tools/bench.sh mtpverify <model>        # diagnostic: MTP-on vs off output check
+./tools/bench.sh residency <model>        # fast GPU/CPU pre-check (no bench record)
 ```
 
 Global flags go before the subcommand:
@@ -92,6 +93,8 @@ Global flags go before the subcommand:
 | `--thorough` | Use the legacy exhaustive search instead of discover mode |
 
 Environment equivalents: `BENCH_THOROUGH=1`, `BENCH_REFINE=64|coarse|off`.
+
+`residency` is the fast pre-check for choosing a quant: it loads the model once at the batch ladder's residency rung (`batch 256`) and reports whether it runs `GPU`- or `CPU`-resident, then restores `models.ini` unchanged. A quant that does not fit never OOMs — `-fit` silently spills it to CPU — so this is how to tell before committing to a full `bisect` + `bench`. It is also reachable from the interactive menu (`[r]esidency` after picking models).
 
 ### Pipeline
 
