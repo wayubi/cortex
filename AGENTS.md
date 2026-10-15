@@ -138,6 +138,9 @@ Params:
 ### Acceptance rate / degeneracy
 `draft acceptance` is a rough signal, never a gate — acceptance dropping because n_max was raised is only wasted draft compute (rejected drafts are recomputed by the target, quality preserved). Degeneracy above 0.15 is a `WARN` diagnostic (it can flag a genuinely looping run worth investigating), not a model failure.
 
+### Placement gate at mtpcheck
+`detect_mtp` does not accept MTP just because the draft loads and engages. After engagement it runs `residency_probe` at batch 256 with MTP on; if that is `CPU`, it re-probes with MTP off, and if the model is `GPU` without MTP it **rejects MTP**: `spec-type`, `spec-draft-n-max` and `spec-draft-p-min` are deleted from the section (explicitly — the pre-run snapshot may itself hold `spec-type` from an earlier run) and the status file records `not_mtp` with reason `mtp_spills`. The suite then benches the model as non-MTP. A model that is CPU-resident either way keeps MTP. Observed: dirk-qwen3.8-27b IQ2_S @ 64K — GPU at 20.9 t/s without MTP, CPU at ~13 t/s with it, even with `q4_0` draft KV.
+
 ### Placement re-check
 **Mandatory after any n_max change.** Draft-context compute buffer scales with `n_max × batch` — a batch tuned at n_max=2 may NOT fit the draft at n_max=3+. The spill is silent: no OOM, just decode dropping 3–4× and CPU climbing to 270–680%. Re-run placement at the SAME batch after changing n_max. **Tradeoff: raising n_max shrinks the batch ceiling (draft buffer = n_max × batch).** On ornith 128k/256k, n_max=2 at the full batch decoded equal-or-faster than n_max=3 at its reduced ceiling, so n_max=2 won.
 

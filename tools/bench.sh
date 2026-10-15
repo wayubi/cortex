@@ -2047,7 +2047,64 @@ open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'stall','reason':'mo
 
     break
   done
-  log "  ✓ MTP-SUPPORTED: model loaded and MTP engaged"
+  log "  ✓ MTP engaged — checking placement"
+
+  # Placement gate: -fit never budgets the MTP draft, so on a model whose weights
+  # nearly fill VRAM the draft loads and engages fine yet runs on the CPU (dirk
+  # IQ2_S @ 64K: GPU at 20.9 t/s with MTP off, CPU at ~13 t/s with it on, even
+  # with q4_0 draft KV). Probe at batch 256, the residency rung: if the draft
+  # spills there, no batch the ladder can pick will keep it on the GPU. Reject
+  # MTP only when it is the cause, i.e. the same model is GPU-resident without
+  # it; a model that is CPU either way keeps MTP and is left to cmd_mtp.
+  local ON_SNAP=/tmp/mtp_on_section_${MODEL}.snap
+  read_section > "$ON_SNAP"
+  set_batch 256 >/dev/null
+  restart
+  local PL_ON PL_OFF=""
+  PL_ON=$(residency_probe)
+  if [ "$PL_ON" = "CPU" ]; then
+    log "  MTP on: CPU at batch 256 — re-probing with MTP off"
+    restore_section "$SNAP" >/dev/null
+    # the snapshot can itself hold spec-type from an earlier mtpcheck, so
+    # clear the MTP keys explicitly rather than trusting the restore
+    del_key spec-type >/dev/null
+    set_batch 256 >/dev/null
+    restart
+    PL_OFF=$(residency_probe)
+  fi
+  if [ "$PL_ON" = "STALL" ] || [ "$PL_OFF" = "STALL" ]; then
+    log "  STALL during MTP placement check — aborting"
+    restore_section "$SNAP"
+    rm -f "$ON_SNAP"
+    MTP_STAT="$(mtp_status_file)" python3 -c "
+import json, os, datetime
+open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'stall','reason':'model never served during MTP placement check','written_at':datetime.datetime.now().isoformat()}))
+" 2>/dev/null || true
+    exit 2
+  fi
+  if [ "$PL_ON" = "CPU" ] && [ "$PL_OFF" = "GPU" ]; then
+    log "  ✗ MTP REJECTED: draft spills the model to CPU (GPU with MTP off, CPU with it on, batch 256)"
+    log "  Restoring original config without MTP..."
+    restore_section "$SNAP" >/dev/null
+    del_key spec-type >/dev/null
+    del_key spec-draft-n-max >/dev/null
+    del_key spec-draft-p-min >/dev/null
+    rm -f "$ON_SNAP" "$SNAP"
+    # cmd_mtpcheck keeps this reason when it stamps not_mtp
+    MTP_STAT="$(mtp_status_file)" python3 -c "
+import json, os, datetime
+open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_mtp','reason':'mtp_spills: GPU-resident without MTP, CPU with it (batch 256)','written_at':datetime.datetime.now().isoformat()}))
+" 2>/dev/null || true
+    exit 1
+  fi
+  # MTP stays: back to the MTP-on section at its own batch
+  restore_section "$ON_SNAP" >/dev/null
+  rm -f "$ON_SNAP"
+  if [ "$PL_ON" = "CPU" ]; then
+    log "  ✓ MTP-SUPPORTED: model is CPU-resident with or without MTP — keeping it"
+  else
+    log "  ✓ MTP-SUPPORTED: model loaded, MTP engaged, GPU-resident"
+  fi
   rm -f "$SNAP"
 }
 
@@ -2392,9 +2449,17 @@ open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_run','written_a
       MTP_DIE_STATUS=""
       return 2
     fi
+    # keep the reason detect_mtp left (e.g. mtp_spills from its placement gate)
     MTP_STAT="$SF" python3 -c "
 import json, os, datetime
-open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_mtp','written_at':datetime.datetime.now().isoformat()}))
+reason = None
+try:
+    prev = json.load(open(os.environ['MTP_STAT']))
+    if prev.get('status') == 'not_mtp': reason = prev.get('reason')
+except Exception: pass
+d = {'status':'not_mtp','written_at':datetime.datetime.now().isoformat()}
+if reason: d['reason'] = reason
+open(os.environ['MTP_STAT'],'w').write(json.dumps(d))
 " 2>/dev/null || true
     return 1
   fi
