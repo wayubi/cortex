@@ -1,0 +1,223 @@
+{
+  "model": "lfm-2.5-24b-a2b-q4-128k-think",
+  "ctx": 131072,
+  "batch": 5760,
+  "ubatch": 5760,
+  "placement": "CPU",
+  "bench_date": "2026-10-14T21:10:20.764993",
+  "bench_method": "bench_model.sh v2",
+  "config": {
+    "temp": "0.1",
+    "top_k": "50",
+    "top_p": null,
+    "min_p": null,
+    "repeat_penalty": "1.05",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "LiquidAI/LFM2.5-24B-A2B-GGUF:Q4_K_M",
+    "quant": "Q4_K_M",
+    "reasoning": "off",
+    "ctx": "131072",
+    "batch": "5760"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 98304,
+    "decode_prompt_tokens": 103,
+    "model_file_size_gb": 13.53,
+    "build_info": "b1-3737e41",
+    "wall_time_s": 89
+  },
+  "speed": {
+    "prefill_t_s": 2312.3,
+    "prefill_ms": 41593.73,
+    "prefill_ms_per_tok": 0.4325,
+    "decode_t_s": 45.7,
+    "decode_ms": 87509.2,
+    "decode_ms_per_tok": 21.8828
+  },
+  "request": {
+    "prefill_prompt_tokens": 96177,
+    "decode_prompt_tokens": 103,
+    "max_tokens": 4000,
+    "completion_tokens": 4000,
+    "total_tokens": 4103,
+    "cached_tokens": 0,
+    "cache_n": 0,
+    "predicted_n": 4000,
+    "finish_reason": "length",
+    "truncated": true,
+    "degeneracy": 0.0
+  },
+  "mtp": {
+    "acceptance": null,
+    "draft_accepted": null,
+    "draft_generated": null,
+    "draft_mean_len": null,
+    "n_max_loaded": null,
+    "p_min_loaded": null,
+    "tuning_status": "not_mtp",
+    "tuning_reason": null,
+    "tuned_n_max": null,
+    "tuned_p_min": null,
+    "placement_baseline": null,
+    "tuning_samples": [],
+    "tuning_written_at": "2026-10-14T20:51:59.367682",
+    "configured_n_max": null,
+    "configured_p_min": null,
+    "drafter": "none"
+  },
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 931.84
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 1493.66
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 2181.0
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 2732.52
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 2979.15
+      },
+      {
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 2894.5
+      },
+      {
+        "batch": 16384,
+        "status": "PASS",
+        "prefill": 2763.29
+      },
+      {
+        "batch": 4352,
+        "status": "REFINE",
+        "prefill": 3051.12
+      },
+      {
+        "batch": 5824,
+        "status": "REFINE",
+        "prefill": 3072.42
+      },
+      {
+        "batch": 5760,
+        "status": "REFINE",
+        "prefill": 3103.61
+      },
+      {
+        "batch": 6720,
+        "status": "REFINE",
+        "prefill": 3033.12
+      },
+      {
+        "batch": 5248,
+        "status": "REFINE",
+        "prefill": 2969.64
+      },
+      {
+        "batch": 6144,
+        "status": "REFINE",
+        "prefill": 3045.43
+      },
+      {
+        "batch": 5568,
+        "status": "REFINE",
+        "prefill": 3090.99
+      },
+      {
+        "batch": 5888,
+        "status": "REFINE",
+        "prefill": 3058.11
+      },
+      {
+        "batch": 5632,
+        "status": "REFINE",
+        "prefill": 3099.5
+      },
+      {
+        "batch": 5696,
+        "status": "REFINE",
+        "prefill": 3096.52
+      }
+    ],
+    "best_prefill": 2979.15,
+    "pick": 5760,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      4352,
+      5248,
+      5568,
+      5632,
+      5696,
+      5760,
+      5824,
+      5888,
+      6144,
+      6720
+    ],
+    "ceiling_coarse": "16384 PASS (not probed higher)",
+    "ladder_break": "2",
+    "written_at": "2026-10-14T21:07:48.070615"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 1383.2,
+      "avg_gpu_util_pct": 26.9,
+      "avg_gpu_mem_util_pct": 17.9,
+      "cpu_stddev_pct": 254.5,
+      "peak_vram_mib": 11011,
+      "peak_power_w": 94.52,
+      "peak_temp_c": 58,
+      "peak_clocks_sm_mhz": 1965,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 11011,
+      "final_temp_c": 49,
+      "final_power_w": 44.67,
+      "ram_used_mib": 38601,
+      "rss_mib": 8949,
+      "sample_count": 30
+    }
+  }
+}
