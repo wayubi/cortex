@@ -2414,6 +2414,210 @@ cmd_residency() {
   resid_restore
 }
 
+# ── SUBCOMMAND: ctxmax ──────────────────────────────────────
+# Find the largest ctx-size at which an entry stays GPU-resident, at its own
+# batch and MTP settings. The source section is copied verbatim into a probe
+# section ([<src>-ctxmax], inserted after the source) and only the copy's
+# ctx-size changes; the source is never touched. Bounds: the source's ctx-size
+# (must be GPU, or the run stops) and the model's trained context (GGUF
+# <arch>.context_length). Bisection in 1024-token steps, each step one restart:
+# tiny_probe (OOM), a check that the server really allocated the requested ctx
+# (n_ctx_slot, so a silent clamp cannot pass), then residency_probe (GPU/CPU).
+# No saturation / long-decode confirm: the full suite run on the new entry does
+# that (its bisect confirms the pick at ~99% ctx). On success the probe section is renamed
+# after the new ctx (the source's -NNk suffix swapped, e.g. -64k → -112k); on
+# any failure exit (Ctrl-C included) it is removed.
+CTXMAX_PROBE=""
+CTXMAX_DONE=0
+
+# Print the model's trained context length from the GGUF header (empty if unknown).
+gguf_ctx_train() {
+  local M=$1 HF REPO QUANT
+  HF=$(MODEL=$M read_ini_val hf)
+  [ -z "$HF" ] && return 0
+  REPO="${HF%%:*}"; QUANT=""
+  [ "$HF" != "$REPO" ] && QUANT="${HF##*:}"
+  python3 - "$ROOT/.local/llama-cpp_data/hub/models--${REPO/\//--}" "$QUANT" <<'EOF' 2>/dev/null || true
+import glob, os, struct, sys
+hub, quant = sys.argv[1], sys.argv[2]
+ref = open(os.path.join(hub, 'refs', 'main')).read().strip()
+files = sorted(f for f in glob.glob(os.path.join(hub, 'snapshots', ref, '*.gguf'))
+               if 'mmproj' not in os.path.basename(f).lower())
+if quant:
+    q = quant.lower()
+    files = [f for f in files if os.path.basename(f).lower().endswith(f'-{q}.gguf')
+             or f'-{q}-00001-of-' in os.path.basename(f).lower()]
+f = open(files[0], 'rb')
+if f.read(4) != b'GGUF': sys.exit(1)
+_ver, _ntensors, nkv = struct.unpack('<IQQ', f.read(20))
+FIX = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:1, 10:8, 11:8, 12:8}
+INT = {0:'<B', 1:'<b', 2:'<H', 3:'<h', 4:'<I', 5:'<i', 10:'<Q', 11:'<q'}
+def rstr(): n, = struct.unpack('<Q', f.read(8)); return f.read(n).decode('utf-8', 'replace')
+def skip(t):
+    if t == 8: n, = struct.unpack('<Q', f.read(8)); f.seek(n, 1)
+    elif t == 9:
+        et, n = struct.unpack('<IQ', f.read(12))
+        if et in FIX: f.seek(FIX[et] * n, 1)
+        else:
+            for _ in range(n): skip(et)
+    else: f.seek(FIX[t], 1)
+arch, vals = None, {}
+for _ in range(nkv):
+    k = rstr(); t, = struct.unpack('<I', f.read(4))
+    if k == 'general.architecture' and t == 8: arch = rstr()
+    elif k.endswith('.context_length') and t in INT:
+        vals[k], = struct.unpack(INT[t], f.read(FIX[t]))
+    else: skip(t)
+v = vals.get(f'{arch}.context_length') or next(iter(vals.values()), None)
+if v: print(v)
+EOF
+}
+
+# Copy section $1 to a new section $2, inserted right after $1's last key line
+# (so the comment block heading the next section stays with that section).
+clone_section() {
+  SRC=$1 DST=$2 INI=$INI python3 - <<'EOF'
+import os, re
+src, dst, ini = os.environ['SRC'], os.environ['DST'], os.environ['INI']
+c = open(ini).read()
+m = re.search(r'\[' + re.escape(src) + r'\](.*?)(?=\n\[|\Z)', c, re.DOTALL)
+lines = m.group(1).split('\n')
+last = max(i for i, l in enumerate(lines) if '=' in l and not l.strip().startswith((';', '#')))
+body = '\n'.join(lines[:last + 1])
+at = m.start(1) + len(body)
+open(ini, 'w').write(c[:at] + '\n\n[' + dst + ']' + body + c[at:])
+EOF
+}
+
+# Remove section $1 inserted by clone_section (its key lines only; any trailing
+# comment lines belong to the next section and are kept).
+drop_section() {
+  DST=$1 INI=$INI python3 - <<'EOF'
+import os, re
+dst, ini = os.environ['DST'], os.environ['INI']
+c = open(ini).read()
+m = re.search(r'\n*\[' + re.escape(dst) + r'\](.*?)(?=\n\[|\Z)', c, re.DOTALL)
+if not m: raise SystemExit
+lines = m.group(1).split('\n')
+keys = [i for i, l in enumerate(lines) if '=' in l and not l.strip().startswith((';', '#'))]
+tail = '\n' + '\n'.join(lines[keys[-1] + 1:]) if keys else m.group(1)
+open(ini, 'w').write(c[:m.start()] + tail + c[m.end():])
+EOF
+}
+
+ctxmax_cleanup() {
+  if [ "${CTXMAX_DONE:-0}" -eq 0 ] && [ -n "$CTXMAX_PROBE" ]; then
+    drop_section "$CTXMAX_PROBE" >/dev/null 2>&1 || true
+    log "  ctxmax: probe section [$CTXMAX_PROBE] removed"
+  fi
+  CTXMAX_DONE=1
+}
+
+# One step at ctx $1 on the probe section.
+# Returns 0 = fits on GPU, 1 = does not (OOM / clamped / CPU), 2 = STALL.
+ctxmax_try() {
+  local C=$1
+  log ""; log "--- ctx=$C ---"
+  set_key ctx-size "$C" >/dev/null
+  SERVED_GRACE=$(served_grace "$C")
+  restart
+  local RC=0
+  tiny_probe || RC=$?
+  if [ "$RC" -eq 2 ]; then return 2; fi
+  if [ "$RC" -ne 0 ]; then log "  ctx=$C: OOM / load failure"; return 1; fi
+  local GOT
+  GOT=$(docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
+        | grep -oE "n_ctx_slot = [0-9]+" | tail -1 | grep -oE "[0-9]+" || true)
+  if [ -n "$GOT" ] && [ "$GOT" -ne "$C" ]; then
+    log "  ctx=$C: server allocated n_ctx_slot=$GOT, not $C — treating as not fitting"
+    return 1
+  fi
+  local V
+  V=$(residency_probe)
+  if [ "$V" = "STALL" ]; then return 2; fi
+  if [ "$V" != "GPU" ]; then log "  ctx=$C: $V-resident"; return 1; fi
+  log "  ctx=$C: GPU-resident"
+  return 0
+}
+
+cmd_ctxmax() {
+  local SRC=$MODEL STEP=1024
+  local CTX0 TRAIN
+  CTX0=$(read_ctx)
+  [ -z "$CTX0" ] && { log "ERROR: ctx-size not found for [$SRC]"; exit 1; }
+  TRAIN=$(gguf_ctx_train "$SRC")
+  [ -z "$TRAIN" ] && { log "ERROR: could not read the trained context from the GGUF for [$SRC]"; exit 1; }
+  TRAIN=$((TRAIN / STEP * STEP))
+  log "Model: $SRC | ctx: $CTX0 | trained ctx: $TRAIN | batch: $(read_batch) | MTP: $(read_ini_val spec-type)"
+  if [ "$CTX0" -ge "$TRAIN" ]; then
+    log "  [$SRC] is already at the trained context ($TRAIN) — nothing to search"
+    return 0
+  fi
+
+  CTXMAX_PROBE="${SRC}-ctxmax"
+  if grep -qF "[$CTXMAX_PROBE]" "$INI"; then
+    log "ERROR: [$CTXMAX_PROBE] already exists in models.ini (left by a killed run?) — remove it first"
+    exit 1
+  fi
+  CTXMAX_DONE=0
+  clone_section "$SRC" "$CTXMAX_PROBE"
+  trap 'ctxmax_cleanup' EXIT
+  MODEL=$CTXMAX_PROBE
+  log "  probe section [$CTXMAX_PROBE] created (copy of [$SRC])"
+
+  local LO HI MID RC
+  RC=0; ctxmax_try "$CTX0" || RC=$?
+  [ "$RC" -eq 2 ] && { log "  STALL — aborting"; exit 2; }
+  if [ "$RC" -ne 0 ]; then
+    log "  [$SRC] is not GPU-resident at its own ctx ($CTX0) — no larger ctx will be; stopping"
+    exit 1
+  fi
+  LO=$CTX0
+  # Try the top of the range first: some entries fit the full trained ctx.
+  RC=0; ctxmax_try "$TRAIN" || RC=$?
+  [ "$RC" -eq 2 ] && { log "  STALL — aborting"; exit 2; }
+  if [ "$RC" -eq 0 ]; then LO=$TRAIN; HI=$TRAIN; else HI=$TRAIN; fi
+  while [ $((HI - LO)) -gt "$STEP" ]; do
+    MID=$(( (LO + HI) / 2 / STEP * STEP ))
+    [ "$MID" -le "$LO" ] && MID=$((LO + STEP))
+    RC=0; ctxmax_try "$MID" || RC=$?
+    [ "$RC" -eq 2 ] && { log "  STALL — aborting"; exit 2; }
+    if [ "$RC" -eq 0 ]; then LO=$MID; else HI=$MID; fi
+  done
+  log ""; log "  bisect: largest GPU-resident ctx = $LO"
+
+  if [ "$LO" -eq "$CTX0" ]; then
+    log ""; log "=== CTXMAX: $SRC ==="
+    log "  no ctx above $CTX0 stays GPU-resident — [$SRC] is already at its ceiling"
+    return 0
+  fi
+
+  local NEW
+  NEW=$(python3 -c "
+import re, sys
+src, k = sys.argv[1], int(sys.argv[2]) // 1024
+new = re.sub(r'-\d+k(?=(-|$))', f'-{k}k', src, count=1)
+print(new if new != src else f'{src}-{k}k')
+" "$SRC" "$LO")
+  if grep -qF "[$NEW]" "$INI"; then
+    log "  [$NEW] already exists — keeping the result as [$CTXMAX_PROBE]"
+    NEW=$CTXMAX_PROBE
+  fi
+  local WHY="$((LO + STEP)) does not fit"
+  [ "$LO" -eq "$TRAIN" ] && WHY="the trained ctx"
+  set_key ctx-size "$LO ; ctxmax pick (GPU-resident ceiling, ${STEP}-step; $WHY)" >/dev/null
+  CTXMAX_PROBE_OLD=$CTXMAX_PROBE NEW=$NEW INI=$INI python3 -c "
+import os
+c = open(os.environ['INI']).read()
+open(os.environ['INI'], 'w').write(c.replace('[' + os.environ['CTXMAX_PROBE_OLD'] + ']', '[' + os.environ['NEW'] + ']', 1))
+"
+  CTXMAX_DONE=1
+  log ""; log "=== CTXMAX: $SRC ==="
+  log "  max GPU-resident ctx: $LO (trained ctx $TRAIN, source ctx $CTX0, batch $(MODEL=$NEW read_batch))"
+  log "  new entry: [$NEW] — a new family head (same hf, new ctx); run the full suite on it to record a bench"
+  log "  (restart llama-cpp, or run the suite, before using it — the router reads models.ini only at start)"
+}
+
 # ── SUBCOMMAND: mtpcheck ────────────────────────────────────
 # Empirically determine MTP capability, write spec-type to models.ini.
 # Exit 0 = MTP-capable (spec-type left set), 1 = not MTP (config restored).
@@ -5243,8 +5447,23 @@ if [ "$#" -eq 0 ]; then
 
   # ── Action: full suite or a quick residency check ──
   echo ""
-  read -r -p "Run? [f]ull suite / [r]esidency check (default f): " RUN_INPUT
+  read -r -p "Run? [f]ull suite / [r]esidency check / [c]tx max (default f): " RUN_INPUT
   case "${RUN_INPUT:-f}" in
+    [cC]*)
+      echo ""
+      echo "=== CTX-MAX PLAN ==="
+      for i in $MODEL_IDXS; do echo "  $(model_name "$i"): copy entry, bisect ctx (1024 steps) up to the trained ctx while GPU-resident"; done
+      echo ""
+      confirm "Proceed with this plan?" || { echo "Aborted."; exit 1; }
+      for i in $MODEL_IDXS; do
+        MODEL=$(model_name "$i")
+        lshow ""
+        lshow "=== CTXMAX: $MODEL ==="
+        ensure_model_cached "$MODEL" || { lshow "  $MODEL: STALL (download failed — skipping)"; continue; }
+        ( cmd_ctxmax ) || lshow "  $MODEL: ctxmax did not complete (see log)"
+      done
+      exit 0
+      ;;
     [rR]*)
       echo ""
       echo "=== RESIDENCY PLAN ==="
@@ -5353,6 +5572,13 @@ case "$CMD" in
     ensure_model_cached "$MODEL" || { echo "  $MODEL: STALL (download failed — skipping)"; exit 2; }
     cmd_residency
     ;;
+  ctxmax)
+    for m in "$@"; do
+      MODEL=$m
+      ensure_model_cached "$m" || { echo "  $m: STALL (download failed — skipping)"; continue; }
+      ( cmd_ctxmax ) || echo "  $m: ctxmax did not complete (see log)"
+    done
+    ;;
   mtp)
     for m in "$@"; do
       MODEL=$m
@@ -5386,13 +5612,14 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|mtp|bench] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|mtp|bench] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
     echo "       bench.sh mtpverify <models...>              # MTP-on vs off output check (premise test)"
     echo "       bench.sh bisect <model> [test-batch]"
     echo "       bench.sh residency <model>                  # fast GPU/CPU pre-check (no bench)"
+    echo "       bench.sh ctxmax <models...>                 # largest GPU-resident ctx → new entry"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
     echo "       global flags: --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
