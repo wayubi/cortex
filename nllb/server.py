@@ -2,6 +2,7 @@
 
 import gc
 import os
+import threading
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -15,6 +16,15 @@ DEFAULT_MODEL = "facebook/nllb-200-3.3B"
 
 cache: dict[str, tuple[AutoTokenizer, AutoModelForSeq2SeqLM]] = {}
 DEFAULT_SRC = "eng_Latn"
+
+# FastAPI runs these sync endpoints on a thread pool, so two translations that
+# arrive while the model is not loaded each saw an empty cache and loaded their
+# own copy: two 3.3B models do not fit on 12 GB and both died with CUDA OOM
+# (2026-10-17 03:41:08, two "Loading model" lines in the same millisecond); the
+# 03:25:50 stall that held a pipeline for its full 600s timeout was likely the
+# same race. Loading and unloading now happen one at a time; a request that
+# finds the load in progress waits for it and then uses the cached model.
+cache_lock = threading.Lock()
 
 
 class TranslateRequest(BaseModel):
@@ -35,6 +45,11 @@ class TranslateRequest(BaseModel):
 
 
 def get_model(name: str):
+    with cache_lock:
+        return _get_model_locked(name)
+
+
+def _get_model_locked(name: str):
     if name not in cache:
         if cache:
             print(f"Evicting cached model to load {name}")
@@ -96,14 +111,15 @@ def models():
 
 @app.post("/v1/models/unload")
 def unload(name: str = None):
-    targets = [name] if name else list(cache.keys())
-    for n in targets:
-        if n in cache:
-            _, mdl = cache[n]
-            mdl.cpu()
-            del cache[n]
-    gc.collect()
-    torch.cuda.empty_cache()
+    with cache_lock:
+        targets = [name] if name else list(cache.keys())
+        for n in targets:
+            if n in cache:
+                _, mdl = cache[n]
+                mdl.cpu()
+                del cache[n]
+        gc.collect()
+        torch.cuda.empty_cache()
     if name:
         return {"status": "unloaded", "model": name}
     return {"status": "unloaded", "models": targets}
