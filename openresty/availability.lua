@@ -12,38 +12,48 @@
 -- because a subrequest stays within its own server.
 
 local cjson = require "cjson"
+local cortex = require "cortex"
 local state = ngx.shared.backend_state
 local counts = ngx.shared.request_counts
 local in_flight, total = {}, 0
-for _, b in ipairs({ "llama_cpp", "ollama", "nllb" }) do
+for _, b in ipairs(cortex.BACKENDS) do
     local n = counts:get(b) or 0
     in_flight[b] = n
     total = total + n
 end
 
--- llama.cpp's own view, when it has one. The in-flight counter only
--- sees traffic that came through here; /slots also catches work
--- submitted to llama-cpp directly. Absent, disabled (--no-slots) or
--- slow, this stays null and the counter decides alone.
-local slots = nil
-local ok_cap, res = pcall(ngx.location.capture, "/__slots")
-if ok_cap and res and res.status == 200 then
+-- The llama.cpp routers' own view (llama-cpp and prism-llama-cpp), when they
+-- have one. The in-flight counter only sees traffic that came through here;
+-- /slots also catches work submitted to a router directly. A router whose
+-- endpoint is absent, disabled (--no-slots) or slow adds nothing; if neither
+-- answers, this stays null and the counter decides alone.
+local function read_slots(loc)
+    local ok_cap, res = pcall(ngx.location.capture, loc)
+    if not (ok_cap and res and res.status == 200) then return nil end
     local ok_json, parsed = pcall(cjson.decode, res.body)
     -- Older builds return a bare array, newer ones {"slots": [...]}
-    if ok_json and type(parsed) == "table" then
-        local list = parsed
-        if type(parsed.slots) == "table" then list = parsed.slots end
-        if type(list) == "table" and #list > 0 then
-            local processing = 0
-            for _, sl in ipairs(list) do
-                if type(sl) == "table" and
-                   (sl.is_processing == true or sl.state == 1 or
-                    sl.state == "processing") then
-                    processing = processing + 1
-                end
-            end
-            slots = { processing = processing, total = #list }
+    if not (ok_json and type(parsed) == "table") then return nil end
+    local list = parsed
+    if type(parsed.slots) == "table" then list = parsed.slots end
+    if type(list) ~= "table" or #list == 0 then return nil end
+    local processing = 0
+    for _, sl in ipairs(list) do
+        if type(sl) == "table" and
+           (sl.is_processing == true or sl.state == 1 or
+            sl.state == "processing") then
+            processing = processing + 1
         end
+    end
+    return { processing = processing, total = #list }
+end
+
+local slots = nil
+for _, loc in ipairs({ "/__slots", "/__slots_prism" }) do
+    local s = read_slots(loc)
+    if s then
+        slots = slots or { processing = 0, total = 0 }
+        slots.processing = slots.processing + s.processing
+        slots.total = slots.total + s.total
     end
 end
 

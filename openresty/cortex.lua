@@ -24,9 +24,58 @@ M.HOLD_POLL = 0.5
 
 local TARGET = { ["11434"] = "ollama", ["8080"] = "llama_cpp", ["5002"] = "nllb" }
 
+-- Every backend key, for the in-flight counts availability.lua reports.
+M.BACKENDS = { "llama_cpp", "prism_llama_cpp", "ollama", "nllb" }
+
 function M.target_for_port(port)
     return TARGET[port]
 end
+
+-- :8080 serves two llama.cpp routers. A model named by a section of
+-- prism-llama-cpp/models.ini (bind-mounted read-only) goes to the PrismML fork;
+-- every other model to llama-cpp, so names must be unique across both files.
+-- The set is re-read at most every PRISM_REREAD seconds per worker, so an edit
+-- to that models.ini routes without an openresty reload.
+local PRISM_INI = "/etc/nginx/prism-models.ini"
+local PRISM_REREAD = 5
+local prism = { names = {}, at = nil }
+
+local function prism_names()
+    local now = ngx.now()
+    if prism.at and now - prism.at < PRISM_REREAD then
+        return prism.names
+    end
+    prism.at = now
+    local f = io.open(PRISM_INI, "r")
+    if not f then
+        prism.names = {}
+        return prism.names
+    end
+    local names = {}
+    for line in f:lines() do
+        local name = line:match("^%s*%[([^%]]+)%]")
+        if name and name ~= "*" then
+            names[name] = true
+        end
+    end
+    f:close()
+    prism.names = names
+    return names
+end
+
+function M.is_prism_model(model)
+    return type(model) == "string" and prism_names()[model] == true
+end
+
+-- The backend key for a request on `port` naming `model` (nil model: by port).
+function M.target_for(port, model)
+    if port == "8080" and M.is_prism_model(model) then
+        return "prism_llama_cpp"
+    end
+    return TARGET[port]
+end
+
+M.PRISM_UPSTREAM = "http://prism-llama-cpp:8080"
 
 function M.is_bot()
     local v = ngx.var.http_x_cortex_client

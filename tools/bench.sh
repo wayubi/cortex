@@ -12,7 +12,14 @@
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
 #   ./tools/bench.sh bench <models...>          # full benchmark JSON record
 #
-# Global flags (before the subcommand): --no-inherit, --reset-parent,
+# Backends: llama-cpp (llama-cpp/models.ini) and prism-llama-cpp
+# (prism-llama-cpp/models.ini, the PrismML fork) are benchable; ollama and nllb
+# are stubs (no benchmark support yet). The subcommands pick the backend from the
+# model names given; the interactive menu asks; --backend=<name> (or env
+# BENCH_BACKEND) forces one. Requests always go through openresty :8080, which
+# routes each model to its router and unloads the other.
+#
+# Global flags (before the subcommand): --backend=<name>, --no-inherit, --reset-parent,
 # --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
 # failed, §6.4 part 3), --refine=64|coarse|off (discover refinement depth, §42
 # Change H; env BENCH_REFINE). Default mode is discover; --thorough re-enables the
@@ -24,17 +31,49 @@
 # models.ini BEFORE the bisect, so the bisect runs against the true MTP state.
 # Failures are logged and skipped; a verdict table is printed at the end.
 #
-# Reads/writes llama-cpp/models.ini. Logs to logs/bench_<timestamp>.log.
+# Reads/writes the backend's models.ini. Logs to logs/bench_<timestamp>.log.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-INI="$ROOT/llama-cpp/models.ini"
-MODELS_DIR="$ROOT/llama-cpp/models"
 LOG_DIR="$ROOT/logs"
-mkdir -p "$LOG_DIR" "$MODELS_DIR"
+mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/bench_$(date +%Y%m%d-%H%M).log"
-DOCKER_LOG="cortex-llama-cpp-1"
+
+# ── Backends ────────────────────────────────────────────────
+# A benchable backend is a llama.cpp router: <name>/models.ini (presets),
+# <name>/models/ (bench JSONs), compose service <name>, container cortex-<name>-1.
+# Every engine below reads INI / MODELS_DIR / SERVICE / DOCKER_LOG, so selecting
+# a backend is only setting these four.
+BENCH_BACKENDS="llama-cpp prism-llama-cpp"
+STUB_BACKENDS="ollama nllb"     # in cortex, but bench.sh has no engine for them yet
+BACKEND="" INI="" MODELS_DIR="" SERVICE="" DOCKER_LOG=""
+use_backend() {
+  local B=$1
+  case " $BENCH_BACKENDS " in
+    *" $B "*) ;;
+    *)
+      case " $STUB_BACKENDS " in
+        *" $B "*) echo "bench.sh: backend '$B' has no benchmark support yet (stub)"; exit 1 ;;
+      esac
+      echo "bench.sh: unknown backend '$B' (benchable: $BENCH_BACKENDS; stubs: $STUB_BACKENDS)"; exit 1 ;;
+  esac
+  BACKEND=$B
+  INI="$ROOT/$B/models.ini"
+  MODELS_DIR="$ROOT/$B/models"
+  SERVICE=$B
+  DOCKER_LOG="cortex-$B-1"
+  mkdir -p "$MODELS_DIR"
+}
+# The benchable backend whose models.ini has a [<name>] section (empty if none).
+backend_of() {
+  local B
+  for B in $BENCH_BACKENDS; do
+    grep -qF "[$1]" "$ROOT/$B/models.ini" 2>/dev/null && { echo "$B"; return 0; }
+  done
+  echo ""
+}
+use_backend llama-cpp
 # smpbo and nbytes_shared added in commit 18415cf — grep pattern for server crash/error markers
 OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error|cuMemCreate|GGML_ASSERT|ggml_abort|exited with status 1|nbytes_shared|smpbo"
 POLL_MIN_SAMPLES=3
@@ -572,21 +611,28 @@ maybe_inherit() {
 
 # ── Shared infra: restart + log-marked OOM detection ───────
 restart() {
-  log "  Restarting llama-cpp..."
-  cd "$ROOT" && docker compose restart llama-cpp || {
+  log "  Restarting $SERVICE..."
+  cd "$ROOT" && docker compose restart "$SERVICE" || {
     log "  ERROR: docker compose restart failed"
     exit 1
   }
+  # :8080's GET /v1/models merges both routers and answers while either is up,
+  # so "it answered" is not enough: wait until it lists a preset of THIS
+  # backend's models.ini, which only this router reports.
   local i
   for i in $(seq 1 30); do
-    if curl -sf --max-time 3 http://localhost:8080/v1/models >/dev/null 2>&1; then
+    if curl -sf --max-time 3 http://localhost:8080/v1/models 2>/dev/null | INI=$INI python3 -c "
+import json, os, re, sys
+names = set(re.findall(r'(?m)^\[([^\]]+)\]', open(os.environ['INI']).read())) - {'*'}
+ids = {e.get('id') for e in json.load(sys.stdin).get('data', [])}
+sys.exit(0 if names & ids else 1)" 2>/dev/null; then
       log "  Model router ready (${i}x2s)"
       return 0
     fi
     sleep 2
   done
-  log "  ERROR: llama-cpp did not become ready after restart"
-  docker ps -a | grep llama-cpp || true
+  log "  ERROR: $SERVICE did not become ready after restart"
+  docker ps -a | grep "$SERVICE" || true
   docker logs --tail 20 $DOCKER_LOG 2>&1 || true
   exit 1
 }
@@ -2615,7 +2661,7 @@ open(os.environ['INI'], 'w').write(c.replace('[' + os.environ['CTXMAX_PROBE_OLD'
   log ""; log "=== CTXMAX: $SRC ==="
   log "  max GPU-resident ctx: $LO (trained ctx $TRAIN, source ctx $CTX0, batch $(MODEL=$NEW read_batch))"
   log "  new entry: [$NEW] — a new family head (same hf, new ctx); run the full suite on it to record a bench"
-  log "  (restart llama-cpp, or run the suite, before using it — the router reads models.ini only at start)"
+  log "  (restart $SERVICE, or run the suite, before using it — the router reads models.ini only at start)"
 }
 
 # ── SUBCOMMAND: mtpcheck ────────────────────────────────────
@@ -3086,7 +3132,7 @@ cmd_mtp_thorough() {
     log "    p_min=$P: ${PMIN_RESULTS[$P]:-skipped}"
   done
   log "  WINNERS: spec-draft-n-max=$FINAL_NMAX spec-draft-p-min=$FINAL_PMIN"
-  log "  (restart llama-cpp to apply)"
+  log "  (restart $SERVICE to apply)"
   log "=== DONE ==="
 }
 
@@ -3374,7 +3420,7 @@ print(rank[0] if rank else '')
   MTP_TUNED_NMAX=$WIN_NMAX
   MTP_TUNED_PMIN=$WIN_PMIN
   log ""; log "  WINNERS: spec-draft-n-max=$WIN_NMAX spec-draft-p-min=$WIN_PMIN"
-  log "  (restart llama-cpp to apply)"
+  log "  (restart $SERVICE to apply)"
   log "=== DONE ==="
 }
 
@@ -4628,15 +4674,12 @@ print(json.dumps(env))
 PYEOF
 )
 
-  # llama.cpp build info via the running server
+  # llama.cpp build info of THIS backend's binary. Not GET :8080/props — that
+  # reaches llama-cpp's router whichever backend is being benched.
   local BUILD_INFO
-  BUILD_INFO=$(curl -s --max-time 5 http://localhost:8080/props 2>/dev/null | python3 -c "
-import json,sys
-try:
-    d = json.load(sys.stdin)
-    print(d.get('build_info', ''))
-except: print('')
-" 2>/dev/null || echo "")
+  BUILD_INFO=$(docker exec "$DOCKER_LOG" llama-server --version 2>&1 \
+    | sed -n 's/^version: //p' | head -1 || echo "")
+  BUILD_INFO="$BACKEND ${BUILD_INFO}"
 
   # Read ctx-size (scoped to the model's own section)
   local CTX=$(read_ctx)
@@ -5094,6 +5137,7 @@ data = {
     'placement': '$PLACEMENT',
     'bench_date': datetime.datetime.now().isoformat(),
     'bench_method': 'bench_model.sh v2',
+    'backend': '${BACKEND}',
     'config': meta['config'],
     'bench': {
         'max_tokens': $DECODE_MAX_TOKENS,
@@ -5378,13 +5422,6 @@ run_full_suite() {
 }
 
 # ── MAIN ────────────────────────────────────────────────────
-load_models
-N_MODELS=${#MODEL_NAMES[@]}
-if [ "$N_MODELS" -eq 0 ]; then
-  echo "ERROR: no models found in $INI"
-  exit 1
-fi
-
 # ── Inheritance flags (global, apply to whole selection) ──
 declare -A RESET_DONE
 INHERIT_PARENT_FAILED=0     # §50.2 Change L: set by maybe_inherit when a sibling was
@@ -5392,8 +5429,10 @@ INHERIT_PARENT_FAILED=0     # §50.2 Change L: set by maybe_inherit when a sibli
 INHERIT_MODE=1
 RESET_PARENT=0
 MAIN_ARGS=()
+BACKEND_ARG="${BENCH_BACKEND:-}"
 for arg in "$@"; do
   case "$arg" in
+    --backend=*)   BACKEND_ARG="${arg#--backend=}" ;;
     --no-inherit)  INHERIT_MODE=0 ;;
     --reset-parent) RESET_PARENT=1 ;;
     --thorough)    THOROUGH=1 ;;
@@ -5417,6 +5456,51 @@ case "$REFINE_MODE" in
 esac
 # Replace "$@" with filtered args for downstream parsing
 set -- "${MAIN_ARGS[@]+"${MAIN_ARGS[@]}"}"
+
+# ── Backend ──
+# --backend / BENCH_BACKEND wins. Otherwise a subcommand takes the backend
+# whose models.ini holds the models it names (all must share one backend), and
+# the interactive menu asks.
+if [ -n "$BACKEND_ARG" ]; then
+  use_backend "$BACKEND_ARG"
+elif [ "$#" -gt 1 ]; then
+  DETECTED=""
+  for m in "${@:2}"; do
+    B=$(backend_of "$m")
+    [ -z "$B" ] && continue
+    if [ -n "$DETECTED" ] && [ "$B" != "$DETECTED" ]; then
+      echo "ERROR: models span backends ($DETECTED and $B) — run one backend at a time"
+      exit 1
+    fi
+    DETECTED=$B
+  done
+  use_backend "${DETECTED:-llama-cpp}"
+elif [ "$#" -eq 0 ]; then
+  echo ""
+  echo "=== BACKEND ==="
+  i=1; declare -a BACKEND_CHOICES=()
+  for B in $BENCH_BACKENDS $STUB_BACKENDS; do
+    case " $STUB_BACKENDS " in *" $B "*) NOTE=" (no benchmarks yet)" ;; *) NOTE="" ;; esac
+    printf "  %d) %s%s\n" "$i" "$B" "$NOTE"
+    BACKEND_CHOICES+=("$B"); i=$((i + 1))
+  done
+  read -r -p "Backend (default 1): " BACKEND_INPUT
+  BACKEND_INPUT=${BACKEND_INPUT:-1}
+  if [[ "$BACKEND_INPUT" =~ ^[0-9]+$ ]] && [ "$BACKEND_INPUT" -ge 1 ] \
+     && [ "$BACKEND_INPUT" -le "${#BACKEND_CHOICES[@]}" ]; then
+    use_backend "${BACKEND_CHOICES[$((BACKEND_INPUT - 1))]}"
+  else
+    use_backend "$BACKEND_INPUT"
+  fi
+fi
+lshow "  Backend: $BACKEND ($INI)"
+
+load_models
+N_MODELS=${#MODEL_NAMES[@]}
+if [ "$N_MODELS" -eq 0 ]; then
+  echo "ERROR: no models found in $INI"
+  exit 1
+fi
 
 if [ "$#" -eq 0 ]; then
   # ── Interactive: pick models → full suite → confirm ──
@@ -5622,7 +5706,7 @@ case "$CMD" in
     echo "       bench.sh ctxmax <models...>                 # largest GPU-resident ctx → new entry"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
-    echo "       global flags: --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
+    echo "       global flags: --backend=llama-cpp|prism-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
     echo "       env: BENCH_REFINE=64|coarse|off sets the discover refinement depth (default 64)"
     exit 1

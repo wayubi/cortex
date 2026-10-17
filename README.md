@@ -8,12 +8,15 @@ Cortex runs four services in a shared Docker network. An `openresty` reverse pro
 
 | Service | Port | Role |
 |---------|------|------|
-| **openresty** | 11434 (ollama), 8080 (llama.cpp), 5002 (nllb) | Reverse proxy + VRAM coordinator |
+| **openresty** | 11434 (ollama), 8080 (llama.cpp + prism), 5002 (nllb) | Reverse proxy + VRAM coordinator |
 | **ollama** | 11434 | Ollama inference backend |
-| **llama-cpp** | 8080 | llama.cpp router-mode inference backend |
+| **llama-cpp** | 8080 | upstream llama.cpp, router mode (`llama-cpp/models.ini`) |
+| **prism-llama-cpp** | 8080 | PrismML's llama.cpp fork, router mode, for the ternary Bonsai models (`prism-llama-cpp/models.ini`) |
 | **nllb** | 5002 | Hugging Face NLLB translation (FastAPI) |
 
-A `llama-build` profile is also available (build-only, not normally running).
+`:8080` serves both llama.cpp routers: a request for a model named in `prism-llama-cpp/models.ini` goes to the fork, everything else to llama-cpp, and `GET /v1/models` lists both. Model names are unique across the two files.
+
+`llama-build` and `prism-llama-build` profiles build the two images (build-only, not normally running).
 
 ### Coordinator behaviour
 
@@ -23,7 +26,7 @@ When a switch is needed:
 1. The coordinator drains active requests on the current backend (polls the `request_counts` dict, up to `DRAIN_TIMEOUT` = 600s). If the backend is still busy when that expires, the incoming request gets a 503 rather than an unload under load.
 2. It calls the active backend's unload API. All three backends are full participants:
    - ollama — `POST /api/generate` with `keep_alive=0`
-   - llama.cpp — `POST /models/unload`
+   - llama.cpp and prism-llama-cpp — `POST /models/unload`
    - nllb — `GET /v1/models` to find loaded models, then `POST /v1/models/unload` for each
 3. It updates `backend_state` to the new target.
 
@@ -51,11 +54,12 @@ All three model pickers populate without triggering a backend switch. Inference 
 
 ## Rebuilding
 
-**llama.cpp from source** (with CUDA + flash attention):
+**llama.cpp from source** (with CUDA + flash attention). Both builders share `llama-cpp/Dockerfile` and are pinned to release tags in `compose.yml` (`LLAMA_REF`); bump a tag deliberately and re-bench:
 
 ```bash
-docker compose --profile build build llama-build
-docker compose up -d
+docker compose --profile build build llama-build          # upstream → llama-cpp:latest
+docker compose --profile build build prism-llama-build    # PrismML fork → prism-llama-cpp:latest
+docker compose up -d llama-cpp prism-llama-cpp
 ```
 
 **After Lua or nginx changes** (rebuilds the openresty image):
@@ -157,18 +161,21 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 ├── AGENTS.md                 # developer instructions / benchmarking methodology
 ├── README.md
 ├── LICENSE
-├── compose.yml               # Docker Compose — openresty, ollama, llama-cpp, nllb
+├── compose.yml               # Docker Compose — openresty, ollama, llama-cpp, prism-llama-cpp, nllb
 ├── compose.override.yml      # local volume mounts (model caches, models.ini)
 ├── CPU_POLLING.md            # CPU/GPU placement verification methodology
 ├── full-metrics.md           # benchmark table for all models (regenerate via tools/gen_metrics.sh)
 ├── logs/                     # bench.sh run logs, one per invocation
 ├── tools/
 │   ├── bench.sh              # canonical pipeline: mtpcheck → bisect → mtp → bench
-│   └── gen_metrics.sh        # regenerate full-metrics.md from llama-cpp/models/*.json
+│   └── gen_metrics.sh        # regenerate full-metrics.md from <backend>/models/*.json
 ├── llama-cpp/
 │   ├── models.ini            # llama.cpp model presets
 │   ├── models/               # per-model benchmark JSONs
-│   └── Dockerfile            # CUDA build from source
+│   └── Dockerfile            # CUDA build from source (both llama.cpp backends)
+├── prism-llama-cpp/
+│   ├── models.ini            # PrismML fork presets (Bonsai)
+│   └── models/               # its benchmark JSONs
 ├── nllb/
 │   ├── Dockerfile
 │   ├── entrypoint.sh
@@ -176,7 +183,8 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 ├── openresty/
 │   ├── Dockerfile
 │   ├── nginx.conf            # 3 server blocks + lua_shared_dict
-│   └── coordinator.lua       # VRAM coordinator — API-based model unload
+│   ├── coordinator.lua       # VRAM coordinator — API-based model unload, :8080 routing
+│   └── models_list.lua       # GET /v1/models on :8080 — both llama.cpp routers merged
 └── md/                       # planning and design docs
     ├── plan-bench-discover-mode.md   # current benchmarking pipeline: design, reviews, decisions
     ├── plan-bench-sh-audit-fixes.md  # earlier bench.sh audit

@@ -5,7 +5,8 @@
     python3 tools/test_coordinator.py --ref HEAD # a commit, to show what fails
 
 Starts a private docker network with tools/coord_mock.py standing in for all
-three backends and a throwaway openresty running the real nginx.conf and Lua
+four backends (a second mock plays prism-llama-cpp, the PrismML router that
+shares :8080 with llama-cpp) and a throwaway openresty running the real nginx.conf and Lua
 from openresty/. Nothing touches the live stack or the GPU. cortex.lua's
 HUMAN_HOLD and BOT_HOLD_CAP are shortened to HOLD and CAP below so a run takes
 about a minute; every other line is the shipped code.
@@ -28,7 +29,9 @@ IMAGE = "openresty/openresty:bookworm-fat"
 MOCK_IMAGE = "python:3.11-slim"
 HOLD = 3
 CAP = 6
-LUA = ("coordinator.lua", "availability.lua", "cortex.lua", "log.lua")
+LUA = ("coordinator.lua", "availability.lua", "cortex.lua", "log.lua", "models_list.lua")
+# :8080 models that route to prism-llama-cpp (its models.ini section names)
+PRISM_MODELS = ("m-prism", "m-prism2")
 
 
 def sh(*cmd, check=True):
@@ -55,6 +58,8 @@ def stage(ref, out):
         s = re.sub(r"M\.HUMAN_HOLD = \d+", f"M.HUMAN_HOLD = {HOLD}", s)
         s = re.sub(r"M\.BOT_HOLD_CAP = \d+", f"M.BOT_HOLD_CAP = {CAP}", s)
         open(pol, "w").write(s)
+    with open(os.path.join(out, "prism-models.ini"), "w") as fh:
+        fh.write("[*]\nctx-size = 4096\n\n" + "".join(f"[{m}]\nhf = x/y\n\n" for m in PRISM_MODELS))
 
 
 class Stack:
@@ -66,7 +71,12 @@ class Stack:
            "--network-alias", "nllb",
            "-v", os.path.join(ROOT, "tools", "coord_mock.py") + ":/m.py:ro",
            MOCK_IMAGE, "python", "-u", "/m.py")
-        vols = ["-v", os.path.join(conf_dir, "nginx.conf") + ":/etc/nginx/conf.d/default.conf:ro"]
+        sh("docker", "run", "-d", "--name", self.name + "-pmock", "--network", self.name,
+           "--network-alias", "prism-llama-cpp", "-e", "MOCK_8080=prism_llama_cpp",
+           "-v", os.path.join(ROOT, "tools", "coord_mock.py") + ":/m.py:ro",
+           MOCK_IMAGE, "python", "-u", "/m.py")
+        vols = ["-v", os.path.join(conf_dir, "nginx.conf") + ":/etc/nginx/conf.d/default.conf:ro",
+                "-v", os.path.join(conf_dir, "prism-models.ini") + ":/etc/nginx/prism-models.ini:ro"]
         for f in LUA:
             p = os.path.join(conf_dir, f)
             if os.path.exists(p):
@@ -74,6 +84,15 @@ class Stack:
         sh("docker", "run", "-d", "--name", self.name + "-or", "--network", self.name,
            "-p", "127.0.0.1::8080", "-p", "127.0.0.1::11434", "-p", "127.0.0.1::5002",
            *vols, IMAGE)
+        self.wait_up()
+
+    def restart_openresty(self):
+        """Fresh shared dicts while the mocks keep what they hold -- what a
+        real openresty restart looks like to the coordinator."""
+        sh("docker", "restart", self.name + "-or")
+        self.wait_up()
+
+    def wait_up(self):
         self.port = {}
         for p in (8080, 11434, 5002):
             self.port[p] = int(sh("docker", "port", self.name + "-or", str(p)).split(":")[-1])
@@ -99,7 +118,7 @@ class Stack:
                            text=True).stderr
 
     def close(self):
-        for c in ("-or", "-mock"):
+        for c in ("-or", "-mock", "-pmock"):
             subprocess.run(["docker", "rm", "-f", self.name + c], capture_output=True)
         subprocess.run(["docker", "network", "rm", self.name], capture_output=True)
 
@@ -110,7 +129,7 @@ class Call(threading.Thread):
     def __init__(self, stack, t0, port, model, delay, bot, after=0.0, timeout=30):
         super().__init__(daemon=True)
         self.args = (stack, t0, port, model, delay, bot, after, timeout)
-        self.status = self.held = self.end = None
+        self.status = self.held = self.end = self.body = None
 
     def run(self):
         stack, t0, port, model, delay, bot, after, timeout = self.args
@@ -124,6 +143,7 @@ class Call(threading.Thread):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 self.status = r.status
+                self.body = json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
             self.status, self.held = e.code, e.headers.get("X-Cortex-Held")
         except Exception as e:                    # client-side timeout: an abort
@@ -278,6 +298,80 @@ def scenario_concurrent_switches_do_not_deadlock(stack):
     settle(stack)
 
 
+def loaded_on_8080(stack):
+    """{model: backend} for every model a router reports loaded, read through
+    the merged GET /v1/models (the mocks list only their loaded model)."""
+    out = {}
+    for e in stack.get(8080, "/v1/models").get("data", []):
+        if (e.get("status") or {}).get("value") == "loaded":
+            out[e["id"]] = "prism" if e["id"] in PRISM_MODELS else "llama"
+    return out
+
+
+def scenario_prism_routes_by_model_and_switches(stack):
+    """:8080 serves two llama.cpp routers; the model name picks one, and moving
+    between them unloads the other, like any backend switch."""
+    print("a prism model on :8080 goes to prism-llama-cpp; switching unloads the other router")
+    t0 = time.time()
+    a = Call(stack, t0, 8080, "m-a", 0.1, bot=False)
+    a.start(); a.join()
+    check("a llama model is served by llama-cpp", a.status == 200
+          and (a.body or {}).get("backend") == "llama_cpp", (a.status, a.body))
+    p = Call(stack, time.time(), 8080, "m-prism", 0.1, bot=False)
+    p.start(); p.join()
+    check("a prism model is served by prism-llama-cpp", p.status == 200
+          and (p.body or {}).get("backend") == "prism_llama_cpp", (p.status, p.body))
+    check("and llama-cpp was unloaded first", loaded_on_8080(stack) == {"m-prism": "prism"},
+          loaded_on_8080(stack))
+    av = stack.get(8080, "/availability")
+    check("availability names the prism backend", av.get("backend") == "prism_llama_cpp"
+          and "prism_llama_cpp" in av.get("in_flight", {}), av)
+    b = Call(stack, time.time(), 8080, "m-a", 0.1, bot=False)
+    b.start(); b.join()
+    check("back to llama-cpp unloads prism-llama-cpp", b.status == 200
+          and loaded_on_8080(stack) == {"m-a": "llama"}, (b.status, loaded_on_8080(stack)))
+    props = stack.get(8080, "/props?model=m-prism")
+    check("a GET naming a prism model reaches prism-llama-cpp",
+          props.get("backend") == "prism_llama_cpp", props)
+    check("a GET naming no model reaches llama-cpp",
+          stack.get(8080, "/props").get("backend") == "llama_cpp", stack.get(8080, "/props"))
+    settle(stack)
+
+
+def scenario_mixed_routers_concurrently(stack):
+    print("concurrent requests across both :8080 routers all complete, nothing left counted")
+    t0 = time.time()
+    calls = [Call(stack, t0, 8080, m, 0.3, bot=False, timeout=15)
+             for m in ("m-a", "m-prism", "m-b", "m-prism2", "m-prism")]
+    for c in calls:
+        c.start()
+    for c in calls:
+        c.join()
+    check("every request served", all(c.status == 200 for c in calls),
+          [(c.status, c.end) for c in calls])
+    check("each by its own router", all((c.body or {}).get("backend") ==
+          ("prism_llama_cpp" if c.args[3] in PRISM_MODELS else "llama_cpp") for c in calls),
+          [(c.args[3], (c.body or {}).get("backend")) for c in calls])
+    check("one model resident at the end", len(loaded_on_8080(stack)) == 1, loaded_on_8080(stack))
+    settle(stack)
+
+
+def scenario_fresh_state_unloads_what_is_resident(stack):
+    """After an openresty restart the shared dicts are empty while a router
+    still holds a model; the first switch must clear it, not load beside it."""
+    print("after an openresty restart the first request clears what a backend still holds")
+    a = Call(stack, time.time(), 8080, "m-a", 0.1, bot=False)
+    a.start(); a.join()
+    stack.restart_openresty()
+    check("state is empty after the restart", stack.get(8080, "/availability").get("backend") is None,
+          stack.get(8080, "/availability"))
+    p = Call(stack, time.time(), 8080, "m-prism", 0.1, bot=False)
+    p.start(); p.join()
+    check("llama-cpp's leftover model was unloaded", p.status == 200
+          and loaded_on_8080(stack) == {"m-prism": "prism"}, (p.status, loaded_on_8080(stack)))
+    settle(stack)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ref", help="test openresty/ as of this commit instead of the working tree")
@@ -291,7 +385,10 @@ def main():
                    scenario_hold_cap_answers_503,
                    scenario_availability_reports_the_human,
                    scenario_aborts_release_everything,
-                   scenario_concurrent_switches_do_not_deadlock):
+                   scenario_concurrent_switches_do_not_deadlock,
+                   scenario_prism_routes_by_model_and_switches,
+                   scenario_mixed_routers_concurrently,
+                   scenario_fresh_state_unloads_what_is_resident):
             try:
                 fn(stack)
             except Exception as e:

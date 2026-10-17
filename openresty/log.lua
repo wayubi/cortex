@@ -23,7 +23,9 @@ if ctx.inference then
 end
 if ctx.counted then
     ctx.counted = false
-    release(cortex.target_for_port(ngx.var.server_port))
+    -- coordinator.lua records the backend it chose: on :8080 that is llama_cpp
+    -- or prism_llama_cpp depending on the model, so the port alone is not enough.
+    release(ctx.target or cortex.target_for_port(ngx.var.server_port))
 end
 if ctx.human_waiting then
     ctx.human_waiting = false

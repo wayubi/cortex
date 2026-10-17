@@ -2,12 +2,19 @@ services:
 
   llama-build:
     # docker compose --profile build build llama-build
+    # Upstream ggml-org/llama.cpp at a pinned release tag (b10622 = commit
+    # 3737e41, 2026-08-25: the build serving cortex when pinning began). Bump
+    # LLAMA_REF + the tag below deliberately and re-bench after.
     profiles: ["build"]
     build:
       context: ./llama-cpp
       dockerfile: Dockerfile
       args:
         BUILD_JOBS: "20"
+        LLAMA_REPO: "https://github.com/ggml-org/llama.cpp.git"
+        LLAMA_REF: "b10622"
+      tags:
+        - "llama-cpp:b10622"
     image: llama-cpp:latest
 
   llama-cpp:
@@ -20,6 +27,52 @@ services:
     volumes:
       - llama-cpp_data:/root/.cache/huggingface
       - ./llama-cpp/models.ini:/models.ini
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      core:
+        soft: 0
+        hard: 0
+    command:
+      - "--models-preset"
+      - "/models.ini"
+      - "--port"
+      - "8080"
+      - "--host"
+      - "0.0.0.0"
+
+  prism-llama-build:
+    # docker compose --profile build build prism-llama-build
+    # PrismML's llama.cpp fork (ternary Bonsai kernels), same Dockerfile as
+    # llama-build. Bump PRISM_REF to a newer prism-b* release tag deliberately.
+    profiles: ["build"]
+    build:
+      context: ./llama-cpp
+      dockerfile: Dockerfile
+      args:
+        BUILD_JOBS: "20"
+        LLAMA_REPO: "https://github.com/PrismML-Eng/llama.cpp.git"
+        LLAMA_REF: "prism-b10777-e3de715"
+      tags:
+        - "prism-llama-cpp:prism-b10777-e3de715"
+    image: prism-llama-cpp:latest
+
+  prism-llama-cpp:
+    # Served on openresty :8080 alongside llama-cpp; coordinator.lua routes a
+    # request here when its model is a section of prism-llama-cpp/models.ini.
+    runtime: nvidia
+    restart: unless-stopped
+    image: prism-llama-cpp:latest
+    pull_policy: never
+    networks:
+      - cortex_network
+    volumes:
+      # the same HF cache as llama-cpp: one download serves both backends
+      - llama-cpp_data:/root/.cache/huggingface
+      - ./prism-llama-cpp/models.ini:/models.ini
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
     ulimits:
@@ -84,6 +137,10 @@ services:
       # human/bot policy (required by the other three) and the log phase
       - ./openresty/cortex.lua:/etc/nginx/lua/cortex.lua
       - ./openresty/log.lua:/etc/nginx/lua/log.lua
+      # GET /v1/models on :8080 — llama-cpp's and prism-llama-cpp's lists merged
+      - ./openresty/models_list.lua:/etc/nginx/lua/models_list.lua
+      # which :8080 models go to prism-llama-cpp (its section names)
+      - ./prism-llama-cpp/models.ini:/etc/nginx/prism-models.ini:ro
     networks:
       - cortex_network
       - enhasa_network

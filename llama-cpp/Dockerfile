@@ -1,6 +1,15 @@
+# Shared by both llama.cpp backends (compose.yml):
+#   llama-build        upstream ggml-org/llama.cpp @ master   → llama-cpp:latest
+#   prism-llama-build  PrismML-Eng/llama.cpp @ a prism-b* tag → prism-llama-cpp:latest
+# The fork (ternary PQ2_0 / PTQ1_0 types, Hadamard runtime) is built from its
+# `prism` branch at a pinned release tag; its `master` is a stale upstream mirror.
 FROM nvidia/cuda:12.4.0-devel-ubuntu22.04 AS builder
 
 ARG BUILD_JOBS=6
+ARG LLAMA_REPO=https://github.com/ggml-org/llama.cpp.git
+ARG LLAMA_REF=master
+# 86 = RTX 3060. Empty builds llama.cpp's default architecture list (slower).
+ARG CUDA_ARCH=86
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,8 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ldconfig && \
     rm -rf /var/lib/apt/lists/*
 
-# Clone latest master — MTP is merged, no PR checkout needed
-RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama-cpp-build
+RUN git clone --depth 1 --branch ${LLAMA_REF} ${LLAMA_REPO} /tmp/llama-cpp-build \
+    && git -C /tmp/llama-cpp-build log -1 --format='built from %H (%cd)'
 
 WORKDIR /tmp/llama-cpp-build
 
@@ -33,6 +42,7 @@ RUN rm -rf build
 # Note: LLAMA_CUDA → GGML_CUDA in recent llama.cpp
 RUN rm -rf build && cmake -B build \
         -DGGML_CUDA=ON \
+        ${CUDA_ARCH:+-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH}} \
         -DGGML_CUDA_FA=ON \
         -DGGML_CUDA_FA_ALL_QUANTS=ON \
         -DGGML_NCCL=OFF \

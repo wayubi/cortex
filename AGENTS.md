@@ -2,33 +2,40 @@
 
 ## Architecture
 
-- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp, `:5002` → nllb (HF translation). All three backends run alongside openresty (no profiles).
+- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp **or prism-llama-cpp**, `:5002` → nllb (HF translation). All four backends run alongside openresty (no profiles).
+- **`:8080` fronts two llama.cpp routers, chosen by model name.** `prism-llama-cpp` is PrismML's llama.cpp fork (ternary `PQ2_0`/`PTQ1_0` types and the Hadamard runtime Bonsai needs; upstream cannot load those files). A request whose `model` is a section of `prism-llama-cpp/models.ini` goes to the fork, every other model to llama-cpp (`cortex.target_for`, re-reading that ini — bind-mounted into openresty at `/etc/nginx/prism-models.ini` — at most every 5 s, so new prism entries route without a reload). Model names must therefore be **unique across both models.ini files**. To the coordinator the two are separate backends (`llama_cpp`, `prism_llama_cpp`): moving between them drains, unloads and switches like any other backend change. GETs are not coordinated but follow `?model=` (`/props?model=…`); a GET naming no model reaches llama-cpp. `GET /v1/models` (and `/models`) on :8080 is answered by `openresty/models_list.lua`: both routers' lists merged, each id once from the router that serves it (both also list the GGUFs they find in the shared HF cache, so the raw lists overlap); one router down only drops its models.
 - `coordinator.lua` runs in the access phase. It tracks both the active backend AND the last requested model name. On every POST request (inference), it extracts the `model` field from the request body. If either the backend OR the model differs from the current state, the coordinator unloads all models from the current backend via its API, then updates state. This prevents llama.cpp's leaky self-unload (which leaves residual VRAM) because all unloads are triggered externally by the coordinator.
 - **Only POST requests (inference) can trigger unload or state changes.** GET/HEAD/OPTIONS probes pass through without any action — this prevents Open WebUI polling from bouncing the state or reading bodies unnecessarily. ollama's management POSTs — `/api/show`, `/api/pull`, `/api/push`, `/api/create`, `/api/copy`, `/api/blobs/*` (`NON_INFERENCE` in `coordinator.lua`) — also pass through uncounted and switch nothing: they run no inference, and counting them made a model-info lookup unload whatever was resident and kept `busy` set through a whole model download. Inference-shaped calls stay coordinated, including an empty ollama `/api/generate` (how ollama loads a model) and llama.cpp's `/models/load`, `/tokenize`, `/detokenize` (router mode loads the model they name).
-- Unload flow: `POST /api/generate` with `keep_alive: 0` (ollama), `POST /models/unload` (llama-cpp), or `GET /v1/models` + `POST /v1/models/unload` (nllb). All three backends are queried first to find exactly which model(s) are loaded. When switching away from nllb, a `/shutdown` is also sent.
+- Unload flow: `POST /api/generate` with `keep_alive: 0` (ollama), `POST /models/unload` (llama-cpp and prism-llama-cpp — same router API, `unload_llamacpp(key)`), or `GET /v1/models` + `POST /v1/models/unload` (nllb). The backend is queried first to find exactly which model(s) are loaded. When switching away from nllb, a `/shutdown` is also sent. **When no backend is recorded** (openresty just restarted: the shared dicts start empty while a backend may still hold a model), the first switch unloads whatever every backend reports loaded instead of loading beside it.
 - The shared `backend_state` dict stores two keys: `"backend"` (which backend last handled inference) and `"model"` (which model name was last requested). Both are used to decide whether an unload is needed.
 - **One switch at a time; only proxied requests are counted.** A request is counted in flight (`request_counts`) only once it is admitted, i.e. about to be proxied to a resident model. A request that needs a different model takes the switch key (`backend_state` `switching`, holding its request id, TTL ≈ 710s, released by `log.lua` on every exit including aborts), drains the requests actually running on the current backend to **0** (up to `DRAIN_TIMEOUT` = **600s**, then 503), unloads, and sets state. Others wait while a switch is in progress; afterwards a waiter for the new model goes straight through and one for another model becomes the next switcher. This replaced counting a request before its drain and waiting for the count to fall to itself, which deadlocked concurrent switches: opencode sends requests for two or three models at once, and each waited on the others until the client gave up (2026-10-01, `drain llama_cpp (3 active, target 1)`).
 - Active requests are counted at access phase and released in the log phase (`openresty/log.lua`, `log_by_lua_file` in every server block) — the only place counts are released. A client that hangs up while held or draining is finalised via `ngx.on_abort` → `ngx.exit(499)`, which runs the log phase at once.
 - **Humans first, bots never interrupted** (`openresty/cortex.lua` holds the policy and constants). A request carrying `X-Cortex-Client: bot` (afghanica, the mastodon x_bridge) is a bot; anything else is a human (Open WebUI, opencode), so an unmodified client gets priority. A human waits only for the bot calls already in flight: while one is waiting (`human_waiting`), every new bot request is held, including one for the resident model, which would otherwise skip the drain and keep the human out. Once a human request has run (`human_running`, then `human_last`), a bot request that would **evict** the resident model is held until no human request has finished for `HUMAN_HOLD` (**120s**); a bot sharing the resident model goes straight through. A held bot is not counted in flight (so the human's drain never waits for it) and does not stamp `idle_for`; after `BOT_HOLD_CAP` (**600s**) it gets `503` with `X-Cortex-Held: human` and `Retry-After`, which bots treat as "stand aside", not an error. A bot that finishes draining after a human arrived goes back to the hold before unloading anything. Offline test: `python3 tools/test_coordinator.py` (throwaway openresty + `tools/coord_mock.py` on a private docker network; `--ref HEAD` runs it against a commit).
-- **`GET /availability`**, on **every** openresty port (`:11434`, `:5002`, `:8080`) so a client asks the port it already uses, reports `{busy, idle_for, human_pending, human_idle_for, in_flight, slots, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. The logic is one file, `openresty/availability.lua` (`content_by_lua_file`); each server block has an exact-match `location = /availability`, so it never reaches `coordinator.lua` or a backend, plus its own internal `/__slots` (a subrequest stays within its server). `busy` is in-flight POSTs on any backend OR any llama.cpp slot reporting `processing` (via `/__slots`, handling both the bare-array and `{"slots":[...]}` shapes; `slots: null` when the endpoint is absent, disabled (`--no-slots`) or slow). `idle_for` is seconds since the last inference POST finished on any backend (`log.lua` stamps `backend_state` key `last_done`), `0` while one is in flight, `null` when none has finished since openresty started — so a scheduler can tell a client merely between requests of a longer run from a GPU that is really free, and wait out the gap if it chooses. `human_pending` is a human request waiting or running; `human_idle_for` is seconds since the last human request finished (`0` while pending, `null` before the first) — bots stand aside at their own boundaries while it is recent. Bind-mounted config; adding `availability.lua` added a volume, so the first deploy needs `docker compose up -d openresty` (recreate), later edits only `docker compose restart openresty`.
+- **`GET /availability`**, on **every** openresty port (`:11434`, `:5002`, `:8080`) so a client asks the port it already uses, reports `{busy, idle_for, human_pending, human_idle_for, in_flight, slots, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. The logic is one file, `openresty/availability.lua` (`content_by_lua_file`); each server block has an exact-match `location = /availability`, so it never reaches `coordinator.lua` or a backend, plus its own internal `/__slots` (a subrequest stays within its server). `busy` is in-flight POSTs on any backend OR any llama.cpp slot reporting `processing` (via `/__slots` and `/__slots_prism`, summed across both routers, handling both the bare-array and `{"slots":[...]}` shapes; `slots: null` when neither endpoint answers — absent, disabled (`--no-slots`) or slow). `idle_for` is seconds since the last inference POST finished on any backend (`log.lua` stamps `backend_state` key `last_done`), `0` while one is in flight, `null` when none has finished since openresty started — so a scheduler can tell a client merely between requests of a longer run from a GPU that is really free, and wait out the gap if it chooses. `human_pending` is a human request waiting or running; `human_idle_for` is seconds since the last human request finished (`0` while pending, `null` before the first) — bots stand aside at their own boundaries while it is recent. Bind-mounted config; adding `availability.lua` added a volume, so the first deploy needs `docker compose up -d openresty` (recreate), later edits only `docker compose restart openresty`.
 
 ## Critical naming
 
-The compose service is `llama-cpp` (hyphen), but the Lua internal key is `llama_cpp` (underscore). Use the `HOST` lookup table in `coordinator.lua` to map:
+The compose services are `llama-cpp` / `prism-llama-cpp` (hyphens), but the Lua internal keys are `llama_cpp` / `prism_llama_cpp` (underscores). Use the `HOST` lookup table in `coordinator.lua` to map:
 - `HOST["llama_cpp"]` → `"llama-cpp"` (DNS hostname)
+- `HOST["prism_llama_cpp"]` → `"prism-llama-cpp"` (DNS hostname)
 - `HOST["nllb"]` → `"nllb"` (DNS hostname)
 
 If adding a new backend, update:
 - `HOST` table (DNS hostname for TCP calls)
-- `TARGET` in `cortex.lua` (port → key mapping, used by `coordinator.lua` and `log.lua`)
-- Unload function (API call to free VRAM on that backend)
+- `TARGET` in `cortex.lua` (port → key mapping) — or, for a second router on an existing port, `target_for` (model → key) as prism does; `coordinator.lua` records the chosen key in `ngx.ctx.target` and `log.lua` releases that key
+- `BACKENDS` in `cortex.lua` (the in-flight counts `/availability` reports)
+- Unload function (API call to free VRAM on that backend), plus the no-state sweep in `switch_to`
+- `tools/coord_mock.py` / `tools/test_coordinator.py` (a mock for it, and a scenario)
 
 ## Docker compose commands
 
 - `docker compose up -d` — start the entire stack
 - `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
 - `docker compose build nllb` — rebuild nllb translation service after changes
-- `docker compose --profile build build llama-build` — rebuild llama.cpp image from source
+- `docker compose --profile build build llama-build` — rebuild the upstream llama.cpp image (`llama-cpp:latest` + `llama-cpp:<tag>`)
+- `docker compose --profile build build prism-llama-build` — rebuild the PrismML fork image (`prism-llama-cpp:latest` + `prism-llama-cpp:<tag>`)
+- Both builders share `llama-cpp/Dockerfile` (args `LLAMA_REPO`, `LLAMA_REF`, `CUDA_ARCH`, default 86 = RTX 3060) and are **pinned to release tags** in compose.yml: upstream `b10622` (the build serving cortex when pinning began, 2026-08-25), the fork `prism-b10777-e3de715`. Build the fork from its `prism` branch's release tags — the fork's `master` is a stale upstream mirror. Bump a tag deliberately, then `docker compose up -d <service>` and re-bench; the previous image stays tagged for rollback.
+- `docker compose up -d prism-llama-cpp` — (re)create only that backend; the router reads its models.ini at start, so a models.ini edit needs `docker compose restart <service>`
 - The internal network is `cortex_network` (compose-managed bridge). External `enhasa_network` must exist before `up`.
 
 ## File layout
@@ -48,7 +55,10 @@ If adding a new backend, update:
 ├── llama-cpp/
 │   ├── models.ini          # llama.cpp models preset file
 │   ├── models/             # per-model benchmark JSONs (written by bench.sh)
-│   └── Dockerfile          # CUDA build from source
+│   └── Dockerfile          # CUDA build from source (shared by both llama.cpp backends)
+├── prism-llama-cpp/
+│   ├── models.ini          # presets for the PrismML fork (Bonsai); names unique vs llama-cpp's
+│   └── models/             # its bench JSONs
 ├── nllb/
 │   ├── Dockerfile
 │   ├── entrypoint.sh
@@ -60,11 +70,16 @@ If adding a new backend, update:
     ├── nginx.conf           # lua_shared_dict directives, 3 server blocks (11434/5002/8080)
     ├── coordinator.lua      # VRAM coordinator — API-based model unload
     ├── availability.lua     # GET /availability on every port (busy, idle_for, human_*, ...)
+    ├── models_list.lua      # GET /v1/models on :8080 — llama-cpp + prism-llama-cpp merged
     ├── cortex.lua           # human/bot policy and constants (HUMAN_HOLD, BOT_HOLD_CAP)
     └── log.lua              # log phase: releases counts, stamps last_done / human_last
 ```
 
 **Rule: All scripts, tools, and utility files go in the `tools/` folder.**
+
+## Benchmark backends
+
+`bench.sh` benches a llama.cpp router: `llama-cpp` or `prism-llama-cpp` (`BENCH_BACKENDS`). Selecting one sets `INI` (`<backend>/models.ini`), `MODELS_DIR` (`<backend>/models/`), `SERVICE` (the compose service `restart()` restarts) and `DOCKER_LOG` (the container whose log the OOM/served greps read). A subcommand picks the backend from the model names it is given (one backend per run); the interactive menu asks first; `--backend=<name>` / `BENCH_BACKEND` forces it. `ollama` and `nllb` are listed as stubs and exit with "no benchmark support yet". Requests still go to openresty `:8080`, which routes the model to its router and unloads the other, so a bench never shares the GPU with the other backend. Bench JSONs record `backend` and the backend binary's `llama-server --version` as `build_info`. `gen_metrics.sh` covers both backends (a `backend` column).
 
 ## Pre-flight checklist (BEFORE benchmarking ANY model)
 

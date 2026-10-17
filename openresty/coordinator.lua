@@ -4,7 +4,8 @@ local cortex = require "cortex"
 local state_dict   = ngx.shared.backend_state
 local counts_dict  = ngx.shared.request_counts
 
-local HOST = { ollama = "ollama", llama_cpp = "llama-cpp", nllb = "nllb" }
+local HOST = { ollama = "ollama", llama_cpp = "llama-cpp",
+               prism_llama_cpp = "prism-llama-cpp", nllb = "nllb" }
 
 local DRAIN_TIMEOUT = 600
 
@@ -123,17 +124,19 @@ local function http_request(method, host, port, path, body)
 end
 
 
+-- Each unload_* returns how many models it found loaded (0 when the backend
+-- held nothing or could not be reached), so a caller can skip the confirm wait.
 local function unload_ollama()
     local res, err = http_request("GET", HOST.ollama, 11434, "/api/ps")
     if not res then
         ngx.log(ngx.WARN, "ollama ps failed: ", err)
-        return
+        return 0
     end
 
     local ok, data = pcall(cjson.decode, res.body)
     if not ok or type(data) ~= "table" or not data.models or #data.models == 0 then
         ngx.log(ngx.INFO, "ollama: no loaded model to unload")
-        return
+        return 0
     end
 
     for _, m in ipairs(data.models) do
@@ -149,38 +152,43 @@ local function unload_ollama()
             end
         end
     end
+    return #data.models
 end
 
 
-local function unload_llamacpp()
-    local res, err = http_request("GET", HOST.llama_cpp, 8080, "/v1/models")
+-- llama-cpp and prism-llama-cpp are both llama.cpp routers with the same API;
+-- `key` is the backend key (llama_cpp / prism_llama_cpp), HOST[key] its host.
+local function unload_llamacpp(key)
+    local host = HOST[key]
+    local res, err = http_request("GET", host, 8080, "/v1/models")
     if not res then
-        ngx.log(ngx.WARN, "llama-cpp models failed: ", err)
-        return
+        ngx.log(ngx.WARN, host, " models failed: ", err)
+        return 0
     end
 
     local ok, data = pcall(cjson.decode, res.body)
     if not ok or type(data) ~= "table" or not data.data then
-        return
+        return 0
     end
 
     local count = 0
     for _, m in ipairs(data.data) do
         if m.status and m.status.value == "loaded" and m.id then
-            ngx.log(ngx.INFO, "llama-cpp: unloading ", m.id)
+            ngx.log(ngx.INFO, host, ": unloading ", m.id)
             local body = cjson.encode({ model = m.id })
-            local r, e = http_request("POST", HOST.llama_cpp, 8080, "/models/unload", body)
+            local r, e = http_request("POST", host, 8080, "/models/unload", body)
             if r then
-                ngx.log(ngx.INFO, "llama-cpp: unloaded ", m.id)
-                count = count + 1
+                ngx.log(ngx.INFO, host, ": unloaded ", m.id)
             else
-                ngx.log(ngx.WARN, "llama-cpp: unload failed for ", m.id, ": ", e)
+                ngx.log(ngx.WARN, host, ": unload failed for ", m.id, ": ", e)
             end
+            count = count + 1
         end
     end
     if count == 0 then
-        ngx.log(ngx.INFO, "llama-cpp: no loaded model to unload")
+        ngx.log(ngx.INFO, host, ": no loaded model to unload")
     end
+    return count
 end
 
 
@@ -188,12 +196,12 @@ local function unload_nllb()
     local res, err = http_request("GET", HOST.nllb, 5002, "/v1/models")
     if not res then
         ngx.log(ngx.WARN, "nllb models failed: ", err)
-        return
+        return 0
     end
 
     local ok, data = pcall(cjson.decode, res.body)
     if not ok or type(data) ~= "table" or not data.data then
-        return
+        return 0
     end
 
     local count = 0
@@ -204,15 +212,16 @@ local function unload_nllb()
             local r, e = http_request("POST", HOST.nllb, 5002, "/v1/models/unload", body)
             if r then
                 ngx.log(ngx.INFO, "nllb: unloaded ", m.id)
-                count = count + 1
             else
                 ngx.log(ngx.WARN, "nllb: unload failed for ", m.id, ": ", e)
             end
+            count = count + 1
         end
     end
     if count == 0 then
         ngx.log(ngx.INFO, "nllb: no loaded model to unload")
     end
+    return count
 end
 
 
@@ -230,8 +239,8 @@ local function is_ollama_clear()
     return false
 end
 
-local function is_llamacpp_clear()
-    local res, err = http_request("GET", HOST.llama_cpp, 8080, "/v1/models")
+local function is_llamacpp_clear(key)
+    local res, err = http_request("GET", HOST[key], 8080, "/v1/models")
     if not res then return nil, err end
     local ok, data = pcall(cjson.decode, res.body)
     if not ok or type(data) ~= "table" or not data.data then return nil, "bad response" end
@@ -474,18 +483,34 @@ local function switch_to(target, target_model, bot)
     ngx.log(ngx.INFO, "switch: ", (current_backend or "none"), " -> ", target,
             " (", (current_model or "none"), " -> ", (target_model or "none"), ")")
 
+    local function clear_llamacpp(key)
+        if unload_llamacpp(key) > 0 then
+            wait_until_clear(function() return is_llamacpp_clear(key) end, key)
+        end
+    end
+
     if current_backend == "ollama" then
         unload_ollama()
         wait_until_clear(is_ollama_clear, "ollama")
-    elseif current_backend == "llama_cpp" then
-        unload_llamacpp()
-        wait_until_clear(is_llamacpp_clear, "llama_cpp")
+    elseif current_backend == "llama_cpp" or current_backend == "prism_llama_cpp" then
+        unload_llamacpp(current_backend)
+        wait_until_clear(function() return is_llamacpp_clear(current_backend) end,
+                         current_backend)
     elseif current_backend == "nllb" then
         unload_nllb()
         wait_until_clear(is_nllb_clear, "nllb")
         if not same_backend then
             http_request("POST", HOST.nllb, 5002, "/shutdown")
         end
+    elseif current_backend == nil then
+        -- Nothing recorded: openresty has just (re)started, and the shared dicts
+        -- started empty while a backend may still hold a model. Loading beside
+        -- it would leave two models on the GPU, so unload whatever each backend
+        -- reports. A backend that holds nothing (or is down) costs one GET.
+        if unload_ollama() > 0 then wait_until_clear(is_ollama_clear, "ollama") end
+        clear_llamacpp("llama_cpp")
+        clear_llamacpp("prism_llama_cpp")
+        if unload_nllb() > 0 then wait_until_clear(is_nllb_clear, "nllb") end
     end
 
     -- We may have killed nllb ourselves on an earlier switch away from it, so a
@@ -578,14 +603,29 @@ local function admit(target, target_model, bot)
 end
 
 
+-- :8080 fronts two llama.cpp routers; a model in prism-llama-cpp/models.ini is
+-- proxied to the fork instead of llama-cpp (cortex.lua). The location's
+-- upstream variable is overridden here, in the access phase, before proxy_pass.
+local function route(target)
+    ngx.ctx.target = target
+    if target == "prism_llama_cpp" then
+        ngx.var.llamacpp_upstream = cortex.PRISM_UPSTREAM
+    end
+end
+
+
 local function coordinate()
-    local target = cortex.target_for_port(ngx.var.server_port)
+    local port = ngx.var.server_port
+    local target = cortex.target_for_port(port)
     if not target then
         ngx.exit(503)
         return
     end
 
     if ngx.var.request_method ~= "POST" then
+        -- GETs pass through uncoordinated; one that names a model in its query
+        -- (/props?model=, /slots?model=) goes to the router that serves it.
+        route(cortex.target_for(port, ngx.var.arg_model))
         return
     end
     if is_non_inference(target, ngx.var.uri) then
@@ -602,6 +642,8 @@ local function coordinate()
     end)
 
     local target_model = get_model()
+    target = cortex.target_for(port, target_model)
+    route(target)
 
     ngx.log(ngx.INFO, "POST ", target, (bot and " (bot)" or " (human)"),
             " backend=", (state_dict:get("backend") or "none"),

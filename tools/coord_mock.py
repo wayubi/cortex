@@ -4,17 +4,21 @@
 One process listens on 8080, 11434 and 5002; the test gives its container
 the network aliases llama-cpp, ollama and nllb, so coordinator.lua's own
 unload and status calls reach it exactly as they reach the real backends.
+A second container (MOCK_8080=prism_llama_cpp, alias prism-llama-cpp) stands
+in for the PrismML router; replies name the backend that answered.
 An inference sleeps for the `delay` its body names, so a test controls how
 long a request stays in flight. No GPU, no model.
 """
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOCK = threading.Lock()
-LOADED = {"llama_cpp": None, "ollama": None, "nllb": None}
-PORT_BACKEND = {8080: "llama_cpp", 11434: "ollama", 5002: "nllb"}
+NAME_8080 = os.environ.get("MOCK_8080", "llama_cpp")
+LOADED = {NAME_8080: None, "ollama": None, "nllb": None}
+PORT_BACKEND = {8080: NAME_8080, 11434: "ollama", 5002: "nllb"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -45,7 +49,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"data": data})
         if self.path == "/slots":
             return self._send([])
-        return self._send({"ok": True})
+        return self._send({"ok": True, "backend": b})
 
     def do_POST(self):
         b = self._backend()
