@@ -2,3 +2,4 @@ compose.override.yml
 .local/
 *.log
 tools/magnitude/
+tools/bonsai/
