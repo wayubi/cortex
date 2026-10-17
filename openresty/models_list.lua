@@ -8,8 +8,14 @@
 -- everything else. If one router is down its models are simply missing; the
 -- reply fails only when neither answers.
 
-local cjson = require "cjson"
 local cortex = require "cortex"
+
+-- A private cjson instance that marks decoded arrays, so an empty array a
+-- router returns (`"tags": []`, `"aliases": []`) is re-encoded as [] — the
+-- default round-trip turns it into {}, which strict clients reject. Private so
+-- the shared module's behaviour in the other Lua files is untouched.
+local cjson = require("cjson").new()
+cjson.decode_array_with_array_mt(true)
 
 if ngx.req.get_method() ~= "GET" and ngx.req.get_method() ~= "HEAD" then
     ngx.exit(ngx.HTTP_NOT_ALLOWED)
