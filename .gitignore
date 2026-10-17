@@ -1,5 +1,19 @@
+# Machine-local config and data: compose.override.yml holds host volume paths
+# and an HF token; .local/ holds the model caches (hundreds of GB)
 compose.override.yml
 .local/
+
+# Run output (bench.sh logs, one per invocation)
+logs/
 *.log
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Throwaway A/B harnesses, not part of the stack
 tools/magnitude/
 tools/bonsai/
+
+# Per-user Claude Code settings
+.claude/settings.local.json
