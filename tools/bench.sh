@@ -4425,6 +4425,34 @@ print(' '.join(out))
   while :; do
     log "  Confirm restart @ pick=$PICK..."
     set_batch "$PICK"; restart
+
+    # Residency at the pick (simple non-MTP, GPU mode). Change A probes these only
+    # at rung 256, but -fit budgets the compute buffer too, which grows with batch:
+    # past fit's 1 GiB free-memory target it moves a whole layer to CPU, with no
+    # OOM. dirk-qwen3.8-27b @ 90112 was GPU at 256 and 65/66 layers at the pick
+    # 512 (~600% CPU, decode -18%), found only by the bench. MTP models get the
+    # same check from the pick decode sample below.
+    if [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 1 ]; then
+      local PICK_RES
+      PICK_RES=$(residency_probe)
+      if [ "$PICK_RES" = "STALL" ]; then log "  STALL during pick residency — aborting"; exit 1; fi
+      if [ "$PICK_RES" != "GPU" ]; then
+        log "  pick=$PICK is $PICK_RES-resident (-fit moved layers off the GPU) — stepping down"
+        local NEWPICK0
+        NEWPICK0=$(discover_stepdown_candidate "$PICK")
+        if [ -z "$NEWPICK0" ] || [ "$NEWPICK0" -eq 0 ] || [ "$STEPS_DN" -ge 2 ]; then
+          log "  No lower measured PASS point below $PICK (or step-down limit reached) — failing model"
+          log "  Inspect logs; re-run to retry."
+          exit 1
+        fi
+        STEPS_DN=$((STEPS_DN + 1))
+        log "  Stepping down: pick $PICK → $NEWPICK0"
+        PICK=$NEWPICK0; PICK_PF=0
+        continue
+      fi
+      log "  residency GPU at pick=$PICK"
+    fi
+
     log ""; log "  === SATURATION at $PICK ==="
     local SC_RC=0
     saturation_test "$CTX" || SC_RC=$?
@@ -4943,6 +4971,19 @@ print(f'{statistics.stdev(vals):.1f}')
   local PLACEMENT
   PLACEMENT=$(classify_placement "$AVG_CPU" "$AVG_GPU")
 
+  # A GPU-mode bisect whose bench decodes CPU-resident: the pick did not hold at
+  # the bench's long context. Flag it for the verdict (cmd_bench runs in a
+  # subshell, hence the marker file) instead of only recording placement.
+  rm -f "/tmp/bench_placement_warn_${MODEL}"
+  if [ "$PLACEMENT" = "CPU" ] && [ -f "/tmp/discover_${MODEL}.json" ]; then
+    local DISC_MODE
+    DISC_MODE=$(python3 -c "import json;print(json.load(open('/tmp/discover_${MODEL}.json')).get('mode',''))" 2>/dev/null || echo "")
+    if [ "$DISC_MODE" = "GPU" ]; then
+      log "  WARN: bisect mode was GPU but the bench decoded CPU-resident (cpu ${AVG_CPU}%, gpu ${AVG_GPU}%)"
+      touch "/tmp/bench_placement_warn_${MODEL}"
+    fi
+  fi
+
   # Extract speed + request signals (prefill from phase A, decode from phase B)
   local SPEED
   SPEED=$(python3 -c "
@@ -5391,6 +5432,10 @@ run_full_suite() {
       lshow "  $(date +%H:%M:%S) starting bench for $NAME"
       if ( cmd_bench ); then
         VERDICTS["$NAME|bench"]="OK"
+        if [ -f "/tmp/bench_placement_warn_${NAME}" ]; then
+          VERDICTS["$NAME|bench"]="WARN (placement CPU at bench)"
+          rm -f "/tmp/bench_placement_warn_${NAME}"
+        fi
         # §51.2: a head re-run here after a failed pre-pass is a valid fresh source
         # for its siblings, which are processed later in this same loop. Mark it
         # done so Change L's sibling guard (which requires RESET_DONE[$parent]) does
