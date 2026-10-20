@@ -69,7 +69,25 @@ use_backend() {
   SERVICE=$B
   DOCKER_LOG="cortex-$B-1"
   mkdir -p "$MODELS_DIR"
+  # Assume the router loaded the ini as it is now; restart() updates the mark.
+  ini_hash > "$INI_LOADED_MARK"
 }
+# The router reads models.ini only at start, so an ini edit after the last
+# restart (inherit_json removing a sibling's spec-* keys, a failure restore)
+# leaves it serving the old preset. The mark holds the hash of the ini the
+# router last loaded; $$ is shared with the tuners' subshells.
+INI_LOADED_MARK="/tmp/bench_ini_loaded_$$"
+ini_hash() { sha256sum "$INI" | cut -d' ' -f1; }
+sync_router_ini() {
+  [ "$BASH_SUBSHELL" -eq 0 ] || return 0
+  [ -n "$INI" ] && [ -f "$INI_LOADED_MARK" ] || return 0
+  if [ "$(ini_hash)" != "$(cat "$INI_LOADED_MARK")" ]; then
+    log "  models.ini changed since $SERVICE last loaded it — restarting so it serves the current presets"
+    ( restart ) || log "  WARN: $SERVICE restart failed — run 'docker compose restart $SERVICE'"
+  fi
+  rm -f "$INI_LOADED_MARK"
+}
+trap 'RC=$?; sync_router_ini; exit $RC' EXIT
 # The benchable backend whose models.ini has a [<name>] section (empty if none).
 backend_of() {
   local B
@@ -687,6 +705,7 @@ maybe_inherit() {
 # ── Shared infra: restart + log-marked OOM detection ───────
 restart() {
   log "  Restarting $SERVICE..."
+  ini_hash > "$INI_LOADED_MARK"
   cd "$ROOT" && docker compose restart "$SERVICE" || {
     log "  ERROR: docker compose restart failed"
     exit 1
@@ -6080,13 +6099,14 @@ case "$CMD" in
     MODEL=$1
     shift
     ensure_model_cached "$MODEL" || { echo "  $MODEL: STALL (download failed — skipping)"; exit 2; }
-    cmd_bisect "$MODEL" "$@"
+    # Subshell: its EXIT trap must not replace the main shell's sync_router_ini.
+    ( cmd_bisect "$MODEL" "$@" ) || exit $?
     ;;
   residency)
     MODEL=${1:-}
     [ -z "$MODEL" ] && { echo "Usage: bench.sh residency <model>"; exit 1; }
     ensure_model_cached "$MODEL" || { echo "  $MODEL: STALL (download failed — skipping)"; exit 2; }
-    cmd_residency
+    ( cmd_residency ) || exit $?
     ;;
   ctxmax)
     for m in "$@"; do
