@@ -361,51 +361,48 @@ print('  section restored')
 }
 
 # ── Parent/inheritance helpers ───────────────────────────────
-# Find the parent model name (first models.ini section for given model's hf+ctx).
-family_of() {
-  local MODEL=$1
-  python3 -c "
-import re
-with open('$INI') as f: c = f.read()
-sections = re.split(r'(?m)^\[', c)
+# A family is every section with the same hf, the same effective ctx-size and the
+# same value for every key that can change memory or speed: only the keys in
+# FAMILY_FREE may differ. Those are sampling, reasoning and chat-template keys
+# (no effect on prefill/decode) and the tuning outputs that inheritance copies
+# from the head (batch, spec-*). Anything else — no-mmproj (a -vision sibling
+# loads a 903 MB projector the head never had), override-tensor, cache types,
+# draft KV types, unknown keys — splits the entry into its own family. Values
+# fall back to [*] (a section may omit ctx-size), with ; comments stripped.
+FAMILY_FREE="temp top-p top-k min-p presence-penalty repeat-penalty frequency-penalty seed reasoning reasoning-format reasoning-budget chat-template chat-template-file chat-template-kwargs jinja alias batch-size ubatch-size spec-type spec-draft-n-max spec-draft-p-min"
 
-# Pre-existing bug (found 2026-09-10): a model section may validly omit
-# ctx-size and inherit [*]'s default. The original version only looked at each
-# section's own ctx-size, so my_ctx stayed None for such a model, the second
-# loop's 'ctx.group(1) == my_ctx' (str vs None) never matched, the function
-# printed nothing, and the caller's family_of result was '' — which then blew
-# up any \"\${RESET_DONE[\$PARENT]}\" lookup as a bad (empty) array subscript.
-# effective_ctx() falls back to [*] the same way every other per-model key
-# (temp, top-p, threads, ...) already falls back elsewhere in this file.
-star_ctx = None
-for s in sections[1:]:
-    if s.split(']')[0].strip() == '*':
-        m = re.search(r'ctx-size\s*=\s*(\S+)', s)
-        if m: star_ctx = m.group(1)
-        break
-
-def effective_ctx(s):
-    m = re.search(r'ctx-size\s*=\s*(\S+)', s)
-    return m.group(1) if m else star_ctx
-
-my_hf = my_ctx = None
-for s in sections[1:]:
+# family_scan MODEL head|members — the head (first matching section), or every
+# member one per line in models.ini order (head first). A section without hf
+# is its own family.
+family_scan() {
+  local MODEL=$1 MODE=$2
+  INI="$INI" FAMILY_FREE="$FAMILY_FREE" python3 - "$MODEL" "$MODE" <<'EOF'
+import os, re, sys
+model, mode = sys.argv[1], sys.argv[2]
+free = set(os.environ['FAMILY_FREE'].split())
+secs = {}
+for s in re.split(r'(?m)^\[', open(os.environ['INI']).read())[1:]:
     name = s.split(']')[0].strip()
-    if name == '*' or not name: continue
-    if name == '$MODEL':
-        hf = re.search(r'hf\s*=\s*(\S+)', s)
-        if hf: my_hf = hf.group(1)
-        my_ctx = effective_ctx(s)
-        break
-if my_hf is None: print('$MODEL'); exit()
-for s in sections[1:]:
-    name = s.split(']')[0].strip()
-    if name == '*' or not name: continue
-    hf = re.search(r'hf\s*=\s*(\S+)', s)
-    if hf and hf.group(1) == my_hf and effective_ctx(s) == my_ctx:
-        print(name); break
-"
+    if not name: continue
+    kv = {}
+    for line in s.split('\n')[1:]:
+        m = re.match(r'\s*([A-Za-z0-9_-]+)\s*=\s*(.*)', line)
+        if m: kv[m.group(1)] = re.sub(r'\s*;.*$', '', m.group(2)).strip()
+    secs[name] = kv
+star = secs.pop('*', {})
+def key(kv):
+    eff = {**star, **kv}
+    return tuple(sorted((k, v) for k, v in eff.items() if k not in free))
+if model not in secs or 'hf' not in secs[model]:
+    print(model); sys.exit()
+mine = key(secs[model])
+members = [n for n, kv in secs.items() if 'hf' in kv and key(kv) == mine]
+print(members[0] if mode == 'head' else '\n'.join(members))
+EOF
 }
+
+# Find the parent model name (the family head).
+family_of() { family_scan "$1" head; }
 
 # Check if a model's JSON stats file exists.
 has_json() { [ -f "$MODELS_DIR/$1.json" ]; }
@@ -496,38 +493,9 @@ with open(ini, 'w') as f:
 "
 }
 
-# Every section of the given model's family (same hf + effective ctx-size as
-# family_of), one per line, in models.ini order — the head first.
-family_members() {
-  local MODEL=$1
-  python3 -c "
-import re
-with open('$INI') as f: c = f.read()
-sections = re.split(r'(?m)^\[', c)
-star_ctx = None
-for s in sections[1:]:
-    if s.split(']')[0].strip() == '*':
-        m = re.search(r'ctx-size\s*=\s*(\S+)', s)
-        if m: star_ctx = m.group(1)
-        break
-def effective_ctx(s):
-    m = re.search(r'ctx-size\s*=\s*(\S+)', s)
-    return m.group(1) if m else star_ctx
-def hf_of(s):
-    m = re.search(r'hf\s*=\s*(\S+)', s)
-    return m.group(1) if m else None
-mine = None
-for s in sections[1:]:
-    if s.split(']')[0].strip() == '$MODEL':
-        mine = (hf_of(s), effective_ctx(s)); break
-if mine is None or mine[0] is None:
-    print('$MODEL'); exit()
-for s in sections[1:]:
-    name = s.split(']')[0].strip()
-    if name == '*' or not name: continue
-    if (hf_of(s), effective_ctx(s)) == mine: print(name)
-"
-}
+# Every section of the given model's family, one per line, in models.ini order —
+# the head first.
+family_members() { family_scan "$1" members; }
 
 # Copy parent JSON to child: overwrite model, apply child's sampling config, mark propagated.
 inherit_json() {
