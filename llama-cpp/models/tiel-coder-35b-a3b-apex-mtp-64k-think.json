@@ -1,0 +1,310 @@
+{
+  "model": "tiel-coder-35b-a3b-apex-mtp-64k-think",
+  "ctx": 65536,
+  "batch": 5888,
+  "ubatch": 5888,
+  "placement": "CPU",
+  "bench_date": "2026-10-19T16:14:45.881414",
+  "bench_method": "bench_model.sh v2",
+  "backend": "llama-cpp",
+  "config": {
+    "temp": "1.0",
+    "top_k": "20",
+    "top_p": "0.95",
+    "min_p": null,
+    "repeat_penalty": "1.0",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "IsValorum/Tiel-Coder-35B-A3B-APEX-I-MiniPlus-V2.1-GGUF",
+    "quant": null,
+    "reasoning": "on",
+    "ctx": "65536",
+    "batch": "5888"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 49152,
+    "decode_prompt_tokens": 108,
+    "model_file_size_gb": 14.18,
+    "build_info": "llama-cpp 0.3.0-dev (build 1, commit 3737e41)",
+    "wall_time_s": 148
+  },
+  "speed": {
+    "prefill_t_s": 1296.51,
+    "prefill_ms": 37095.73,
+    "prefill_ms_per_tok": 0.7713,
+    "decode_t_s": 27.47,
+    "decode_ms": 145591.91,
+    "decode_ms_per_tok": 36.4071
+  },
+  "request": {
+    "prefill_prompt_tokens": 48095,
+    "decode_prompt_tokens": 108,
+    "max_tokens": 4000,
+    "completion_tokens": 4000,
+    "total_tokens": 4108,
+    "cached_tokens": 0,
+    "cache_n": 0,
+    "predicted_n": 4000,
+    "finish_reason": "length",
+    "truncated": true,
+    "degeneracy": 0.0
+  },
+  "mtp": {
+    "acceptance": 0.77458,
+    "draft_accepted": 969,
+    "draft_generated": 1251,
+    "draft_mean_len": 1.83,
+    "n_max_loaded": 2,
+    "p_min_loaded": 0.7,
+    "tuning_status": "ok",
+    "tuning_reason": null,
+    "tuned_n_max": 2,
+    "tuned_p_min": 0.7,
+    "placement_baseline": "CPU",
+    "tuning_samples": [
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 28.0,
+        "tokens": 3731,
+        "placement": "CPU",
+        "accept": 0.7547,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 1.81
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 28.8,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.77506,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 1.84
+      },
+      {
+        "n_max": 5,
+        "p_min": 0.7,
+        "tps": 26.9,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.77769,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 1.83
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 29.2,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.78725,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 1.85
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 24.7,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.77266,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 1.83
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 25.5,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.77143,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 1.82
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.5,
+        "tps": 25.6,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.60942,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 1.74
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.9,
+        "tps": 25.7,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.93516,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 1.94
+      }
+    ],
+    "tuning_written_at": "2026-10-19T16:11:12.449132",
+    "configured_n_max": 2,
+    "configured_p_min": 0.7,
+    "drafter": "in-model"
+  },
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 646.92
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 927.49
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 1204.0
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 1392.47
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1481.77
+      },
+      {
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 1464.17
+      },
+      {
+        "batch": 16384,
+        "status": "PASS",
+        "prefill": 1228.51
+      },
+      {
+        "batch": 4352,
+        "status": "REFINE",
+        "prefill": 1460.64
+      },
+      {
+        "batch": 5824,
+        "status": "REFINE",
+        "prefill": 1479.57
+      },
+      {
+        "batch": 5760,
+        "status": "REFINE",
+        "prefill": 1482.71
+      },
+      {
+        "batch": 6720,
+        "status": "REFINE",
+        "prefill": 1449.7
+      },
+      {
+        "batch": 5248,
+        "status": "REFINE",
+        "prefill": 1448.04
+      },
+      {
+        "batch": 6144,
+        "status": "REFINE",
+        "prefill": 1455.37
+      },
+      {
+        "batch": 5568,
+        "status": "REFINE",
+        "prefill": 1468.73
+      },
+      {
+        "batch": 5888,
+        "status": "REFINE",
+        "prefill": 1489.59
+      },
+      {
+        "batch": 5952,
+        "status": "REFINE",
+        "prefill": 1475.05
+      }
+    ],
+    "best_prefill": 1481.77,
+    "pick": 5888,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      4352,
+      5248,
+      5568,
+      5760,
+      5824,
+      5888,
+      5952,
+      6144,
+      6720
+    ],
+    "ceiling_coarse": "16384 PASS (not probed higher)",
+    "ladder_break": "2",
+    "written_at": "2026-10-19T15:47:48.852323"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 1420.4,
+      "avg_gpu_util_pct": 31.8,
+      "avg_gpu_mem_util_pct": 19.3,
+      "cpu_stddev_pct": 121.0,
+      "peak_vram_mib": 10979,
+      "peak_power_w": 93.16,
+      "peak_temp_c": 56,
+      "peak_clocks_sm_mhz": 1972,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 10979,
+      "final_temp_c": 48,
+      "final_power_w": 39.47,
+      "ram_used_mib": 42203,
+      "rss_mib": 11113,
+      "sample_count": 41
+    }
+  },
+  "propagated": true,
+  "propagated_from": "tiel-coder-35b-a3b-apex-mtp-64k",
+  "propagated_date": "2026-10-19T16:14:46.003641"
+}
