@@ -156,9 +156,10 @@ Params:
      - **Adaptive:** one MTP-off sample first. An on/off gap beyond `MTP_AB_CLEAR` (5%) decides at once; one sample varies by about 2–4% run to run (same config: 30.3 vs 30.5, 28.9 vs 28.0, 24.1 vs 25.0 t/s). A closer result, or a side without a valid sample, takes a second round, up to `MTP_AB_SAMPLES` (2) valid samples per side, and decides on the means.
    - **Rule:** MTP is kept only if its mean beats MTP off by more than `MTP_AB_TIE` (2%). A tie goes to off. `off` deletes `spec-type`/`spec-draft-n-max`/`spec-draft-p-min`.
    - **Inconclusive:** a side with no valid sample, or a STALL, keeps the tuned MTP config. It is never a failure.
+   - **Names do not change.** `-mtp` in an entry name marks an MTP-capable model (the GGUF has an MTP head), not whether MTP is enabled. An entry whose A/B decided `off` keeps its `-mtp` name; the record shows the decision.
    - **Batch after `off`:** the batch was validated with the draft buffer present, so it stays valid. The bisect is re-run without MTP **only** when the pick was memory-bound (`mtp_off_rebisect_needed`: a failed OOM/SPILL rung above, and the pick at or above the highest PASS rung below it). A pick at the prefill peak is unaffected.
    - **Cost:** about 2.5–3 min per family head in the full suite on a clear result (one MTP-off decode sample including restart; 35B-A3B on CPU). A close result costs about 5–6 min. `mtpab` takes about 5–6 min clear and up to 11 min close.
-   - **Quick path:** `bench.sh mtpab <heads…>` (interactive `[a]`) runs only the A/B on an already-tuned entry, using the ini's n_max/p_min. It then runs the conditional re-bisect, `bench`, re-inheritance of the family, and the rename.
+   - **Quick path:** `bench.sh mtpab <heads…>` (interactive `[a]`) runs only the A/B on an already-tuned entry, using the ini's n_max/p_min. It then runs the conditional re-bisect, `bench`, and re-inheritance of the family.
 
 **`--thorough` (or `BENCH_THOROUGH=1`) re-enables the legacy exhaustive tuner** (`cmd_mtp_thorough`): the fixed n_max sweep {2,3,4,5}, the p_min sweep {0.5,0.6,0.7,0.8,0.9}, and the strict <0.05 degeneracy confirm gates. It measures decode the same natural-stop way (see "Measuring decode speed"); only the *search* is preserved, not the old loop-inflated measurement.
 
@@ -166,23 +167,6 @@ Params:
 
 ### Acceptance rate / degeneracy
 `draft acceptance` is a rough signal, never a gate — acceptance dropping because n_max was raised is only wasted draft compute (rejected drafts are recomputed by the target, quality preserved). Degeneracy above 0.15 is a `WARN` diagnostic (it can flag a genuinely looping run worth investigating), not a model failure.
-
-### Naming: the `-mtp` token follows the A/B
-- **When renaming happens:** after a run (full suite, `mtp`, `mtpab`, or `rename-mtp <models…>` for existing records), every entry whose name disagrees with its recorded A/B decision is renamed automatically.
-  - `off` drops the `mtp` segment: `…-q4-mtp-64k-think` → `…-q4-64k-think`.
-  - `on` inserts `mtp` before the ctx segment.
-  - `inconclusive` leaves the name unchanged.
-- **Scope:** it is decided per entry from that entry's own record. Siblings carry the head's inherited `mtp.ab`, so a family renames together.
-- **What is rewritten:**
-  - whole-token occurrences in the ini (headers and comments), in place, keeping the inode;
-  - the bench JSON (moved, with `model` updated) and siblings' `propagated_from`.
-- **After renaming:**
-  - the router is restarted once;
-  - every rename is appended to `logs/mtp_renames.tsv`;
-  - tracked files still mentioning an old name are listed.
-- **Collisions:** a name already present in **either** models.ini is never overwritten; the rename is skipped with a WARN.
-- **Opt-out:** `--no-rename` / `BENCH_RENAME=0` reports `would rename …` without changing anything.
-- **Clients:** client model IDs (Open WebUI, opencode) must be updated by hand.
 
 ### Placement gate at mtpcheck
 `detect_mtp` does not accept MTP just because the draft loads and engages. After engagement it runs `residency_probe` at batch 256 with MTP on; if that is `CPU`, it re-probes with MTP off, and if the model is `GPU` without MTP it **rejects MTP**: `spec-type`, `spec-draft-n-max` and `spec-draft-p-min` are deleted from the section (explicitly — the pre-run snapshot may itself hold `spec-type` from an earlier run) and the status file records `not_mtp` with reason `mtp_spills`. The suite then benches the model as non-MTP. A model that is CPU-resident either way keeps MTP at this gate; whether MTP is actually faster there is decided by the MTP A/B at the end of `cmd_mtp`. Observed: dirk-qwen3.8-27b IQ2_S @ 64K — GPU at 20.9 t/s without MTP, CPU at ~13 t/s with it, even with `q4_0` draft KV.

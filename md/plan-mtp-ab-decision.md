@@ -2,21 +2,17 @@
 
 **Date:** 2026-10-19
 **Status:** Implemented 2026-10-19 (`tools/bench.sh`, `tools/gen_metrics.sh`, `AGENTS.md`). Offline-tested
-(rename sandbox, decision and re-bisect logic). Not yet run on the GPU.
+(decision and re-bisect logic). Not yet run on the GPU.
 
 **Deviations from the plan as written:**
-1. **Renames are decided per entry**, from that entry's own record (newest of `/tmp/mtp_status_<name>.json`
-   and the bench JSON), not family-wide from the head. Inherited siblings carry the head's `mtp.ab`, so
-   families still rename together, and `--no-inherit` runs stay correct. The rename pass covers the
-   run's selected models plus their family heads.
+1. **Renaming (Step 6) was withdrawn.** `-mtp` in a name marks an MTP-capable model, not MTP on.
 2. **Re-bisect after `off` (added at the user's request).** `mtp_off_rebisect` re-runs the bisect without
    MTP only when the pick was memory-bound: an OOM/SPILL rung exists, and the pick is at or above the
    highest PASS rung below it. With the draft buffer gone, a larger batch may fit. A pick at the prefill
    peak is unaffected.
 3. **New quick path `bench.sh mtpab <heads…>`** (interactive `[a]`). It runs the A/B on an
    already-tuned entry, using the ini's n_max/p_min, with no mtpcheck, bisect or re-tune. Then it runs
-   the conditional re-bisect, `bench`, re-inheritance of the family (unless `--no-inherit`), and the
-   rename. Use it for the existing MTP records instead of a full `--reset-parent` suite.
+   the conditional re-bisect, `bench`, and re-inheritance of the family (unless `--no-inherit`). Use it for the existing MTP records instead of a full `--reset-parent` suite.
 4. **Adaptive, with the tuner's samples reused (replaces the fixed 2+2 interleaved design).**
    - **MTP-on side:** the tuner's valid samples at the winning n_max/p_min are reused.
    - **Round 1:** one MTP-off sample. A gap beyond `MTP_AB_CLEAR=0.05` decides at once.
@@ -53,8 +49,8 @@ reliable rule is to measure both settings and keep the faster one.**
 
 For every MTP-capable model the suite benches, measure decode with the tuned MTP config and with
 MTP off on the **same** entry (same weights, ctx and batch). Keep MTP only when it is measurably
-faster. Record both numbers in the bench JSON. Siblings inherit the decision. The entry's name then follows
-the decision: the `mtp` token is dropped or added automatically, family-wide (Step 6).
+faster. Record both numbers in the bench JSON. Siblings inherit the decision.
+Entry names do not change: `-mtp` marks an MTP-capable model, not MTP on.
 
 ## Model classes this must handle (all of models.ini)
 
@@ -219,94 +215,11 @@ The verdict column is printed `%-8s`, so widen the mtp column if the text is tru
 
 **Acceptance:** the VERDICT SUMMARY row for the Tiel-Coder head reads `OK (MTP off)`.
 
-### Step 6: Automatic rename so the `-mtp` name token matches the decision
+### Step 6: (withdrawn) Automatic rename
 
-**Policy (user decision, 2026-10-19):** an entry's name must say whether MTP is on. When the A/B
-decides, the suite renames the whole family automatically, in both directions:
-
-- `off` and the name has an `mtp` token → drop it:
-  `tiel-coder-35b-a3b-q4-mtp-64k` → `tiel-coder-35b-a3b-q4-64k`.
-- `on` and the name has no `mtp` token → add it.
-- `inconclusive` → no rename.
-
-The user accepts that clients (Open WebUI, opencode) must then be updated to the new names. The
-suite must make that easy by listing every rename (item 6 below).
-
-**Naming rule.**
-- **Name structure:** split the name on `-`.
-  - Verified on all 178 sections in both `models.ini` files: every name has **exactly one** context
-    segment matching `^\d+k$`.
-  - When an `mtp` segment exists, it **always immediately precedes** that context segment
-    (`…-q4-mtp-64k-think`).
-- **Remove:** drop the segment that is exactly `mtp`. Never touch substrings such as `mtpx`.
-- **Add:** insert the segment `mtp` immediately before the context segment.
-- **No unique context segment:** if a name has zero or more than one context segment, do not
-  rename. Log `WARN rename skipped: <name> has no unique ctx segment`.
-- **Implementation:** one `python3` helper, `mtp_target_name NAME DECISION`, that prints the new name
-  or nothing.
-
-**New function `mtp_rename_family HEAD`** (place it after `inherit_json`):
-
-1. **Read the decision** from `$MODELS_DIR/$HEAD.json` → `mtp.ab.decision`. If it is not `on`/`off`,
-   return.
-2. **Family members:** every section with the head's `hf` and effective `ctx-size`. Use the same
-   matching as `family_of`; factor its python out to list all members, not just the head. For each
-   member compute the target name, and skip members whose name already matches.
-3. **Collision check, before changing anything:** if any target name already exists as a section in
-   **either** `llama-cpp/models.ini` or `prism-llama-cpp/models.ini`, abort the whole family's rename
-   and log `WARN rename skipped: <target> already exists`. Names must stay unique across both files,
-   because the coordinator routes on them. Never overwrite another entry.
-4. **Rewrite the ini in place** with `open(p,'r+')`, seek(0), write, truncate. **Never** write a new
-   file and rename it over the old one: `prism-models.ini` is a single-file bind mount into openresty,
-   and replacing the file leaves the container on the old copy (AGENTS.md "Single-file bind mounts
-   pin the inode").
-   - Replace each old name as a whole token, in headers **and** comment lines, with
-     `(?<![\w.-])OLD(?![\w.-])`. The boundary stops `…-64k` from also matching `…-64k-think`.
-   - Apply all replacements for the family in one read-modify-write.
-5. **Bench JSONs:**
-   - move `$MODELS_DIR/OLD.json` to `NEW.json` and set its `model` field to NEW;
-   - in every JSON in `$MODELS_DIR`, rewrite `propagated_from` when it equals an old name;
-   - leave `/tmp` status files alone; they are per-run scratch.
-6. **Record the renames:**
-   - append `timestamp<TAB>backend<TAB>old<TAB>new` to `logs/mtp_renames.tsv` (create it with a header
-     if absent);
-   - log one line per rename: `RENAMED old → new (MTP <on|off>)`;
-   - list any tracked repo files that still mention an old name, using `git grep -l -w OLD` minus
-     `*/models/*.json`, so the user can fix docs by hand.
-7. **Restart the router.** The router reads `models.ini` only at start, so after renaming,
-   `docker compose restart "$SERVICE"` once (the suite's `restart` helper). Log
-   `router restarted: renamed models now served`.
-
-**When it runs:** never in the middle of the per-model loop. `MODEL`, `MODEL_IDXS`/`model_name`, the
-`/tmp/*_${MODEL}` files and `RESET_DONE` are all keyed by the current name.
-
-- **`run_full_suite`:** after the VERDICT SUMMARY, call `mtp_rename_family` once for each distinct
-  family head that ran `cmd_mtp` successfully this run. Then print a `=== RENAMES ===` block, either
-  `old → new` lines or `none`, ending with the reminder
-  `update client model IDs (Open WebUI, opencode) to the new names`.
-- **`bench.sh mtp <models…>`:** after the loop, call `mtp_rename_family` for each model given that
-  is a family head. The same rule applies, so standalone tuning also leaves names honest.
-- **New subcommand `bench.sh rename-mtp <models…>`:**
-  - applies `mtp_rename_family` to each named head from its existing JSON, without re-benching;
-  - is for records benched before the rename step existed, and for re-trying after resolving a
-    collision;
-  - must be added to the usage text and the interactive menu help.
-- **Opt-out:** global flag `--no-rename`, or env `BENCH_RENAME=0`. With either, print the RENAMES
-  block as `would rename old → new` and change nothing. Default is rename on.
-
-**Acceptance:**
-- **Rename off:** after the smoke-test entry is deleted (Step 9.1), a full-suite run on
-  `tiel-coder-35b-a3b-q4-mtp-64k` and its siblings ends with:
-  - sections `tiel-coder-35b-a3b-q4-64k`, `-64k-think` and `-64k-think-coder`, with no `spec-*` keys;
-  - JSONs moved to the new names, the siblings' `propagated_from` pointing at the new head name, and
-    a row per entry in `logs/mtp_renames.tsv`;
-  - `GET /v1/models` on `:8080` listing the new names.
-- **Collision:** run with the smoke-test entry still present and the rename is skipped with the
-  collision WARN; nothing changes.
-- **No mtp token on a long name:** a model decided `on` whose name lacks `mtp`, e.g. a fixture
-  section `foo-q4-64k-think` pointing at an MTP GGUF, is renamed to `foo-q4-mtp-64k-think`.
-- **Dry run:** `--no-rename` prints `would rename …` and leaves the files byte-identical (`git diff`
-  is empty).
+This step was implemented in `cc225ff`, then removed on 2026-10-19 before any rename ran. `-mtp` in an
+entry name marks an **MTP-capable model** (its GGUF has an MTP head), not whether MTP is enabled. A
+model whose A/B decided `off` keeps its name; `mtp.ab` in the record carries the decision.
 
 ### Step 7: `gen_metrics.sh`: one new column
 
@@ -331,21 +244,12 @@ model, because it is derived from the ini.
    means "tuned, then measured slower than no MTP".
 3. **"Placement gate at mtpcheck":** add one sentence. `mtp_spills` stays as the early cheap
    rejection; the A/B covers the case it cannot see (CPU either way).
-4. **New subsection "Naming: the `-mtp` token follows the A/B":**
-   - the rename rule;
-   - that renames are automatic and family-wide;
-   - `logs/mtp_renames.tsv`;
-   - `--no-rename` and `rename-mtp`;
-   - that client model IDs must then be updated.
 
 ### Step 9: Clean-up and re-bench (operational, after Steps 1–8 are merged)
 
 1. Delete the hand-made smoke-test entry `[tiel-coder-35b-a3b-q4-64k]` and its two comment lines from
    `llama-cpp/models.ini`. Delete `llama-cpp/models/tiel-coder-35b-a3b-q4-64k.json`. The A/B replaces
    it.
-   - **Do this before any re-bench.** That name is exactly the rename target of
-     `tiel-coder-35b-a3b-q4-mtp-64k`, so leaving it in place triggers the collision guard and the
-     head keeps its `-mtp` name.
 2. Re-run the full suite with `--reset-parent` on every MTP family head, so each record gets an A/B.
    Start with these, in this order:
    1. `tiel-coder-35b-a3b-q4-mtp-64k` (known answer: off);
@@ -356,8 +260,7 @@ model, because it is derived from the ini.
 
 ## Cost
 
-Four extra decode samples per family head, each with a restart. A rename pass costs one router
-restart per run, not per model. On a 30–55 t/s model a natural-stop
+Four extra decode samples per family head, each with a restart. On a 30–55 t/s model a natural-stop
 sample of ≥1500 tokens is about 0.5–1.5 min plus load, so the A/B adds roughly **5–8 min per head**.
 Siblings inherit the decision and cost nothing.
 
@@ -370,9 +273,5 @@ Siblings inherit the decision and cost nothing.
 - **Predicting the outcome from placement or architecture.** The evidence says measure; do not add
   heuristics that skip the A/B.
 - **`cmd_mtpverify`.** It is unrelated: it checks output equivalence, not speed.
-- **Updating client configs (Open WebUI, opencode).** These live outside this repo. The suite only
-  lists the renames (`logs/mtp_renames.tsv` and the RENAMES block); the user updates the clients.
-- **Aliases for old names.** No compatibility aliases, either router-side or in openresty. A renamed
-  model is only served under its new name.
 - **Request-level MTP toggles.** The A/B toggles `spec-type` in the ini and restarts, exactly as the
   real served config would be.

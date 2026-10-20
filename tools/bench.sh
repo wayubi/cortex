@@ -12,8 +12,7 @@
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
 #   ./tools/bench.sh bench <models...>          # full benchmark JSON record
 #   ./tools/bench.sh mtpab <heads...>           # MTP on/off A/B on an already-tuned entry, then
-#                                               # bench, re-inherit the family and rename (-mtp)
-#   ./tools/bench.sh rename-mtp <models...>     # rename so the -mtp token matches the recorded A/B
+#                                               # bench and re-inherit the family
 #
 # Backends: llama-cpp (llama-cpp/models.ini) and prism-llama-cpp
 # (prism-llama-cpp/models.ini, the PrismML fork) are benchable; ollama and nllb
@@ -25,8 +24,7 @@
 # Global flags (before the subcommand): --backend=<name>, --no-inherit, --reset-parent,
 # --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
 # failed, §6.4 part 3), --refine=64|coarse|off (discover refinement depth, §42
-# Change H; env BENCH_REFINE), --no-rename (report, do not apply, the -mtp renames
-# that follow the MTP A/B; env BENCH_RENAME=0). Default mode is discover; --thorough re-enables the
+# Change H; env BENCH_REFINE). Default mode is discover; --thorough re-enables the
 # old exhaustive tuners/bisect. Env BENCH_THOROUGH=1 is honoured; BENCH_DISCOVER=1
 # is a deprecated no-op alias (discover is the default).
 #
@@ -35,7 +33,7 @@
 # models.ini BEFORE the bisect, so the bisect runs against the true MTP state.
 # mtp ends with an A/B: decode with the tuned MTP config vs MTP off on the same
 # entry; MTP is kept only when it is faster (supporting MTP != gaining from it).
-# After the run, entries are renamed so the -mtp name token matches that decision.
+# Names are not touched: -mtp in a name marks an MTP-capable model, not MTP on.
 # Failures are logged and skipped; a verdict table is printed at the end.
 #
 # Reads/writes the backend's models.ini. Logs to logs/bench_<timestamp>.log.
@@ -108,8 +106,6 @@ MTP_AB_CLEAR=0.05         # MTP A/B: a first-round on/off gap beyond this (above
                           # sample) decides at once; a closer result takes a second round
 MTP_AB_TIE=0.02           # MTP A/B: MTP kept only if its mean beats MTP-off by MORE than this fraction;
                           # a tie goes to MTP off (no draft buffer, simpler config)
-RENAME_MODE=${BENCH_RENAME:-1}  # 1 = rename entries so the -mtp name token follows the A/B decision;
-                          # 0 (--no-rename / BENCH_RENAME=0) = only report what would be renamed
 THOROUGH=0
 STRICT=0                  # --strict: skip bench when mtp tuning failed (plan §6.4 part 3 / §7)
 REFINE_MODE=64            # discover refinement depth (plan §42 Change H): 64 (default, Change G
@@ -3709,7 +3705,7 @@ for ln in open(sys.argv[1]):
   mtp_write_status ok "${MTP_STATUS_NOTE:-}" "$MTP_TUNED_NMAX" "$MTP_TUNED_PMIN"
 }
 
-# ── MTP A/B follow-ups: verdict text, re-bisect check, renames ──
+# ── MTP A/B follow-ups: verdict text, re-bisect check ──
 # The A/B decision recorded for a model this run ('' if none).
 mtp_ab_decision_of() {
   python3 -c "
@@ -3766,130 +3762,6 @@ mtp_off_rebisect() {
     lshow "  WARN: re-bisect without MTP failed — keeping the MTP-on batch $(read_batch)"
   fi
   return 0
-}
-
-# Rename one entry so its -mtp name token matches its MTP A/B decision. Echoes
-# one line: RENAMED old new dec | WOULD old new dec | SKIP name reason | NOOP name why.
-# The decision is the newest of this run's status file and the bench JSON.
-mtp_rename_one() {
-  local ALL_INIS="" B
-  for B in $BENCH_BACKENDS; do ALL_INIS="$ALL_INIS $ROOT/$B/models.ini"; done
-  RN_NAME="$1" RN_DRY=$((1 - RENAME_MODE)) RN_INI="$INI" RN_MDIR="$MODELS_DIR" RN_ROOT="$ROOT" \
-  RN_ALL="$ALL_INIS" RN_BACKEND="$BACKEND" RN_TSV="$LOG_DIR/mtp_renames.tsv" python3 -c '
-import json, os, re, glob, datetime
-name, ini, mdir = os.environ["RN_NAME"], os.environ["RN_INI"], os.environ["RN_MDIR"]
-def load(p):
-    try: return json.load(open(p))
-    except Exception: return None
-cands = []
-st = load("/tmp/mtp_status_%s.json" % name)
-if st and (st.get("ab") or {}).get("decision"):
-    cands.append((st.get("written_at") or "", st["ab"]["decision"]))
-js = load(os.path.join(mdir, name + ".json"))
-if js and ((js.get("mtp") or {}).get("ab") or {}).get("decision"):
-    cands.append((js["mtp"].get("tuning_written_at") or "", js["mtp"]["ab"]["decision"]))
-if not cands:
-    print("NOOP", name, "no A/B record"); raise SystemExit
-dec = max(cands)[1]
-if dec not in ("on", "off"):
-    print("NOOP", name, "A/B " + dec); raise SystemExit
-# Every name has exactly one ctx segment (^\d+k$); an mtp segment sits right before it.
-seg = name.split("-")
-ctxi = [i for i, x in enumerate(seg) if re.fullmatch(r"\d+k", x)]
-if len(ctxi) != 1:
-    print("SKIP", name, "no unique ctx segment"); raise SystemExit
-if dec == "off" and "mtp" in seg:
-    new = "-".join(x for x in seg if x != "mtp")
-elif dec == "on" and "mtp" not in seg:
-    seg.insert(ctxi[0], "mtp"); new = "-".join(seg)
-else:
-    print("NOOP", name, "name matches"); raise SystemExit
-# Names must stay unique across both routers (the coordinator routes on them).
-for p in os.environ["RN_ALL"].split():
-    if os.path.exists(p) and re.search(r"(?m)^\[" + re.escape(new) + r"\]", open(p).read()):
-        print("SKIP", name, "%s already exists in %s" % (new, os.path.relpath(p, os.environ["RN_ROOT"])))
-        raise SystemExit
-if os.environ["RN_DRY"] == "1":
-    print("WOULD", name, new, dec); raise SystemExit
-# Whole-token replace (headers and comments); the boundary keeps ...-64k from
-# matching ...-64k-think. Written in place: prism-models.ini is a single-file bind
-# mount into openresty, and a new file renamed over it would leave the container
-# on the old inode.
-pat = re.compile(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])")
-c = open(ini).read()
-with open(ini, "r+") as f:
-    f.seek(0); f.write(pat.sub(new, c)); f.truncate()
-old_json = os.path.join(mdir, name + ".json")
-if os.path.exists(old_json):
-    d = load(old_json)
-    d["model"] = new
-    with open(os.path.join(mdir, new + ".json"), "w") as f: json.dump(d, f, indent=2)
-    os.remove(old_json)
-for p in glob.glob(os.path.join(mdir, "*.json")):
-    d = load(p)
-    if d and d.get("propagated_from") == name:
-        d["propagated_from"] = new
-        with open(p, "w") as f: json.dump(d, f, indent=2)
-for t in ("mtp_status_%s.json", "discover_%s.json", "mtp_ab_%s.tsv", "mtp_samples_%s.tsv"):
-    if os.path.exists("/tmp/" + t % name): os.replace("/tmp/" + t % name, "/tmp/" + t % new)
-tsv = os.environ["RN_TSV"]
-new_file = not os.path.exists(tsv)
-with open(tsv, "a") as f:
-    if new_file: f.write("timestamp\tbackend\told\tnew\tmtp\n")
-    f.write("%s\t%s\t%s\t%s\t%s\n" % (datetime.datetime.now().isoformat(timespec="seconds"),
-                                       os.environ["RN_BACKEND"], name, new, dec))
-print("RENAMED", name, new, dec)
-'
-}
-
-# Rename every given entry whose -mtp token disagrees with its A/B decision, then
-# restart the router once so it serves the new names. Never call it mid-loop:
-# MODEL, MODEL_IDXS and the /tmp/*_<model> files are keyed by the current name.
-mtp_rename_pass() {
-  [ "$#" -eq 0 ] && return 0
-  local N LINE KIND A B C SEEN=" " ANY=0
-  local -a OLD_NAMES=()
-  lshow ""
-  lshow "=== RENAMES (-mtp name token follows the MTP A/B) ==="
-  for N in "$@"; do
-    case "$SEEN" in *" $N "*) continue ;; esac
-    SEEN="$SEEN$N "
-    LINE=$(mtp_rename_one "$N" 2>&1) || true
-    read -r KIND A B C <<< "$LINE"
-    case "$KIND" in
-      RENAMED) lshow "  RENAMED $A → $B (MTP $C)"; OLD_NAMES+=("$A"); ANY=1 ;;
-      WOULD)   lshow "  would rename $A → $B (MTP $C) — not applied (--no-rename)"; ANY=1 ;;
-      SKIP)    lshow "  WARN rename skipped: $A — ${LINE#"SKIP $A "}"; ANY=1 ;;
-      NOOP)    : ;;
-      *)       lshow "  WARN rename check failed for $N: $LINE"; ANY=1 ;;
-    esac
-  done
-  [ "$ANY" -eq 0 ] && lshow "  none"
-  [ "${#OLD_NAMES[@]}" -eq 0 ] && return 0
-  if ( restart ); then
-    lshow "  router restarted: renamed models now served"
-  else
-    lshow "  WARN: $SERVICE restart failed — run 'docker compose restart $SERVICE' to serve the new names"
-  fi
-  local LEFT
-  LEFT=$(cd "$ROOT" && git ls-files 2>/dev/null | RN_OLD="${OLD_NAMES[*]}" python3 -c '
-import os, re, sys
-olds = os.environ["RN_OLD"].split()
-pats = [(o, re.compile(r"(?<![\w.-])" + re.escape(o) + r"(?![\w.-])")) for o in olds]
-for f in sys.stdin.read().split("\n"):
-    if not f or f.startswith("logs/") or f == "full-metrics.md" or re.search(r"/models/[^/]+\.json$", f):
-        continue
-    try: txt = open(f).read()
-    except Exception: continue
-    hit = [o for o, p in pats if p.search(txt)]
-    if hit: print("    %s: %s" % (f, " ".join(hit)))
-') || true
-  if [ -n "$LEFT" ]; then
-    lshow "  tracked files still mentioning an old name (update by hand):"
-    lshow "$LEFT"
-  fi
-  lshow "  renames logged to logs/mtp_renames.tsv — update client model IDs (Open WebUI, opencode) to the new names"
-  lshow "  regenerate full-metrics.md: ./tools/gen_metrics.sh"
 }
 
 # ── SUBCOMMAND: mtp (dispatcher) ────────────────────────────
@@ -5969,17 +5841,6 @@ run_full_suite() {
     done
     lshow "$ROW"
   done
-
-  # ── Renames: the -mtp token follows each entry's MTP A/B (after the loop —
-  # MODEL, MODEL_IDXS and the /tmp files are keyed by the current names) ──
-  local -a RN=()
-  for i in $MODEL_IDXS; do
-    NAME=$(model_name "$i")
-    RN+=("$NAME")
-    PARENT_NAME=$(family_of "$NAME")
-    [ -n "$PARENT_NAME" ] && RN+=("$PARENT_NAME")
-  done
-  mtp_rename_pass "${RN[@]}"
   lshow ""
   lshow "Full log: $LOG_FILE"
 }
@@ -6001,7 +5862,6 @@ for arg in "$@"; do
     --thorough)    THOROUGH=1 ;;
     --strict)      STRICT=1 ;;
     --refine=*)    REFINE_MODE="${arg#--refine=}" ;;
-    --no-rename)   RENAME_MODE=0 ;;
     *)             MAIN_ARGS+=("$arg") ;;
   esac
 done
@@ -6100,11 +5960,10 @@ if [ "$#" -eq 0 ]; then
     [aA]*)
       echo ""
       echo "=== MTP A/B PLAN ==="
-      for i in $MODEL_IDXS; do echo "  $(model_name "$i"): MTP on vs off (tuned values) → bench → re-inherit family → rename"; done
+      for i in $MODEL_IDXS; do echo "  $(model_name "$i"): MTP on vs off (tuned values) → bench → re-inherit family"; done
       echo ""
       confirm "Proceed with this plan?" || { echo "Aborted."; exit 1; }
-      exec "$0" mtpab $( [ "$RENAME_MODE" = "0" ] && echo --no-rename ) \
-        $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)
+      exec "$0" mtpab $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)
       ;;
     [cC]*)
       echo ""
@@ -6243,12 +6102,10 @@ case "$CMD" in
       ( cmd_mtp ) || { echo "  $m: mtp tuning FAILED"; continue; }
       mtp_off_rebisect || true
     done
-    mtp_rename_pass "$@"
     ;;
   mtpab)
     # Quick path for already-benched entries: A/B → (re-bisect if MTP off and the
-    # batch was memory-bound) → bench → re-inherit the family → rename.
-    declare -a RN=()
+    # batch was memory-bound) → bench → re-inherit the family.
     for m in "$@"; do
       MODEL=$m
       lshow ""
@@ -6259,9 +6116,7 @@ case "$CMD" in
       mtp_off_rebisect || true
       if ! ( cmd_bench ); then lshow "  $m: bench FAILED"; continue; fi
       while read -r SIB; do
-        [ -z "$SIB" ] && continue
-        RN+=("$SIB")
-        [ "$SIB" = "$m" ] && continue
+        [ -z "$SIB" ] || [ "$SIB" = "$m" ] && continue
         if [ "$INHERIT_MODE" -eq 1 ]; then
           lshow "  $SIB: inheriting from $m (JSON copied, no bench)"
           inherit_json "$m" "$SIB"
@@ -6270,10 +6125,6 @@ case "$CMD" in
         fi
       done < <(family_members "$m")
     done
-    mtp_rename_pass "${RN[@]+"${RN[@]}"}"
-    ;;
-  rename-mtp)
-    mtp_rename_pass "$@"
     ;;
   bench)
     # Pre-pass: if RESET_PARENT, bench each selected model's parent first
@@ -6301,7 +6152,7 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|mtp|mtpab|bench|rename-mtp] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|mtp|mtpab|bench] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
@@ -6310,13 +6161,11 @@ case "$CMD" in
     echo "       bench.sh residency <model>                  # fast GPU/CPU pre-check (no bench)"
     echo "       bench.sh ctxmax <models...>                 # largest GPU-resident ctx → new entry"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning, then MTP on/off A/B"
-    echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family → rename"
+    echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
-    echo "       bench.sh rename-mtp <models...>             # rename so -mtp matches the recorded A/B"
-    echo "       global flags: --backend=llama-cpp|prism-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off --no-rename"
+    echo "       global flags: --backend=llama-cpp|prism-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
     echo "       env: BENCH_REFINE=64|coarse|off sets the discover refinement depth (default 64)"
-    echo "       env: BENCH_RENAME=0 reports the -mtp renames without applying them"
     exit 1
     ;;
 esac
