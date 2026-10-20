@@ -64,12 +64,20 @@ def bench_row(d):
     hw = d.get('hardware', {}) or {}
     run = hw.get('run', {}) or {}
     cfg = d.get('config', {}) or {}
+    ab = m.get('ab') or {}
+    if ab.get('decision') in ('on', 'off'):
+        mtp_ab = f"{ab['decision']} ×{ab['speedup']:.2f}" if ab.get('speedup') else ab['decision']
+    elif ab.get('decision'):
+        mtp_ab = 'inconc.'
+    else:
+        mtp_ab = None
     return {
         'ctx': d.get('ctx'),
         'batch': d.get('batch'),
         'n_max': m.get('configured_n_max'),
         'p_min': m.get('configured_p_min'),
         'drafter': m.get('drafter'),
+        'mtp_ab': mtp_ab,
         'reasoning': cfg.get('reasoning'),
         'decode': sp.get('decode_t_s'),
         'prefill': sp.get('prefill_t_s'),
@@ -108,7 +116,7 @@ for backend in backends:
         b = {
             'ctx': meta['ctx'], 'batch': meta['batch'],
             'n_max': meta['n_max'], 'p_min': meta['p_min'],
-            'drafter': meta['drafter'], 'reasoning': meta['reasoning'],
+            'drafter': meta['drafter'], 'mtp_ab': None, 'reasoning': meta['reasoning'],
             'decode': None, 'prefill': None, 'pre_ms': None, 'dec_ms': None,
             'pre_mtok': None, 'dec_mtok': None, 'acc': None,
             'place': 'unverified', 'cpu': None, 'gpu_util': None,
@@ -147,6 +155,7 @@ lines.append("| batch | batch-size |")
 lines.append("| n_max | spec-draft-n-max (MTP models only) |")
 lines.append("| p_min | spec-draft-p-min (MTP models only) |")
 lines.append("| drafter | in-model / Q4_0 root / none |")
+lines.append("| mtp_a/b | MTP A/B: decision and MTP-on ÷ MTP-off decode ratio, measured on the same entry (— = not run) |")
 lines.append("| reasoning | off / on / low / medium / high |")
 lines.append("| decode_t/s | Decode speed (tokens per second) |")
 lines.append("| prefill_t/s | Prefill speed (tokens per second) |")
@@ -172,8 +181,8 @@ lines.append("- decode_t/s measured over a full 4000-token window (150-token dec
 lines.append("")
 lines.append("## Benchmark Data")
 lines.append("")
-lines.append("| model | backend | ctx | batch | n_max | p_min | drafter | reasoning | decode_t/s | prefill_t/s | prefill_ms | decode_ms | pre_tok_ms | dec_tok_ms | acc | placement | cpu% | gpu% | temp_c | power_w | vram | ram | rss |")
-lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+lines.append("| model | backend | ctx | batch | n_max | p_min | drafter | mtp_a/b | reasoning | decode_t/s | prefill_t/s | prefill_ms | decode_ms | pre_tok_ms | dec_tok_ms | acc | placement | cpu% | gpu% | temp_c | power_w | vram | ram | rss |")
+lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 
 for name, b in rows:
     lines.append("| " + " | ".join([
@@ -184,6 +193,7 @@ for name, b in rows:
         f(b['n_max']),
         f(b['p_min']),
         f(b['drafter']),
+        f(b['mtp_ab']),
         f(b['reasoning']),
         f(b['decode'], 't1'),
         f(b['prefill'], 't1'),

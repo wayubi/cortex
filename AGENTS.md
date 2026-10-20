@@ -149,6 +149,16 @@ Params:
 1. **n_max ladder at p_min=0.7.** Start from `{2, 4, ini's n_max}` — always include the current ini value, because the batch ladder already validated residency at it and it is guaranteed to pass the placement gate. Extend to untested neighbours of the best within [2,6]. Re-measure the best and runner-up once and rank on the mean of their two samples; ties (within `MTP_TIE`, 2%) go to the smaller n_max (smaller draft buffer, more headroom).
 2. **p_min at the winning n_max.** Measure `{0.5, 0.9, ini's p_min}` minus 0.7, compare against the 0.7 reference already measured in phase 1; keep 0.7 if within tie tolerance.
 3. Failure is now only STALL, every candidate rejected by placement/OOM, or every sample SHORT — never a degeneracy value. The ini's `n_max`/`p_min` are restored on failure.
+4. **MTP A/B (`mtp_ab_decide`, both tuners).**
+   - **Why:** supporting MTP does not mean gaining from it. On a CPU-resident MoE the target's verify pass routes each drafted token to its own experts, so one step reads several times the expert weights over the RAM bus. That costs more than the accepted drafts save: `tiel-coder-35b-a3b-q4` @ 64K decoded 33.5 t/s with MTP and 36.1 without, at 0.82 acceptance.
+   - **Method:** after the winners are applied, decode with that config is compared against MTP off on the **same** section.
+     - **MTP-on side:** the tuner's own valid samples at the winning config are reused. They were taken at this batch with this prompt, and the winner is always measured at least twice. Only `mtpab`, or a tune with no valid winner sample, measures it.
+     - **Adaptive:** one MTP-off sample first. An on/off gap beyond `MTP_AB_CLEAR` (5%) decides at once; one sample varies by about 2–4% run to run (same config: 30.3 vs 30.5, 28.9 vs 28.0, 24.1 vs 25.0 t/s). A closer result, or a side without a valid sample, takes a second round, up to `MTP_AB_SAMPLES` (2) valid samples per side, and decides on the means.
+   - **Rule:** MTP is kept only if its mean beats MTP off by more than `MTP_AB_TIE` (2%). A tie goes to off. `off` deletes `spec-type`/`spec-draft-n-max`/`spec-draft-p-min`.
+   - **Inconclusive:** a side with no valid sample, or a STALL, keeps the tuned MTP config. It is never a failure.
+   - **Batch after `off`:** the batch was validated with the draft buffer present, so it stays valid. The bisect is re-run without MTP **only** when the pick was memory-bound (`mtp_off_rebisect_needed`: a failed OOM/SPILL rung above, and the pick at or above the highest PASS rung below it). A pick at the prefill peak is unaffected.
+   - **Cost:** about 2.5–3 min per family head in the full suite on a clear result (one MTP-off decode sample including restart; 35B-A3B on CPU). A close result costs about 5–6 min. `mtpab` takes about 5–6 min clear and up to 11 min close.
+   - **Quick path:** `bench.sh mtpab <heads…>` (interactive `[a]`) runs only the A/B on an already-tuned entry, using the ini's n_max/p_min. It then runs the conditional re-bisect, `bench`, re-inheritance of the family, and the rename.
 
 **`--thorough` (or `BENCH_THOROUGH=1`) re-enables the legacy exhaustive tuner** (`cmd_mtp_thorough`): the fixed n_max sweep {2,3,4,5}, the p_min sweep {0.5,0.6,0.7,0.8,0.9}, and the strict <0.05 degeneracy confirm gates. It measures decode the same natural-stop way (see "Measuring decode speed"); only the *search* is preserved, not the old loop-inflated measurement.
 
@@ -157,8 +167,25 @@ Params:
 ### Acceptance rate / degeneracy
 `draft acceptance` is a rough signal, never a gate — acceptance dropping because n_max was raised is only wasted draft compute (rejected drafts are recomputed by the target, quality preserved). Degeneracy above 0.15 is a `WARN` diagnostic (it can flag a genuinely looping run worth investigating), not a model failure.
 
+### Naming: the `-mtp` token follows the A/B
+- **When renaming happens:** after a run (full suite, `mtp`, `mtpab`, or `rename-mtp <models…>` for existing records), every entry whose name disagrees with its recorded A/B decision is renamed automatically.
+  - `off` drops the `mtp` segment: `…-q4-mtp-64k-think` → `…-q4-64k-think`.
+  - `on` inserts `mtp` before the ctx segment.
+  - `inconclusive` leaves the name unchanged.
+- **Scope:** it is decided per entry from that entry's own record. Siblings carry the head's inherited `mtp.ab`, so a family renames together.
+- **What is rewritten:**
+  - whole-token occurrences in the ini (headers and comments), in place, keeping the inode;
+  - the bench JSON (moved, with `model` updated) and siblings' `propagated_from`.
+- **After renaming:**
+  - the router is restarted once;
+  - every rename is appended to `logs/mtp_renames.tsv`;
+  - tracked files still mentioning an old name are listed.
+- **Collisions:** a name already present in **either** models.ini is never overwritten; the rename is skipped with a WARN.
+- **Opt-out:** `--no-rename` / `BENCH_RENAME=0` reports `would rename …` without changing anything.
+- **Clients:** client model IDs (Open WebUI, opencode) must be updated by hand.
+
 ### Placement gate at mtpcheck
-`detect_mtp` does not accept MTP just because the draft loads and engages. After engagement it runs `residency_probe` at batch 256 with MTP on; if that is `CPU`, it re-probes with MTP off, and if the model is `GPU` without MTP it **rejects MTP**: `spec-type`, `spec-draft-n-max` and `spec-draft-p-min` are deleted from the section (explicitly — the pre-run snapshot may itself hold `spec-type` from an earlier run) and the status file records `not_mtp` with reason `mtp_spills`. The suite then benches the model as non-MTP. A model that is CPU-resident either way keeps MTP. Observed: dirk-qwen3.8-27b IQ2_S @ 64K — GPU at 20.9 t/s without MTP, CPU at ~13 t/s with it, even with `q4_0` draft KV.
+`detect_mtp` does not accept MTP just because the draft loads and engages. After engagement it runs `residency_probe` at batch 256 with MTP on; if that is `CPU`, it re-probes with MTP off, and if the model is `GPU` without MTP it **rejects MTP**: `spec-type`, `spec-draft-n-max` and `spec-draft-p-min` are deleted from the section (explicitly — the pre-run snapshot may itself hold `spec-type` from an earlier run) and the status file records `not_mtp` with reason `mtp_spills`. The suite then benches the model as non-MTP. A model that is CPU-resident either way keeps MTP at this gate; whether MTP is actually faster there is decided by the MTP A/B at the end of `cmd_mtp`. Observed: dirk-qwen3.8-27b IQ2_S @ 64K — GPU at 20.9 t/s without MTP, CPU at ~13 t/s with it, even with `q4_0` draft KV.
 
 ### Placement re-check
 **Mandatory after any n_max change.** Draft-context compute buffer scales with `n_max × batch` — a batch tuned at n_max=2 may NOT fit the draft at n_max=3+. The spill is silent: no OOM, just decode dropping 3–4× and CPU climbing to 270–680%. Re-run placement at the SAME batch after changing n_max. **Tradeoff: raising n_max shrinks the batch ceiling (draft buffer = n_max × batch).** On ornith 128k/256k, n_max=2 at the full batch decoded equal-or-faster than n_max=3 at its reduced ceiling, so n_max=2 won.
@@ -174,6 +201,10 @@ Speed samples never force tokens past EOS. `decode_sample` measures decode on **
 ## Result recording
 
 The tuners write diagnostic JSON that `cmd_bench` merges into the model's bench JSON. `/tmp/mtp_status_<model>.json` records `tuning_status` (`ok` / `failed` / `stall` / `not_mtp` / `not_run`) plus `tuned_n_max` / `tuned_p_min` (null unless ok), merged under the JSON's `mtp` key; `/tmp/discover_<model>.json` records the discover ladder and pick, merged under the `discover` key. A failed MTP tuning no longer reads as validated downstream. The old `n_max_confirmed` / `p_min_confirmed` fields are renamed `n_max_loaded` / `p_min_loaded` — they mean only "what the server loaded", never "tuned". `mtp_status not_run` (or a missing `tuning_status`) means tuning never ran or the JSON predates the field; MTP values are not inherited from such parents. Both status files carry a `written_at` timestamp (copied to `mtp.tuning_written_at`) so a stale file merged into a later bench is visible. By default a failed `cmd_mtp` still lets `cmd_bench` run (recording `tuning_status: failed`); pass **`--strict`** to skip `cmd_bench` for that model and mark the verdict `SKIPPED (mtp failed)` — use it when producing publishable records.
+
+The MTP A/B is recorded as `mtp.ab`:
+- **Fields:** `decision` (`on` / `off` / `inconclusive`), `on_tps`, `off_tps`, `speedup` (on ÷ off), `tie`, `clear`, `rounds` (1 or 2), `on_source` (`tuner` / `measured` / `tuner+measured`), and the raw `samples`, each with its `source`. `full-metrics.md` shows it in the `mtp_a/b` column, e.g. `off ×0.93`.
+- **Reading it:** `tuning_status: ok` with `ab.decision: off` means "tuned, then measured slower than no MTP". The spec-* keys are gone on purpose, so the stale-status guard does not fire for it. A sibling inheriting a parent with `ab.decision: off` has its own spec-* keys removed.
 
 ## Gotchas
 

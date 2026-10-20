@@ -11,6 +11,9 @@
 #   ./tools/bench.sh residency <model>          # fast GPU/CPU pre-check (no bench)
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
 #   ./tools/bench.sh bench <models...>          # full benchmark JSON record
+#   ./tools/bench.sh mtpab <heads...>           # MTP on/off A/B on an already-tuned entry, then
+#                                               # bench, re-inherit the family and rename (-mtp)
+#   ./tools/bench.sh rename-mtp <models...>     # rename so the -mtp token matches the recorded A/B
 #
 # Backends: llama-cpp (llama-cpp/models.ini) and prism-llama-cpp
 # (prism-llama-cpp/models.ini, the PrismML fork) are benchable; ollama and nllb
@@ -22,13 +25,17 @@
 # Global flags (before the subcommand): --backend=<name>, --no-inherit, --reset-parent,
 # --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
 # failed, §6.4 part 3), --refine=64|coarse|off (discover refinement depth, §42
-# Change H; env BENCH_REFINE). Default mode is discover; --thorough re-enables the
+# Change H; env BENCH_REFINE), --no-rename (report, do not apply, the -mtp renames
+# that follow the MTP A/B; env BENCH_RENAME=0). Default mode is discover; --thorough re-enables the
 # old exhaustive tuners/bisect. Env BENCH_THOROUGH=1 is honoured; BENCH_DISCOVER=1
 # is a deprecated no-op alias (discover is the default).
 #
 # Full suite order per model (fixed): mtpcheck -> bisect -> mtp -> bench.
 # mtpcheck empirically determines MTP capability and sets/clears spec-type in
 # models.ini BEFORE the bisect, so the bisect runs against the true MTP state.
+# mtp ends with an A/B: decode with the tuned MTP config vs MTP off on the same
+# entry; MTP is kept only when it is faster (supporting MTP != gaining from it).
+# After the run, entries are renamed so the -mtp name token matches that decision.
 # Failures are logged and skipped; a verdict table is printed at the end.
 #
 # Reads/writes the backend's models.ini. Logs to logs/bench_<timestamp>.log.
@@ -96,6 +103,13 @@ PREFILL_NOISE=0.03        # discover refinement (§30.2b Change E): keep refinin
 DECODE_CLIFF=0.70         # discover: decode at pick below this fraction of the 256 baseline = spill cliff
 DECODE_WARN=0.90          # discover: below this: WARN only
 MTP_TIE=0.02              # MTP tuning: candidates within 2% of the best mean are a tie → smallest n_max wins (plan §44; was 0.05)
+MTP_AB_SAMPLES=2          # MTP A/B (md/plan-mtp-ab-decision.md): max valid decode samples per side
+MTP_AB_CLEAR=0.05         # MTP A/B: a first-round on/off gap beyond this (above the ~2–4% spread of one
+                          # sample) decides at once; a closer result takes a second round
+MTP_AB_TIE=0.02           # MTP A/B: MTP kept only if its mean beats MTP-off by MORE than this fraction;
+                          # a tie goes to MTP off (no draft buffer, simpler config)
+RENAME_MODE=${BENCH_RENAME:-1}  # 1 = rename entries so the -mtp name token follows the A/B decision;
+                          # 0 (--no-rename / BENCH_RENAME=0) = only report what would be renamed
 THOROUGH=0
 STRICT=0                  # --strict: skip bench when mtp tuning failed (plan §6.4 part 3 / §7)
 REFINE_MODE=64            # discover refinement depth (plan §42 Change H): 64 (default, Change G
@@ -453,6 +467,54 @@ print('written')
 "
 }
 
+# Remove a key (and its whole line) from a NAMED section (del_key acts on $MODEL).
+del_key_for() {
+  local SECTION=$1 KEY=$2
+  python3 -c "
+import re, sys
+section='$SECTION'; key='$KEY'; ini='$INI'
+with open(ini) as f: content = f.read()
+m = re.search(r'(\['+re.escape(section)+r'\])(.*?)(?=\n\[|\Z)', content, re.DOTALL)
+if not m: print('ERROR: section not found'); sys.exit(1)
+kept = [ln for ln in m.group(2).split('\n') if not re.match(r'\s*'+re.escape(key)+r'\s*=', ln)]
+with open(ini, 'w') as f:
+    f.write(content[:m.start(2)] + '\n'.join(kept) + content[m.end(2):])
+"
+}
+
+# Every section of the given model's family (same hf + effective ctx-size as
+# family_of), one per line, in models.ini order — the head first.
+family_members() {
+  local MODEL=$1
+  python3 -c "
+import re
+with open('$INI') as f: c = f.read()
+sections = re.split(r'(?m)^\[', c)
+star_ctx = None
+for s in sections[1:]:
+    if s.split(']')[0].strip() == '*':
+        m = re.search(r'ctx-size\s*=\s*(\S+)', s)
+        if m: star_ctx = m.group(1)
+        break
+def effective_ctx(s):
+    m = re.search(r'ctx-size\s*=\s*(\S+)', s)
+    return m.group(1) if m else star_ctx
+def hf_of(s):
+    m = re.search(r'hf\s*=\s*(\S+)', s)
+    return m.group(1) if m else None
+mine = None
+for s in sections[1:]:
+    if s.split(']')[0].strip() == '$MODEL':
+        mine = (hf_of(s), effective_ctx(s)); break
+if mine is None or mine[0] is None:
+    print('$MODEL'); exit()
+for s in sections[1:]:
+    name = s.split(']')[0].strip()
+    if name == '*' or not name: continue
+    if (hf_of(s), effective_ctx(s)) == mine: print(name)
+"
+}
+
 # Copy parent JSON to child: overwrite model, apply child's sampling config, mark propagated.
 inherit_json() {
   local PARENT=$1 CHILD=$2
@@ -527,7 +589,24 @@ except Exception:
 ts = (d.get('mtp') or {}).get('tuning_status')
 print(ts if ts else 'unknown')
 ")
-  if [ "$PARENT_TUNING" = "ok" ]; then
+  # MTP A/B (md/plan-mtp-ab-decision.md): a parent that measured MTP slower than
+  # MTP off has no spec-* keys; the child shares its weights and ctx, so it must
+  # drop any spec-* it still carries from an earlier run.
+  local PARENT_AB
+  PARENT_AB=$(python3 -c "
+import json
+try:
+    d = json.load(open('$MODELS_DIR/$PARENT.json'))
+except Exception:
+    print(''); exit()
+print(((d.get('mtp') or {}).get('ab') or {}).get('decision') or '')
+")
+  if [ "$PARENT_AB" = "off" ]; then
+    del_key_for "$CHILD" spec-type >/dev/null
+    del_key_for "$CHILD" spec-draft-n-max >/dev/null
+    del_key_for "$CHILD" spec-draft-p-min >/dev/null
+    log "  Inherited parent MTP decision: off (MTP slower on $PARENT) — spec-* removed"
+  elif [ "$PARENT_TUNING" = "ok" ]; then
     local PARENT_SPEC_TYPE PARENT_NMAX PARENT_PMIN
     PARENT_SPEC_TYPE=$(python3 -c "
 import re
@@ -2331,6 +2410,7 @@ mtp_init_samples() {
   MTP_DIE_REASON=""
   MTP_TUNED_NMAX="null"
   MTP_TUNED_PMIN="null"
+  MTP_AB_DECISION="" MTP_AB_ON="" MTP_AB_OFF="" MTP_AB_SPEEDUP="" MTP_AB_ROUNDS="" MTP_AB_ON_SOURCE=""
 }
 
 # Append one measured sample to the per-model TSV.
@@ -2346,6 +2426,9 @@ mtp_add_sample() {
 mtp_write_status() {
   local SF; SF=$(mtp_status_file)
   MTP_STATUS="$1" MTP_REASON="$2" MTP_TN="$3" MTP_TP="$4" \
+  MTP_AB_DEC="${MTP_AB_DECISION:-}" MTP_AB_ONV="${MTP_AB_ON:-}" MTP_AB_OFFV="${MTP_AB_OFF:-}" \
+  MTP_AB_SPD="${MTP_AB_SPEEDUP:-}" MTP_AB_TIEV="$MTP_AB_TIE" MTP_AB_TSVF="/tmp/mtp_ab_${MODEL}.tsv" \
+  MTP_AB_RND="${MTP_AB_ROUNDS:-}" MTP_AB_SRC="${MTP_AB_ON_SOURCE:-}" MTP_AB_CLR="$MTP_AB_CLEAR" \
   MTP_SAMP="$(mtp_sample_file)" MTP_SF="$SF" python3 -c '
 import json, os, datetime
 samples = []
@@ -2380,7 +2463,34 @@ out = {
     "tuned_n_max": n_or_null(os.environ["MTP_TN"]),
     "tuned_p_min": n_or_null(os.environ["MTP_TP"]),
     "samples": samples,
+    "ab": None,
 }
+# MTP A/B (md/plan-mtp-ab-decision.md): decision + both means + raw samples.
+def fnum(x):
+    try: return float(x)
+    except (TypeError, ValueError): return None
+if os.environ.get("MTP_AB_DEC"):
+    ab_samples = []
+    tsv = os.environ.get("MTP_AB_TSVF", "")
+    if tsv and os.path.exists(tsv):
+        for ln in open(tsv):
+            p = ln.rstrip("\n").split("|")
+            if len(p) < 6: continue
+            ab_samples.append({"side": p[0], "tps": fnum(p[1]),
+                               "tokens": int(fnum(p[2]) or 0), "placement": p[3] or None,
+                               "oom": int(fnum(p[4]) or 0), "accept": fnum(p[5]),
+                               "source": p[6] if len(p) > 6 else "ab"})
+    out["ab"] = {
+        "decision": os.environ["MTP_AB_DEC"],
+        "on_tps": fnum(os.environ.get("MTP_AB_ONV")),
+        "off_tps": fnum(os.environ.get("MTP_AB_OFFV")),
+        "speedup": fnum(os.environ.get("MTP_AB_SPD")),
+        "tie": fnum(os.environ.get("MTP_AB_TIEV")),
+        "clear": fnum(os.environ.get("MTP_AB_CLR")),
+        "rounds": int(fnum(os.environ.get("MTP_AB_RND")) or 0) or None,
+        "on_source": os.environ.get("MTP_AB_SRC") or None,
+        "samples": ab_samples,
+    }
 try:
     open(os.environ["MTP_SF"], "w").write(json.dumps(out))
 except Exception:
@@ -2394,7 +2504,7 @@ except Exception:
 mtp_trap_exit() {
   local RC=$1
   if [ "$RC" -eq 0 ]; then
-    mtp_write_status ok "" "${MTP_TUNED_NMAX:-null}" "${MTP_TUNED_PMIN:-null}"
+    mtp_write_status ok "${MTP_STATUS_NOTE:-}" "${MTP_TUNED_NMAX:-null}" "${MTP_TUNED_PMIN:-null}"
   else
     mtp_write_status "${MTP_DIE_STATUS:-failed}" "${MTP_DIE_REASON:-unknown failure}" null null
   fi
@@ -3424,6 +3534,364 @@ print(rank[0] if rank else '')
   log "=== DONE ==="
 }
 
+# ── MTP A/B: keep MTP only where it measures faster (md/plan-mtp-ab-decision.md) ──
+# Supporting MTP is not the same as gaining from it. On a CPU-resident MoE the
+# target's verify pass routes each drafted token to its own experts, so a step
+# reads several times the expert weights over the RAM bus and costs more than
+# the accepted drafts save (tiel-coder-35b-a3b-q4 @ 64K: 33.5 t/s MTP on vs 36.1
+# off, acceptance 0.82). After the tuner has applied its winning n_max/p_min,
+# compare decode with that config against MTP off on the SAME section — same
+# weights, ctx and batch.
+#   MTP-on side: the tuner's own valid samples at the winning config are reused
+#     (it measured the winner at least twice, at this batch, with this prompt);
+#     only when there are none (mtpab, or every sample invalid) is it measured.
+#   Adaptive: one MTP-off sample first. A gap beyond MTP_AB_CLEAR (5%, above the
+#     ~2–4% run-to-run spread of one sample) decides at once; a closer result, or
+#     a side without a valid sample, takes a second round (up to MTP_AB_SAMPLES
+#     valid samples per side) and decides on the means.
+# MTP is kept only when its mean beats off by more than MTP_AB_TIE; a tie goes to
+# off. No valid sample on a side, or a STALL, is inconclusive: MTP stays as tuned
+# (status quo), never a failure. Leaves the ini in the decided state and sets
+# MTP_AB_* for mtp_write_status. The batch needs no re-tune unless it was
+# memory-bound (mtp_off_rebisect): MTP off only lowers memory.
+MTP_AB_DECISION="" MTP_AB_ON="" MTP_AB_OFF="" MTP_AB_SPEEDUP="" MTP_AB_ROUNDS="" MTP_AB_ON_SOURCE=""
+MTP_AB_SNAP=""
+mtp_ab_tsv() { echo "/tmp/mtp_ab_${MODEL}.tsv"; }
+
+# EXIT-trap guard: an interrupted A/B must not leave MTP half-removed.
+mtp_ab_abort() {
+  if [ -n "${MTP_AB_SNAP:-}" ] && [ -f "$MTP_AB_SNAP" ]; then
+    log "  MTP A/B interrupted — restoring the MTP-on section"
+    restore_section "$MTP_AB_SNAP" >/dev/null 2>&1 || true
+    rm -f "$MTP_AB_SNAP"
+  fi
+  MTP_AB_SNAP=""
+}
+
+# Measure one A/B sample ($1 = on|off, $2 = label) and append it to the TSV as
+# side|tps|tokens|placement|oom|accept|source. rc 2 = STALL.
+mtp_ab_measure() {
+  local SIDE=$1 LABEL=$2 R DR
+  local SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH
+  restore_section "$MTP_AB_SNAP" >/dev/null
+  if [ "$SIDE" = "off" ]; then
+    del_key spec-type >/dev/null
+    del_key spec-draft-n-max >/dev/null
+    del_key spec-draft-p-min >/dev/null
+  fi
+  restart
+  R=$(decode_sample "mtp-ab $LABEL") && DR=0 || DR=$?
+  [ "$DR" -eq 2 ] && return 2
+  IFS='|' read -r SPEED ACCEPT PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$R"
+  printf '%s|%s|%s|%s|%s|%s|ab\n' "$SIDE" "${SPEED:-0}" "${TOKENS:-0}" "${PLACEMENT:-}" "${OOM:-0}" "${ACCEPT:-}" \
+    >> "$(mtp_ab_tsv)"
+  return 0
+}
+
+# Evaluate the TSV. $1 = final (1) or first-round (0) check. Prints
+# "decision on off speedup n_on n_off"; decision is pending only on a non-final
+# check that is not clear (gap ≤ MTP_AB_CLEAR) or lacks a valid sample on a side.
+mtp_ab_eval() {
+  AB_TSV="$(mtp_ab_tsv)" AB_FINAL=$1 AB_STALL=${2:-0} MTP_MIN=$MIN_DECODE_TOKENS \
+  AB_TIE=$MTP_AB_TIE AB_CLEAR=$MTP_AB_CLEAR MTP_BASE="${MTP_BASE:-}" python3 -c '
+import os
+rows = [ln.rstrip("\n").split("|") for ln in open(os.environ["AB_TSV"]) if ln.count("|") >= 5]
+# Placement baseline as the tuner uses it; without one (thorough tuner, mtpab)
+# the first MTP-on sample sets it: on a CPU-compute model CPU is the baseline,
+# not a spill, so it must not invalidate samples.
+base = os.environ.get("MTP_BASE") or next((r[3] for r in rows if r[0] == "on" and r[3] in ("GPU", "CPU")), "GPU")
+def valid(r):
+    try: tps = float(r[1]); tok = int(r[2]); oom = int(r[4])
+    except ValueError: return None
+    if oom or tok < int(os.environ["MTP_MIN"]) or (base != "CPU" and r[3] == "CPU"): return None
+    return tps
+def vals(side): return [t for t in (valid(r) for r in rows if r[0] == side) if t is not None]
+von, voff = vals("on"), vals("off")
+on = sum(von) / len(von) if von else None
+off = sum(voff) / len(voff) if voff else None
+final = os.environ["AB_FINAL"] == "1"
+if os.environ["AB_STALL"] == "1":
+    dec = "inconclusive"
+elif on is None or off is None:
+    dec = "inconclusive" if final else "pending"
+elif not final and abs(on / off - 1) <= float(os.environ["AB_CLEAR"]):
+    dec = "pending"
+elif on > off * (1 + float(os.environ["AB_TIE"])):
+    dec = "on"
+else:
+    dec = "off"
+f = lambda x: "%.2f" % x if x is not None else "-"
+print(dec, f(on), f(off), ("%.4f" % (on / off)) if on and off else "-", len(von), len(voff))
+'
+}
+
+mtp_ab_decide() {
+  local NMAX PMIN
+  NMAX=$(read_ini_val spec-draft-n-max)
+  PMIN=$(read_ini_val spec-draft-p-min)
+  MTP_AB_SNAP=/tmp/mtp_ab_on_${MODEL}.snap
+  read_section > "$MTP_AB_SNAP"
+  : > "$(mtp_ab_tsv)"
+  MTP_AB_DECISION="" MTP_AB_ON="" MTP_AB_OFF="" MTP_AB_SPEEDUP="" MTP_AB_ROUNDS="" MTP_AB_ON_SOURCE=""
+  MTP_DIE_REASON="interrupted during MTP A/B"
+  trap 'RC=$?; mtp_ab_abort; mtp_trap_exit "$RC" || true; exit $RC' EXIT
+
+  # Reuse the tuner's samples at the winning config as the MTP-on side.
+  if [ -s "$(mtp_sample_file)" ]; then
+    AB_NM="$NMAX" AB_PM="$PMIN" python3 -c '
+import os, sys
+for ln in open(sys.argv[1]):
+    p = ln.rstrip("\n").split("|")
+    if len(p) >= 9 and p[0] == os.environ["AB_NM"] and p[1] == os.environ["AB_PM"]:
+        print("on|%s|%s|%s|%s|%s|tuner" % (p[2], p[3], p[4], p[7], p[5]))
+' "$(mtp_sample_file)" >> "$(mtp_ab_tsv)" 2>/dev/null || true
+  fi
+
+  local DEC ON OFF SPD NON NOFF STALL=0 ROUNDS=1
+  read -r DEC ON OFF SPD NON NOFF <<< "$(mtp_ab_eval 0)"
+  if [ "${NON:-0}" -gt 0 ]; then
+    MTP_AB_ON_SOURCE="tuner"
+    log ""; log "=== MTP A/B: n_max=${NMAX:-?} p_min=${PMIN:-?} (${NON} tuner sample(s), mean ${ON} t/s) vs MTP off ==="
+  else
+    MTP_AB_ON_SOURCE="measured"
+    log ""; log "=== MTP A/B: n_max=${NMAX:-?} p_min=${PMIN:-?} vs MTP off (no tuner samples — measuring both) ==="
+    mtp_ab_measure on "on #1" || STALL=1
+  fi
+  if [ "$STALL" -eq 0 ]; then mtp_ab_measure off "off #1" || STALL=1; fi
+  read -r DEC ON OFF SPD NON NOFF <<< "$(mtp_ab_eval 0 "$STALL")"
+  if [ "$DEC" = "pending" ] && [ "$MTP_AB_SAMPLES" -ge 2 ]; then
+    ROUNDS=2
+    log "  MTP A/B round 1: on=${ON} off=${OFF} — within ±$(python3 -c "print(round($MTP_AB_CLEAR*100))")% or incomplete, taking a second round"
+    if [ "${NON:-0}" -lt "$MTP_AB_SAMPLES" ]; then
+      mtp_ab_measure on "on #2" || STALL=1
+      [ "$MTP_AB_ON_SOURCE" = "tuner" ] && MTP_AB_ON_SOURCE="tuner+measured"
+    fi
+    if [ "$STALL" -eq 0 ] && [ "${NOFF:-0}" -lt "$MTP_AB_SAMPLES" ]; then mtp_ab_measure off "off #2" || STALL=1; fi
+  fi
+  [ "$STALL" -eq 1 ] && log "  STALL during MTP A/B — decision inconclusive"
+  read -r DEC ON OFF SPD NON NOFF <<< "$(mtp_ab_eval 1 "$STALL")"
+  [ "$ON" = "-" ] && ON=""
+  [ "$OFF" = "-" ] && OFF=""
+  [ "$SPD" = "-" ] && SPD=""
+  MTP_AB_DECISION=${DEC:-inconclusive} MTP_AB_ON=$ON MTP_AB_OFF=$OFF MTP_AB_SPEEDUP=$SPD MTP_AB_ROUNDS=$ROUNDS
+
+  # Leave the ini in the decided state. Restoring the snapshot first keeps the
+  # batch and every other key byte-identical; off then drops only the spec-* keys.
+  restore_section "$MTP_AB_SNAP" >/dev/null
+  if [ "$MTP_AB_DECISION" = "off" ]; then
+    del_key spec-type >/dev/null
+    del_key spec-draft-n-max >/dev/null
+    del_key spec-draft-p-min >/dev/null
+  fi
+  rm -f "$MTP_AB_SNAP"
+  MTP_AB_SNAP=""
+
+  local WORD
+  case "$MTP_AB_DECISION" in
+    on)  WORD="MTP ON" ;;
+    off) WORD="MTP OFF" ;;
+    *)   WORD="MTP kept (inconclusive)" ;;
+  esac
+  log "  MTP A/B: on=${ON:-n/a} t/s (${NON:-0}, ${MTP_AB_ON_SOURCE}) off=${OFF:-n/a} t/s (${NOFF:-0}) ×${SPD:-n/a}, ${ROUNDS} round(s) → $WORD"
+  if [ "$MTP_AB_DECISION" = "off" ]; then
+    log "  removed spec-type/spec-draft-n-max/spec-draft-p-min (MTP slower on this config)"
+  elif [ "$MTP_AB_DECISION" = "inconclusive" ]; then
+    log "  WARN: MTP A/B inconclusive — keeping the tuned MTP config"
+  fi
+
+  # Status: ok with the tuned values (what MTP was compared at, even when off).
+  # Written here for the thorough tuner (its ok was stamped before the A/B) and
+  # again by the EXIT trap for the discover tuner — same content.
+  MTP_TUNED_NMAX=${NMAX:-null}
+  MTP_TUNED_PMIN=${PMIN:-null}
+  MTP_DIE_REASON=""
+  trap 'RC=$?; mtp_trap_exit "$RC" || true; exit $RC' EXIT
+  mtp_write_status ok "${MTP_STATUS_NOTE:-}" "$MTP_TUNED_NMAX" "$MTP_TUNED_PMIN"
+}
+
+# ── MTP A/B follow-ups: verdict text, re-bisect check, renames ──
+# The A/B decision recorded for a model this run ('' if none).
+mtp_ab_decision_of() {
+  python3 -c "
+import json
+try: print(((json.load(open('/tmp/mtp_status_$1.json')).get('ab')) or {}).get('decision') or '')
+except Exception: print('')
+"
+}
+mtp_ab_verdict() {
+  case "$(mtp_ab_decision_of "$1")" in
+    on)  echo "OK (MTP on)" ;;
+    off) echo "OK (MTP off)" ;;
+    inconclusive) echo "OK (A/B inconclusive)" ;;
+    *)   echo "OK" ;;
+  esac
+}
+
+# 0 = the current batch pick was memory-bound, so MTP off (no draft buffer) may
+# fit a larger, faster batch and the bisect should be re-run without MTP. Bound
+# means the ladder hit an OOM/SPILL rung and the pick sits at or above the
+# highest PASS rung below it (prefill was still climbing when memory ran out).
+# A pick below that — the prefill peak — is unaffected by the freed memory.
+# Reads this run's /tmp/discover_<model>.json, else the bench JSON's discover.
+mtp_off_rebisect_needed() {
+  python3 -c "
+import json, os, sys
+d = None
+for p in ('/tmp/discover_$MODEL.json', '$MODELS_DIR/$MODEL.json'):
+    try:
+        j = json.load(open(p))
+    except Exception:
+        continue
+    d = j if 'ladder' in j else (j.get('discover') or None)
+    if d: break
+if not d or not d.get('pick'): sys.exit(1)
+ladder = [r for r in d.get('ladder', []) if r.get('status') in ('PASS', 'OOM', 'SPILL')]
+fails = sorted(r['batch'] for r in ladder if r['status'] in ('OOM', 'SPILL'))
+if not fails: sys.exit(1)
+below = [r['batch'] for r in ladder if r['status'] == 'PASS' and r['batch'] < fails[0]]
+sys.exit(0 if below and int(d['pick']) >= max(below) else 1)
+"
+}
+
+# After an A/B of off: re-run the bisect without MTP when the pick was memory-
+# bound. A failed re-bisect restores the ini batch (the MTP-on pick, still valid
+# with MTP off), so it is a WARN, never a reason to skip the bench.
+mtp_off_rebisect() {
+  [ "$(mtp_ab_decision_of "$MODEL")" = "off" ] || return 1
+  mtp_off_rebisect_needed || return 1
+  lshow "  $(date +%H:%M:%S) MTP off and the batch pick was memory-bound — re-running bisect without MTP"
+  if ( cmd_bisect ); then
+    lshow "  $(date +%H:%M:%S) re-bisect OK for $MODEL (batch $(read_batch))"
+  else
+    lshow "  WARN: re-bisect without MTP failed — keeping the MTP-on batch $(read_batch)"
+  fi
+  return 0
+}
+
+# Rename one entry so its -mtp name token matches its MTP A/B decision. Echoes
+# one line: RENAMED old new dec | WOULD old new dec | SKIP name reason | NOOP name why.
+# The decision is the newest of this run's status file and the bench JSON.
+mtp_rename_one() {
+  local ALL_INIS="" B
+  for B in $BENCH_BACKENDS; do ALL_INIS="$ALL_INIS $ROOT/$B/models.ini"; done
+  RN_NAME="$1" RN_DRY=$((1 - RENAME_MODE)) RN_INI="$INI" RN_MDIR="$MODELS_DIR" RN_ROOT="$ROOT" \
+  RN_ALL="$ALL_INIS" RN_BACKEND="$BACKEND" RN_TSV="$LOG_DIR/mtp_renames.tsv" python3 -c '
+import json, os, re, glob, datetime
+name, ini, mdir = os.environ["RN_NAME"], os.environ["RN_INI"], os.environ["RN_MDIR"]
+def load(p):
+    try: return json.load(open(p))
+    except Exception: return None
+cands = []
+st = load("/tmp/mtp_status_%s.json" % name)
+if st and (st.get("ab") or {}).get("decision"):
+    cands.append((st.get("written_at") or "", st["ab"]["decision"]))
+js = load(os.path.join(mdir, name + ".json"))
+if js and ((js.get("mtp") or {}).get("ab") or {}).get("decision"):
+    cands.append((js["mtp"].get("tuning_written_at") or "", js["mtp"]["ab"]["decision"]))
+if not cands:
+    print("NOOP", name, "no A/B record"); raise SystemExit
+dec = max(cands)[1]
+if dec not in ("on", "off"):
+    print("NOOP", name, "A/B " + dec); raise SystemExit
+# Every name has exactly one ctx segment (^\d+k$); an mtp segment sits right before it.
+seg = name.split("-")
+ctxi = [i for i, x in enumerate(seg) if re.fullmatch(r"\d+k", x)]
+if len(ctxi) != 1:
+    print("SKIP", name, "no unique ctx segment"); raise SystemExit
+if dec == "off" and "mtp" in seg:
+    new = "-".join(x for x in seg if x != "mtp")
+elif dec == "on" and "mtp" not in seg:
+    seg.insert(ctxi[0], "mtp"); new = "-".join(seg)
+else:
+    print("NOOP", name, "name matches"); raise SystemExit
+# Names must stay unique across both routers (the coordinator routes on them).
+for p in os.environ["RN_ALL"].split():
+    if os.path.exists(p) and re.search(r"(?m)^\[" + re.escape(new) + r"\]", open(p).read()):
+        print("SKIP", name, "%s already exists in %s" % (new, os.path.relpath(p, os.environ["RN_ROOT"])))
+        raise SystemExit
+if os.environ["RN_DRY"] == "1":
+    print("WOULD", name, new, dec); raise SystemExit
+# Whole-token replace (headers and comments); the boundary keeps ...-64k from
+# matching ...-64k-think. Written in place: prism-models.ini is a single-file bind
+# mount into openresty, and a new file renamed over it would leave the container
+# on the old inode.
+pat = re.compile(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])")
+c = open(ini).read()
+with open(ini, "r+") as f:
+    f.seek(0); f.write(pat.sub(new, c)); f.truncate()
+old_json = os.path.join(mdir, name + ".json")
+if os.path.exists(old_json):
+    d = load(old_json)
+    d["model"] = new
+    with open(os.path.join(mdir, new + ".json"), "w") as f: json.dump(d, f, indent=2)
+    os.remove(old_json)
+for p in glob.glob(os.path.join(mdir, "*.json")):
+    d = load(p)
+    if d and d.get("propagated_from") == name:
+        d["propagated_from"] = new
+        with open(p, "w") as f: json.dump(d, f, indent=2)
+for t in ("mtp_status_%s.json", "discover_%s.json", "mtp_ab_%s.tsv", "mtp_samples_%s.tsv"):
+    if os.path.exists("/tmp/" + t % name): os.replace("/tmp/" + t % name, "/tmp/" + t % new)
+tsv = os.environ["RN_TSV"]
+new_file = not os.path.exists(tsv)
+with open(tsv, "a") as f:
+    if new_file: f.write("timestamp\tbackend\told\tnew\tmtp\n")
+    f.write("%s\t%s\t%s\t%s\t%s\n" % (datetime.datetime.now().isoformat(timespec="seconds"),
+                                       os.environ["RN_BACKEND"], name, new, dec))
+print("RENAMED", name, new, dec)
+'
+}
+
+# Rename every given entry whose -mtp token disagrees with its A/B decision, then
+# restart the router once so it serves the new names. Never call it mid-loop:
+# MODEL, MODEL_IDXS and the /tmp/*_<model> files are keyed by the current name.
+mtp_rename_pass() {
+  [ "$#" -eq 0 ] && return 0
+  local N LINE KIND A B C SEEN=" " ANY=0
+  local -a OLD_NAMES=()
+  lshow ""
+  lshow "=== RENAMES (-mtp name token follows the MTP A/B) ==="
+  for N in "$@"; do
+    case "$SEEN" in *" $N "*) continue ;; esac
+    SEEN="$SEEN$N "
+    LINE=$(mtp_rename_one "$N" 2>&1) || true
+    read -r KIND A B C <<< "$LINE"
+    case "$KIND" in
+      RENAMED) lshow "  RENAMED $A → $B (MTP $C)"; OLD_NAMES+=("$A"); ANY=1 ;;
+      WOULD)   lshow "  would rename $A → $B (MTP $C) — not applied (--no-rename)"; ANY=1 ;;
+      SKIP)    lshow "  WARN rename skipped: $A — ${LINE#"SKIP $A "}"; ANY=1 ;;
+      NOOP)    : ;;
+      *)       lshow "  WARN rename check failed for $N: $LINE"; ANY=1 ;;
+    esac
+  done
+  [ "$ANY" -eq 0 ] && lshow "  none"
+  [ "${#OLD_NAMES[@]}" -eq 0 ] && return 0
+  if ( restart ); then
+    lshow "  router restarted: renamed models now served"
+  else
+    lshow "  WARN: $SERVICE restart failed — run 'docker compose restart $SERVICE' to serve the new names"
+  fi
+  local LEFT
+  LEFT=$(cd "$ROOT" && git ls-files 2>/dev/null | RN_OLD="${OLD_NAMES[*]}" python3 -c '
+import os, re, sys
+olds = os.environ["RN_OLD"].split()
+pats = [(o, re.compile(r"(?<![\w.-])" + re.escape(o) + r"(?![\w.-])")) for o in olds]
+for f in sys.stdin.read().split("\n"):
+    if not f or f.startswith("logs/") or f == "full-metrics.md" or re.search(r"/models/[^/]+\.json$", f):
+        continue
+    try: txt = open(f).read()
+    except Exception: continue
+    hit = [o for o, p in pats if p.search(txt)]
+    if hit: print("    %s: %s" % (f, " ".join(hit)))
+') || true
+  if [ -n "$LEFT" ]; then
+    lshow "  tracked files still mentioning an old name (update by hand):"
+    lshow "$LEFT"
+  fi
+  lshow "  renames logged to logs/mtp_renames.tsv — update client model IDs (Open WebUI, opencode) to the new names"
+  lshow "  regenerate full-metrics.md: ./tools/gen_metrics.sh"
+}
+
 # ── SUBCOMMAND: mtp (dispatcher) ────────────────────────────
 # Decides which tuner runs. This step keeps the DEFAULT on the OLD path
 # Dispatcher. Default is DISCOVER; --thorough / THOROUGH=1 selects the old
@@ -3434,11 +3902,41 @@ cmd_mtp() {
     echo "  ERROR: $MODEL has no spec-type=draft-mtp — run 'bench.sh mtpcheck $MODEL' first"
     exit 1
   fi
+  local RC=0
   if [ "${THOROUGH:-0}" -eq 1 ]; then
-    cmd_mtp_thorough
+    cmd_mtp_thorough || RC=$?
   else
-    cmd_mtp_discover
+    cmd_mtp_discover || RC=$?
   fi
+  [ "$RC" -eq 0 ] || return "$RC"
+  # A model that supports MTP is not necessarily faster with it: measure.
+  mtp_ab_decide
+}
+
+# ── SUBCOMMAND: mtpab (A/B only, on an already-tuned entry) ──
+# For entries benched before the A/B existed: no mtpcheck, bisect or n_max/p_min
+# re-tune — the ini's tuned values are the MTP side. Run in a subshell.
+cmd_mtpab() {
+  if ! grep -q "spec-type.*draft-mtp" <(read_section); then
+    echo "  ERROR: $MODEL has no spec-type=draft-mtp (not MTP, or MTP already off)"
+    exit 1
+  fi
+  SERVED_GRACE=$(served_grace "$(read_ctx)")
+  mtp_init_samples
+  MTP_STATUS_NOTE="A/B only: n_max/p_min from the existing tune"
+  # Placement baseline from the existing record (CPU-compute models are CPU at
+  # every batch; that is not a spill and must not invalidate A/B samples).
+  if [ -z "${MTP_BASE:-}" ] && [ -f "$MODELS_DIR/$MODEL.json" ]; then
+    MTP_BASE=$(python3 -c "
+import json
+d = json.load(open('$MODELS_DIR/$MODEL.json'))
+b = (d.get('mtp') or {}).get('placement_baseline') or d.get('placement') or ''
+print(b if b in ('GPU', 'CPU') else '')
+" 2>/dev/null || echo "")
+    export MTP_BASE
+  fi
+  trap 'RC=$?; mtp_trap_exit "$RC" || true; exit $RC' EXIT
+  mtp_ab_decide
 }
 
 # ── cmd_bisect_thorough: legacy exhaustive batch search (kept verbatim) ──
@@ -5134,6 +5632,9 @@ _mtp_tuning = {
     'placement_baseline': status.get('placement_baseline') if status else None,
     'tuning_samples': status.get('samples') if status and status.get('samples') is not None else [],
     'tuning_written_at': status.get('written_at') if status else None,
+    # MTP A/B (md/plan-mtp-ab-decision.md): decode with the tuned MTP config vs
+    # MTP off on this same entry; decision off means spec-* were removed.
+    'ab': status.get('ab') if status else None,
 }
 
 # Stale-status guard (plan §25#1 + §31 finding 3): if the status file says "ok"
@@ -5141,7 +5642,9 @@ _mtp_tuning = {
 # p_min) OR what the server actually loaded for this bench (mtp.n_max_loaded /
 # p_min_loaded), the tune is not in effect for this record. Relabel it "stale"
 # but keep the tuned values for reference, and surface it via stderr and the log.
-if _mtp_tuning['tuning_status'] == 'ok':
+# An A/B decision of off removes spec-* from the ini on purpose: the tuned values
+# no longer matching the (absent) configured ones is the expected outcome there.
+if _mtp_tuning['tuning_status'] == 'ok' and (_mtp_tuning.get('ab') or {}).get('decision') != 'off':
     _cn = meta['mtp'].get('n_max'); _cp = meta['mtp'].get('p_min')
     _tn = _mtp_tuning['tuned_n_max']; _tp = _mtp_tuning['tuned_p_min']
     _ln = mtp.get('n_max_loaded'); _lp = mtp.get('p_min_loaded')
@@ -5280,7 +5783,8 @@ reset_parent_full() {
   if [ "$IS_MTP" -eq 1 ]; then
     log "  $(date +%H:%M:%S) starting mtp for $P"
     if ( cmd_mtp ); then
-      log "  $(date +%H:%M:%S) mtp OK for $P"
+      log "  $(date +%H:%M:%S) mtp $(mtp_ab_verdict "$P") for $P"
+      mtp_off_rebisect || true
     else
       MTP_OK=0
       log "  $(date +%H:%M:%S) mtp FAILED for $P"
@@ -5409,7 +5913,10 @@ run_full_suite() {
     else
       lshow "  $(date +%H:%M:%S) starting mtp for $NAME"
       if ( cmd_mtp ); then
-        VERDICTS["$NAME|mtp"]="OK"
+        VERDICTS["$NAME|mtp"]="$(mtp_ab_verdict "$NAME")"
+        if mtp_off_rebisect; then
+          VERDICTS["$NAME|mtp"]="${VERDICTS["$NAME|mtp"]%)}, re-bisected)"
+        fi
       else
         MTP_FAILED=1
         VERDICTS["$NAME|mtp"]="FAIL"
@@ -5462,6 +5969,17 @@ run_full_suite() {
     done
     lshow "$ROW"
   done
+
+  # ── Renames: the -mtp token follows each entry's MTP A/B (after the loop —
+  # MODEL, MODEL_IDXS and the /tmp files are keyed by the current names) ──
+  local -a RN=()
+  for i in $MODEL_IDXS; do
+    NAME=$(model_name "$i")
+    RN+=("$NAME")
+    PARENT_NAME=$(family_of "$NAME")
+    [ -n "$PARENT_NAME" ] && RN+=("$PARENT_NAME")
+  done
+  mtp_rename_pass "${RN[@]}"
   lshow ""
   lshow "Full log: $LOG_FILE"
 }
@@ -5483,6 +6001,7 @@ for arg in "$@"; do
     --thorough)    THOROUGH=1 ;;
     --strict)      STRICT=1 ;;
     --refine=*)    REFINE_MODE="${arg#--refine=}" ;;
+    --no-rename)   RENAME_MODE=0 ;;
     *)             MAIN_ARGS+=("$arg") ;;
   esac
 done
@@ -5576,8 +6095,17 @@ if [ "$#" -eq 0 ]; then
 
   # ── Action: full suite or a quick residency check ──
   echo ""
-  read -r -p "Run? [f]ull suite / [r]esidency check / [c]tx max (default f): " RUN_INPUT
+  read -r -p "Run? [f]ull suite / [r]esidency check / [c]tx max / MTP [a]/b (default f): " RUN_INPUT
   case "${RUN_INPUT:-f}" in
+    [aA]*)
+      echo ""
+      echo "=== MTP A/B PLAN ==="
+      for i in $MODEL_IDXS; do echo "  $(model_name "$i"): MTP on vs off (tuned values) → bench → re-inherit family → rename"; done
+      echo ""
+      confirm "Proceed with this plan?" || { echo "Aborted."; exit 1; }
+      exec "$0" mtpab $( [ "$RENAME_MODE" = "0" ] && echo --no-rename ) \
+        $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)
+      ;;
     [cC]*)
       echo ""
       echo "=== CTX-MAX PLAN ==="
@@ -5713,7 +6241,39 @@ case "$CMD" in
       MODEL=$m
       ensure_model_cached "$m" || { echo "  $m: STALL (download failed — skipping)"; continue; }
       ( cmd_mtp ) || { echo "  $m: mtp tuning FAILED"; continue; }
+      mtp_off_rebisect || true
     done
+    mtp_rename_pass "$@"
+    ;;
+  mtpab)
+    # Quick path for already-benched entries: A/B → (re-bisect if MTP off and the
+    # batch was memory-bound) → bench → re-inherit the family → rename.
+    declare -a RN=()
+    for m in "$@"; do
+      MODEL=$m
+      lshow ""
+      lshow "=============== MTP A/B: $m ==============="
+      ensure_model_cached "$m" || { lshow "  $m: STALL (download failed — skipping)"; continue; }
+      if ! ( cmd_mtpab ); then lshow "  $m: MTP A/B FAILED"; continue; fi
+      lshow "  $m: $(mtp_ab_verdict "$m")"
+      mtp_off_rebisect || true
+      if ! ( cmd_bench ); then lshow "  $m: bench FAILED"; continue; fi
+      while read -r SIB; do
+        [ -z "$SIB" ] && continue
+        RN+=("$SIB")
+        [ "$SIB" = "$m" ] && continue
+        if [ "$INHERIT_MODE" -eq 1 ]; then
+          lshow "  $SIB: inheriting from $m (JSON copied, no bench)"
+          inherit_json "$m" "$SIB"
+        else
+          lshow "  $SIB: not re-inherited (--no-inherit) — run 'bench.sh mtpab $SIB' for its own A/B"
+        fi
+      done < <(family_members "$m")
+    done
+    mtp_rename_pass "${RN[@]+"${RN[@]}"}"
+    ;;
+  rename-mtp)
+    mtp_rename_pass "$@"
     ;;
   bench)
     # Pre-pass: if RESET_PARENT, bench each selected model's parent first
@@ -5741,7 +6301,7 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|mtp|bench] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|mtp|mtpab|bench|rename-mtp] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
@@ -5749,11 +6309,14 @@ case "$CMD" in
     echo "       bench.sh bisect <model> [test-batch]"
     echo "       bench.sh residency <model>                  # fast GPU/CPU pre-check (no bench)"
     echo "       bench.sh ctxmax <models...>                 # largest GPU-resident ctx → new entry"
-    echo "       bench.sh mtp <models...>                    # n_max/p_min tuning"
+    echo "       bench.sh mtp <models...>                    # n_max/p_min tuning, then MTP on/off A/B"
+    echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family → rename"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
-    echo "       global flags: --backend=llama-cpp|prism-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
+    echo "       bench.sh rename-mtp <models...>             # rename so -mtp matches the recorded A/B"
+    echo "       global flags: --backend=llama-cpp|prism-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off --no-rename"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
     echo "       env: BENCH_REFINE=64|coarse|off sets the discover refinement depth (default 64)"
+    echo "       env: BENCH_RENAME=0 reports the -mtp renames without applying them"
     exit 1
     ;;
 esac
