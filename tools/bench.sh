@@ -9,6 +9,7 @@
 #   ./tools/bench.sh mtpverify <models...>      # MTP-on vs off output check (premise test)
 #   ./tools/bench.sh bisect <model> [test-batch]
 #   ./tools/bench.sh residency <model>          # fast GPU/CPU pre-check (no bench)
+#   ./tools/bench.sh fetch <models...>          # download an entry's files (the routers run offline)
 #   ./tools/bench.sh vision <models...>         # add [<model>-vision] when the repo ships an
 #                                               # mmproj and an image request works
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
@@ -1912,7 +1913,64 @@ gguf_present() {
   fi
   [ -n "$MATCH" ]
 }
+# The routers run with `offline = true` in [*], so a load never waits on Hugging
+# Face (each -hf load otherwise asks HF for the repo's file list first, and a
+# failed connection stalls the load ~5 min). Downloads go through here: the one
+# section being fetched gets `offline = false` and the router a restart, and the
+# wrapper below takes the override out again. The next restart (every probe
+# restarts; sync_router_ini at exit) puts the router back offline.
+ONLINE_FOR=""
+go_online() {
+  set_key_for "$1" offline false >/dev/null
+  ONLINE_FOR=$1
+  restart
+}
 ensure_model_cached() {
+  local RC=0
+  _ensure_model_cached "$@" || RC=$?
+  if [ -n "$ONLINE_FOR" ]; then
+    del_key_for "$ONLINE_FOR" offline >/dev/null
+    ONLINE_FOR=""
+  fi
+  return $RC
+}
+# `fetch`: load the entry online even when its weights are cached, and wait for
+# the load to finish, so whatever llama.cpp's -hf loader adds -- the MTP drafter,
+# the mmproj of an entry that loads one, a file updated upstream -- is downloaded too.
+fetch_model() {
+  local M=$1 RC=0
+  MODEL=$M
+  go_online "$M"
+  python3 -c "
+import json
+payload = {'model':'$M','messages':[{'role':'user','content':'Say hello'}],'max_tokens':8}
+with open('/tmp/fetch_probe.json','w') as f: json.dump(payload, f)
+"
+  logmark
+  curl -s --max-time 7200 -X POST http://localhost:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' -d @/tmp/fetch_probe.json \
+    > /tmp/fetch_response.json 2>&1 &
+  local PID=$! T=0 LAST=""
+  while kill -0 "$PID" 2>/dev/null; do
+    sleep "$DL_POLL_SEC"; T=$((T + DL_POLL_SEC))
+    local NOW
+    NOW=$(find "$ROOT/.local/llama-cpp_data/hub" -name '*.downloadInProgress' -printf '%f %s\n' 2>/dev/null | head -1)
+    if [ -n "$NOW" ] && [ "$NOW" != "$LAST" ]; then
+      log "    downloading: ${NOW%% *} $(( ${NOW##* } / 1048576 )) MB (${T}s)"; LAST=$NOW
+    fi
+  done
+  wait "$PID" 2>/dev/null || true
+  if python3 -c "import json; exit(0 if 'choices' in json.load(open('/tmp/fetch_response.json')) else 1)" 2>/dev/null; then
+    log "  $M: fetched and loaded (${T}s)"
+  else
+    log "  $M: fetch FAILED: $(head -c 300 /tmp/fetch_response.json)"
+    RC=1
+  fi
+  del_key_for "$M" offline >/dev/null
+  ONLINE_FOR=""
+  return $RC
+}
+_ensure_model_cached() {
   local M=$1
   local HF
   HF=$(python3 -c "
@@ -1951,6 +2009,7 @@ print(hf.group(1) if hf else '')
   fi
 
   log "  preparing weights (hf=$HF)"
+  go_online "$M"
 
   # Start or resume a download. Fire one request to trigger llama.cpp's -hf loader
   # (which fetches the model), but do NOT wait_served — the download may take
@@ -2900,6 +2959,9 @@ cmd_vision() {
   MODEL=$NAME
   set_key no-mmproj false >/dev/null
   log "  section [$NAME] created (copy of [$SRC], no-mmproj = false)"
+  # The routers are offline; download the mmproj (not fetched for text-only
+  # entries) with one online load before the test.
+  fetch_model "$NAME" || { vision_result "$SRC" "failed (could not download the mmproj)"; exit 1; }
 
   local RC=0
   restart
@@ -6113,8 +6175,16 @@ if [ "$#" -eq 0 ]; then
 
   # ── Action: full suite or a quick residency check ──
   echo ""
-  read -r -p "Run? [f]ull suite / [r]esidency check / [c]tx max / MTP [a]/b / [v]ision (default f): " RUN_INPUT
+  read -r -p "Run? [f]ull suite / [r]esidency check / [c]tx max / MTP [a]/b / [v]ision / [d]ownload (default f): " RUN_INPUT
   case "${RUN_INPUT:-f}" in
+    [dD]*)
+      echo ""
+      echo "=== DOWNLOAD PLAN ==="
+      for i in $MODEL_IDXS; do echo "  $(model_name "$i"): load once online — downloads its weights, drafter and mmproj if missing or updated"; done
+      echo ""
+      confirm "Proceed with this plan?" || { echo "Aborted."; exit 1; }
+      exec "$0" fetch $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)
+      ;;
     [vV]*)
       echo ""
       echo "=== VISION PLAN ==="
@@ -6262,6 +6332,15 @@ case "$CMD" in
       ( cmd_ctxmax ) || echo "  $m: ctxmax did not complete (see log)"
     done
     ;;
+  fetch)
+    FAILED=0
+    for m in "$@"; do
+      lshow ""
+      lshow "=== FETCH: $m ==="
+      fetch_model "$m" || FAILED=$((FAILED + 1))
+    done
+    [ "$FAILED" -eq 0 ] || exit 1
+    ;;
   vision)
     rm -f "$VISION_RESULTS"
     for m in "$@"; do
@@ -6333,7 +6412,7 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|vision|mtp|mtpab|bench] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|vision|fetch|mtp|mtpab|bench] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
@@ -6342,6 +6421,7 @@ case "$CMD" in
     echo "       bench.sh residency <model>                  # fast GPU/CPU pre-check (no bench)"
     echo "       bench.sh ctxmax <models...>                 # largest GPU-resident ctx → new entry"
     echo "       bench.sh vision <models...>                 # add [<model>-vision] if the repo ships an mmproj (image test)"
+    echo "       bench.sh fetch <models...>                  # download an entry's files (routers are offline)"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning, then MTP on/off A/B"
     echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"

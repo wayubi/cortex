@@ -3,7 +3,7 @@
 **Date:** 2026-10-21
 **Status:** Option 1 applied 2026-10-21 to both routers (`load-mode = mmap+mlock`); its decode/prefill
 re-bench (Option 1 step 5) is still pending a quiet window. Option 2: not pursued (see its section).
-Option 3: design agreed, not built. Options 4–5: plan only.
+Option 3: built and deployed 2026-10-21 (`model-cache`, see AGENTS.md). Options 4–5: plan only.
 
 Option 1 load measurements (3 runs each; cold = the GGUF evicted from the page cache first):
 
@@ -176,7 +176,9 @@ after its head, and assert no unload, a rewritten `model`, and the merged parame
 
 ## Option 3: An automatic NVMe copy of the models used most (`model-cache` service)
 
-**Status:** design agreed 2026-10-21; not built. Run the three checks below before building.
+**Status:** built and deployed 2026-10-21 (`tools/model_cache.py`, `model-cache` in compose.yml). All three
+checks passed on lfm-2.5-8b; its cold load went from 46 s (SSD) to 4.1 s (NVMe copy). Differences from the design
+below: `restart: on-failure` and `init: true`, and `off` exits after cleaning up.
 
 **Goal:** loads of the models used most read from the NVMe (several GB/s) instead of the SATA RAID
 (100–500 MB/s), with no maintenance and without filling the NVMe.

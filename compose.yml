@@ -27,6 +27,8 @@ services:
     volumes:
       - llama-cpp_data:/root/.cache/huggingface
       - ./llama-cpp/models.ini:/models.ini
+      # NVMe copies of the models loaded most (model-cache); same path everywhere
+      - /opt/cortex-models:/opt/cortex-models:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
     ulimits:
@@ -73,6 +75,7 @@ services:
       # the same HF cache as llama-cpp: one download serves both backends
       - llama-cpp_data:/root/.cache/huggingface
       - ./prism-llama-cpp/models.ini:/models.ini
+      - /opt/cortex-models:/opt/cortex-models:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
     ulimits:
@@ -144,6 +147,27 @@ services:
     networks:
       - cortex_network
       - enhasa_network
+
+  # Keeps an NVMe copy of the GGUFs loaded most and serves them from there by
+  # repointing their HF snapshot links (tools/model_cache.py). The SSD copy is
+  # never touched. off: links back to the SSD, copies deleted, the service exits.
+  model-cache:
+    image: python:3.12-slim
+    restart: on-failure
+    init: true
+    command: ["python", "-u", "/model_cache.py"]
+    networks:
+      - cortex_network
+    volumes:
+      - ./tools/model_cache.py:/model_cache.py:ro
+      - llama-cpp_data:/root/.cache/huggingface
+      - /opt/cortex-models:/opt/cortex-models
+    environment:
+      - CORTEX_NVME_CACHE=on              # on | off
+      - CORTEX_NVME_CACHE_GB=64           # size cap for the NVMe copies
+      - CORTEX_NVME_CACHE_LOADS=3         # copy a model on its Nth load ...
+      - CORTEX_NVME_CACHE_DAYS=7          # ... within this many days
+      - CORTEX_NVME_CACHE_DIR=/opt/cortex-models
 
 volumes:
   ollama_data:

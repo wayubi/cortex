@@ -13,6 +13,7 @@ Cortex runs four services in a shared Docker network. An `openresty` reverse pro
 | **llama-cpp** | 8080 | upstream llama.cpp, router mode (`llama-cpp/models.ini`) |
 | **prism-llama-cpp** | 8080 | PrismML's llama.cpp fork, router mode, for the ternary Bonsai models (`prism-llama-cpp/models.ini`) |
 | **nllb** | 5002 | Hugging Face NLLB translation (FastAPI) |
+| **model-cache** | — | Keeps NVMe copies of the models loaded most (not in the request path) |
 
 `:8080` serves both llama.cpp routers: a request for a model named in `prism-llama-cpp/models.ini` goes to the fork, everything else to llama-cpp, and `GET /v1/models` lists both. Model names are unique across the two files.
 
@@ -33,6 +34,10 @@ When a switch is needed:
 No containers are stopped or started — only the loaded model is evicted from VRAM.
 
 Only one switch runs at a time, and a request is counted in flight only once it is admitted. Requests marked `X-Cortex-Client: bot` yield to people: while a human request is waiting, new bot requests are held, and a bot request that would evict the resident model waits until no human request has finished for 120s (`openresty/cortex.lua`). `GET /availability`, on every port, reports whether the stack is busy, how long it has been idle and which model is resident, so a scheduler can wait for a quiet GPU instead of forcing a switch.
+
+### NVMe model cache
+
+The `model-cache` service keeps an NVMe copy (in `/opt/cortex-models`) of each model loaded three times within seven days, up to 64 GB, evicting the least recently loaded, and serves loads from it by repointing the model's Hugging Face snapshot link. The copy on the model disk is never touched. Settings and an on/off switch are in its `environment:` in `compose.yml`; `off` restores every link and deletes the copies. Details in `AGENTS.md`.
 
 ## Requirements
 
@@ -89,9 +94,10 @@ The benchmarking pipeline is a single script: `tools/bench.sh`. It finds and val
 ./tools/bench.sh mtpab <heads...>         # MTP on/off A/B on an already-tuned entry, then bench
 ./tools/bench.sh ctxmax <model>           # largest GPU-resident ctx → new entry
 ./tools/bench.sh vision <models...>       # add <model>-vision when the repo ships an mmproj
+./tools/bench.sh fetch <models...>        # download an entry's files (the routers run offline)
 ```
 
-The model names choose the backend (`llama-cpp` or `prism-llama-cpp`); `--backend=<name>` forces one.
+The routers run with `offline = true`, so a load never waits on Hugging Face; `fetch` (and the suite, when weights are missing) downloads through a one-off online load. The model names choose the backend (`llama-cpp` or `prism-llama-cpp`); `--backend=<name>` forces one.
 
 Global flags go before the subcommand:
 
@@ -176,6 +182,7 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 ├── tools/
 │   ├── bench.sh              # canonical pipeline: mtpcheck → bisect → mtp → bench
 │   ├── gen_metrics.sh        # regenerate full-metrics.md from <backend>/models/*.json
+│   ├── model_cache.py        # model-cache service: NVMe copies of the models loaded most
 │   ├── test_coordinator.py   # offline test of the human/bot policy (docker, no GPU)
 │   └── coord_mock.py         # stand-in for all three backends, used by that test
 ├── llama-cpp/
