@@ -4,8 +4,9 @@
   "batch": 4352,
   "ubatch": 4352,
   "placement": "CPU",
-  "bench_date": "2026-09-09T18:27:08.502933",
+  "bench_date": "2026-10-21T09:40:27.088185",
   "bench_method": "bench_model.sh v2",
+  "backend": "llama-cpp",
   "config": {
     "temp": "0.6",
     "top_k": "20",
@@ -28,233 +29,79 @@
     "prefill_prompt_tokens": 196608,
     "decode_prompt_tokens": 108,
     "model_file_size_gb": 21.28,
-    "build_info": "b1-3737e41",
-    "wall_time_s": 138
+    "build_info": "llama-cpp 0.3.0-dev (build 1, commit 3737e41)",
+    "wall_time_s": 108
   },
   "speed": {
-    "prefill_t_s": 739.34,
-    "prefill_ms": 260157.68,
-    "prefill_ms_per_tok": 1.3526,
-    "decode_t_s": 30.46,
-    "decode_ms": 131301.78,
-    "decode_ms_per_tok": 32.8337
+    "prefill_t_s": 831.67,
+    "prefill_ms": 231277.0,
+    "prefill_ms_per_tok": 1.2024,
+    "decode_t_s": 36.66,
+    "decode_ms": 103761.88,
+    "decode_ms_per_tok": 27.277
   },
   "request": {
     "prefill_prompt_tokens": 192346,
     "decode_prompt_tokens": 108,
     "max_tokens": 4000,
-    "completion_tokens": 4000,
-    "total_tokens": 4108,
+    "completion_tokens": 3805,
+    "total_tokens": 3913,
     "cached_tokens": 0,
     "cache_n": 0,
-    "predicted_n": 4000,
-    "finish_reason": "length",
-    "truncated": true,
+    "predicted_n": 3805,
+    "finish_reason": "stop",
+    "truncated": false,
     "degeneracy": 0.0
   },
   "mtp": {
-    "acceptance": 0.76434,
-    "draft_accepted": 2066,
-    "draft_generated": 2703,
-    "draft_mean_len": 2.31,
-    "n_max_loaded": 2,
-    "p_min_loaded": 0.5,
+    "acceptance": null,
+    "draft_accepted": null,
+    "draft_generated": null,
+    "draft_mean_len": null,
+    "n_max_loaded": null,
+    "p_min_loaded": null,
     "tuning_status": "ok",
-    "tuning_reason": null,
+    "tuning_reason": "A/B only: n_max/p_min from the existing tune",
     "tuned_n_max": 2,
     "tuned_p_min": 0.5,
     "placement_baseline": "CPU",
-    "tuning_samples": [
-      {
-        "n_max": 2,
-        "p_min": 0.7,
-        "tps": 31.0,
-        "tokens": 3944,
-        "placement": "CPU",
-        "accept": 0.8955,
-        "degeneracy": 0.0,
-        "oom": 0,
-        "mean_draft_len": 2.36
-      },
-      {
-        "n_max": 3,
-        "p_min": 0.7,
-        "tps": 23.9,
-        "tokens": 3408,
-        "placement": "CPU",
-        "accept": 0.86778,
-        "degeneracy": 0.0,
-        "oom": 0,
-        "mean_draft_len": 2.51
-      },
-      {
-        "n_max": 4,
-        "p_min": 0.7,
-        "tps": 26.4,
-        "tokens": 3904,
-        "placement": "CPU",
-        "accept": 0.85515,
-        "degeneracy": 0.0,
-        "oom": 0,
-        "mean_draft_len": 2.6
-      },
-      {
-        "n_max": 4,
-        "p_min": 0.7,
-        "tps": 27.4,
-        "tokens": 3370,
-        "placement": "CPU",
-        "accept": 0.84754,
-        "degeneracy": 0.0,
-        "oom": 0,
-        "mean_draft_len": 2.6
-      },
-      {
-        "n_max": 2,
-        "p_min": 0.7,
-        "tps": 30.0,
-        "tokens": 4000,
-        "placement": "CPU",
-        "accept": 0.88252,
-        "degeneracy": 0.0013,
-        "oom": 0,
-        "mean_draft_len": 2.36
-      },
-      {
-        "n_max": 2,
-        "p_min": 0.5,
-        "tps": 32.8,
-        "tokens": 3776,
-        "placement": "CPU",
-        "accept": 0.78087,
-        "degeneracy": 0.0,
-        "oom": 0,
-        "mean_draft_len": 2.34
-      },
-      {
-        "n_max": 2,
-        "p_min": 0.9,
-        "tps": 27.5,
-        "tokens": 4000,
-        "placement": "CPU",
-        "accept": 0.97391,
-        "degeneracy": 0.0007,
-        "oom": 0,
-        "mean_draft_len": 2.32
-      },
-      {
-        "n_max": 2,
-        "p_min": 0.5,
-        "tps": 30.9,
-        "tokens": 4000,
-        "placement": "CPU",
-        "accept": 0.77957,
-        "degeneracy": 0.002,
-        "oom": 0,
-        "mean_draft_len": 2.34
-      }
-    ],
-    "tuning_written_at": "2026-09-09T18:19:40.160584",
-    "configured_n_max": 2,
-    "configured_p_min": 0.5,
-    "drafter": "in-model"
+    "tuning_samples": [],
+    "tuning_written_at": "2026-10-21T09:34:09.892969",
+    "ab": {
+      "decision": "off",
+      "on_tps": 33.5,
+      "off_tps": 36.9,
+      "speedup": 0.9079,
+      "tie": 0.02,
+      "clear": 0.05,
+      "rounds": 1,
+      "on_source": "measured",
+      "samples": [
+        {
+          "side": "on",
+          "tps": 33.5,
+          "tokens": 4000,
+          "placement": "CPU",
+          "oom": 0,
+          "accept": 0.77538,
+          "source": "ab"
+        },
+        {
+          "side": "off",
+          "tps": 36.9,
+          "tokens": 3117,
+          "placement": "CPU",
+          "oom": 0,
+          "accept": null,
+          "source": "ab"
+        }
+      ]
+    },
+    "configured_n_max": null,
+    "configured_p_min": null,
+    "drafter": "none"
   },
-  "discover": {
-    "mode": "CPU",
-    "refine_mode": "64",
-    "ladder": [
-      {
-        "batch": 256,
-        "status": "PASS",
-        "prefill": 335.3
-      },
-      {
-        "batch": 512,
-        "status": "PASS",
-        "prefill": 523.42
-      },
-      {
-        "batch": 1024,
-        "status": "PASS",
-        "prefill": 774.41
-      },
-      {
-        "batch": 2048,
-        "status": "PASS",
-        "prefill": 1034.12
-      },
-      {
-        "batch": 4096,
-        "status": "PASS",
-        "prefill": 1220.63
-      },
-      {
-        "batch": 8192,
-        "status": "PASS",
-        "prefill": 809.35
-      },
-      {
-        "batch": 16384,
-        "status": "OOM",
-        "prefill": null
-      },
-      {
-        "batch": 4352,
-        "status": "REFINE",
-        "prefill": 1224.53
-      },
-      {
-        "batch": 5824,
-        "status": "REFINE",
-        "prefill": 963.46
-      },
-      {
-        "batch": 3456,
-        "status": "REFINE",
-        "prefill": 1165.28
-      },
-      {
-        "batch": 4864,
-        "status": "REFINE",
-        "prefill": 1097.75
-      },
-      {
-        "batch": 3968,
-        "status": "FAIL",
-        "prefill": null
-      },
-      {
-        "batch": 3648,
-        "status": "REFINE",
-        "prefill": 1140.71
-      },
-      {
-        "batch": 3712,
-        "status": "REFINE",
-        "prefill": 1171.64
-      },
-      {
-        "batch": 3840,
-        "status": "REFINE",
-        "prefill": 1165.11
-      }
-    ],
-    "best_prefill": 1220.63,
-    "pick": 4352,
-    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
-    "refine_points": [
-      3456,
-      3648,
-      3712,
-      3840,
-      4352,
-      4864,
-      5824
-    ],
-    "ceiling_coarse": "8192 PASS / 16384 OOM",
-    "ladder_break": "1",
-    "written_at": "2026-09-09T17:55:52.846279"
-  },
+  "discover": {},
   "hardware": {
     "gpu": {
       "name": "NVIDIA GeForce RTX 3060",
@@ -279,24 +126,24 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 1638.0,
-      "avg_gpu_util_pct": 25.5,
-      "avg_gpu_mem_util_pct": 20.0,
-      "cpu_stddev_pct": 159.7,
-      "peak_vram_mib": 10877,
-      "peak_power_w": 73.97,
-      "peak_temp_c": 59,
-      "peak_clocks_sm_mhz": 1957,
+      "avg_cpu_pct": 1720.7,
+      "avg_gpu_util_pct": 40.0,
+      "avg_gpu_mem_util_pct": 32.7,
+      "cpu_stddev_pct": 290.6,
+      "peak_vram_mib": 10971,
+      "peak_power_w": 94.64,
+      "peak_temp_c": 61,
+      "peak_clocks_sm_mhz": 1965,
       "peak_clocks_mem_mhz": 7301,
-      "final_vram_mib": 10877,
-      "final_temp_c": 48,
-      "final_power_w": 39.53,
-      "ram_used_mib": 76916,
-      "rss_mib": 26950,
-      "sample_count": 56
+      "final_vram_mib": 10971,
+      "final_temp_c": 51,
+      "final_power_w": 41.28,
+      "ram_used_mib": 43972,
+      "rss_mib": 19872,
+      "sample_count": 45
     }
   },
   "propagated": true,
   "propagated_from": "qwen-3.6-35b-a3b-q4-mtp-256k",
-  "propagated_date": "2026-09-09T18:33:36.936116"
+  "propagated_date": "2026-10-21T09:40:27.164911"
 }
