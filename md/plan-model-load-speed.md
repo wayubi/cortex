@@ -2,7 +2,9 @@
 
 **Date:** 2026-10-21
 **Status:** Option 1 applied 2026-10-21 to both routers (`load-mode = mmap+mlock`); its decode/prefill
-re-bench (Option 1 step 5) is still pending a quiet window. Option 2: not pursued (see its section).
+re-bench (Option 1 step 5) was done the same day: on tiel q4 64k (CPU-resident) a same-session A/B gave prefill
+1418 t/s `no-mmap` vs ~1270 `mmap+mlock` (−10%) and decode 37.1 vs 38.7–40.6 t/s (+4–9%); GLM-4.7-Flash prefill −1%;
+gemma-12b (GPU) unchanged. Roughly even per request, so `mmap+mlock` is kept. Option 2: not pursued (see its section).
 Option 3: built and deployed 2026-10-21 (`model-cache`, see AGENTS.md). Option 4: out of scope (a host storage issue). Option 5: not pursued (no kernel rebuild).
 
 Option 1 load measurements (3 runs each; cold = the GGUF evicted from the page cache first):
