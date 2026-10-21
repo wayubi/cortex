@@ -3,7 +3,7 @@
 **Date:** 2026-10-21
 **Status:** Option 1 applied 2026-10-21 to both routers (`load-mode = mmap+mlock`); its decode/prefill
 re-bench (Option 1 step 5) is still pending a quiet window. Option 2: not pursued (see its section).
-Option 3: built and deployed 2026-10-21 (`model-cache`, see AGENTS.md). Options 4–5: plan only.
+Option 3: built and deployed 2026-10-21 (`model-cache`, see AGENTS.md). Option 4: out of scope (a host storage issue). Option 5: not pursued (no kernel rebuild).
 
 Option 1 load measurements (3 runs each; cold = the GGUF evicted from the page cache first):
 
@@ -276,6 +276,10 @@ Restore the link and delete the test copy afterwards.
 
 ## Option 4: Rewrite the models used most on the RAID periodically
 
+> **Out of scope for cortex (2026-10-21):** the slow reads of aged data are a property of the KingSpec P3 in
+> the `/mnt/md2` mirror and affect everything stored there, not only models. Treat it as host storage
+> maintenance. The models used most are already read from the NVMe (Option 3).
+
 **Goal:** bring reads of those models on the P3 back from ~100–120 MB/s to ~270 MB/s until the data
 ages again. This is a mitigation. It does not fix the drive.
 
@@ -302,6 +306,8 @@ drive, small against a 4 TB QLC drive's rated endurance. Check the actual rating
 ---
 
 ## Option 5: Read only from the fast drive (btrfs read policy)
+
+> **Not pursued (2026-10-21):** it needs a kernel built with `CONFIG_BTRFS_EXPERIMENTAL`, and the kernel will not be rebuilt.
 
 **Goal:** every cold read is served by the BX500 (~520 MB/s), whatever the data's age.
 
@@ -330,8 +336,8 @@ explicit go-ahead.
 | 1 | Option 1, mmap + mlock | cortex `[*]` | a quiet bench window |
 | 2 | Option 3, automatic NVMe copy | `compose.yml` service + mounts, `tools/model_cache.py` | the three checks to pass |
 | — | Option 2, one instance per family | — | not pursued |
-| 4 | Option 4, refresh timer | new tool + timer | only for models not moved to NVMe |
-| 5 | Option 5, read policy | kernel | the user's explicit decision |
+| — | Option 4, refresh timer | — | out of scope (host storage) |
+| — | Option 5, read policy | — | not pursued |
 
 Options 1 and 3 together cover most of the gain: warm reloads become near-instant, and cold loads of the
 models used most come from the NVMe. Option 2 removes loads rather than speeding them up, so its value
