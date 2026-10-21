@@ -15,5 +15,6 @@ __pycache__/
 tools/magnitude/
 tools/bonsai/
 
-# Per-user Claude Code settings
-.claude/settings.local.json
+# Per-user Claude Code and OpenCode settings
+.claude/
+.opencode/
