@@ -32,6 +32,8 @@ When a switch is needed:
 
 No containers are stopped or started — only the loaded model is evicted from VRAM.
 
+Only one switch runs at a time, and a request is counted in flight only once it is admitted. Requests marked `X-Cortex-Client: bot` yield to people: while a human request is waiting, new bot requests are held, and a bot request that would evict the resident model waits until no human request has finished for 120s (`openresty/cortex.lua`). `GET /availability`, on every port, reports whether the stack is busy, how long it has been idle and which model is resident, so a scheduler can wait for a quiet GPU instead of forcing a switch.
+
 ## Requirements
 
 - Docker Compose V2
@@ -84,7 +86,12 @@ The benchmarking pipeline is a single script: `tools/bench.sh`. It finds and val
 ./tools/bench.sh mtpcheck <model>         # MTP capability check only
 ./tools/bench.sh mtpverify <model>        # diagnostic: MTP-on vs off output check
 ./tools/bench.sh residency <model>        # fast GPU/CPU pre-check (no bench record)
+./tools/bench.sh mtpab <heads...>         # MTP on/off A/B on an already-tuned entry, then bench
+./tools/bench.sh ctxmax <model>           # largest GPU-resident ctx → new entry
+./tools/bench.sh vision <models...>       # add <model>-vision when the repo ships an mmproj
 ```
+
+The model names choose the backend (`llama-cpp` or `prism-llama-cpp`); `--backend=<name>` forces one.
 
 Global flags go before the subcommand:
 
@@ -125,15 +132,17 @@ Batch is a **prefill** knob. Single-stream decode does not change with batch unl
 
 `n_max` and `p_min` are **speed-only** knobs. llama.cpp's speculative decoding samples every position from the target model and keeps a draft token only when it matches, so the output distribution is unchanged. The tuner therefore ranks configurations on decode speed measured on natural-stop output, and the only hard rejections are OOM, a too-short sample, and — on GPU-resident models — a draft that spills to CPU. An 8-gram degeneracy ratio is recorded as a diagnostic and never gates anything. `bench.sh mtpverify` checks the speed-only claim empirically for a given model.
 
+Supporting MTP is not the same as gaining from it. After tuning, an **A/B** decodes with the tuned MTP config and with MTP off on the same entry, and MTP is kept only if it is more than 2% faster; a tie goes to off. On CPU-resident MoE models MTP usually loses, because verifying each drafted token reads extra expert weights over the RAM bus. When MTP is turned off and the batch was limited by memory, the bisect runs again without the draft buffer. The decision is recorded as `mtp.ab`. `-mtp` in an entry name marks an MTP-capable model, not whether MTP is enabled.
+
 ### Family inheritance
 
-Two entries are in the same family when they share both `hf` and `ctx-size`, so coder and think variants of the same weights and context inherit from one head. The head is benched; siblings copy its record in seconds and get their own `config` block rebuilt from their own models.ini section. Cost therefore scales with distinct weight-and-context combinations, not with the number of entries. A head whose bench fails does not feed its record to siblings; they are skipped and reported.
+Two entries are in the same family when they share `hf`, `ctx-size` and every other setting that can change memory or speed. Only sampling, reasoning and chat-template keys, plus the tuned batch and MTP values, may differ. So the plain, `-coder`, `-think` and `-think-coder` variants of one weights-and-context pair form one family, while a `-vision` entry (which loads the image projector) is its own head. The head (the family's first section in models.ini) is benched; siblings copy its record in seconds and get their own `config` block rebuilt from their own models.ini section. Cost therefore scales with distinct weight-and-context combinations, not with the number of entries. A head whose bench fails does not feed its record to siblings; they are skipped and reported.
 
 Rough per-head times on an RTX 3060: 5 to 10 minutes for a small GPU-resident model, 25 to 30 for a dense MTP head, and 40 to 100 for a large CPU-offloaded MoE at long context. Siblings are free.
 
 ### Results
 
-Results are written to `llama-cpp/models/<model>.json`, one file per model, with these top-level keys:
+Results are written to `<backend>/models/<model>.json` (`llama-cpp/models/` or `prism-llama-cpp/models/`), one file per model, with these top-level keys:
 
 | Key | Contents |
 |-----|----------|
@@ -141,17 +150,15 @@ Results are written to `llama-cpp/models/<model>.json`, one file per model, with
 | `bench` | Prompt sizes, model file size, build info, wall time |
 | `speed` | Prefill and decode throughput |
 | `request` | Token counts, finish reason, degeneracy |
-| `mtp` | Acceptance, loaded vs tuned values, `tuning_status`, every tuning sample |
+| `mtp` | Acceptance, loaded vs tuned values, `tuning_status`, every tuning sample, the on/off A/B (`ab`) |
 | `discover` | The full batch ladder, refinement points, pick and pick rule |
 | `hardware` | GPU, CPU, RAM, and the run's power, thermal and VRAM peaks |
 
 The consolidated table lives in `full-metrics.md`:
 
 ```bash
-./tools/gen_metrics.sh    # regenerates full-metrics.md from llama-cpp/models/*.json
+./tools/gen_metrics.sh    # regenerates full-metrics.md from both backends' models/*.json
 ```
-
-Current state: 71 of the 73 models.ini entries have a record.
 
 Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The design history and rationale behind the current pipeline: see `md/plan-bench-discover-mode.md`.
 
@@ -168,7 +175,9 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 ├── logs/                     # bench.sh run logs, one per invocation
 ├── tools/
 │   ├── bench.sh              # canonical pipeline: mtpcheck → bisect → mtp → bench
-│   └── gen_metrics.sh        # regenerate full-metrics.md from <backend>/models/*.json
+│   ├── gen_metrics.sh        # regenerate full-metrics.md from <backend>/models/*.json
+│   ├── test_coordinator.py   # offline test of the human/bot policy (docker, no GPU)
+│   └── coord_mock.py         # stand-in for all three backends, used by that test
 ├── llama-cpp/
 │   ├── models.ini            # llama.cpp model presets
 │   ├── models/               # per-model benchmark JSONs
@@ -184,12 +193,15 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 │   ├── Dockerfile
 │   ├── nginx.conf            # 3 server blocks + lua_shared_dict
 │   ├── coordinator.lua       # VRAM coordinator — API-based model unload, :8080 routing
+│   ├── cortex.lua            # human/bot policy and constants
+│   ├── availability.lua      # GET /availability on every port
+│   ├── log.lua               # log phase: releases in-flight counts, stamps idle times
 │   └── models_list.lua       # GET /v1/models on :8080 — both llama.cpp routers merged
-└── md/                       # planning and design docs
+└── md/                       # planning and design docs (each states its status at the top)
     ├── plan-bench-discover-mode.md   # current benchmarking pipeline: design, reviews, decisions
-    ├── plan-bench-sh-audit-fixes.md  # earlier bench.sh audit
-    ├── plan-batch-sweep.md           # earlier batch sweep design
-    └── nllb-translation-service.md
+    ├── plan-mtp-ab-decision.md       # MTP on/off A/B
+    ├── nllb-translation-service.md   # NLLB service usage
+    └── plan-*.md                     # earlier plans, kept as history
 ```
 
 ## Debugging

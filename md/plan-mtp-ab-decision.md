@@ -1,8 +1,8 @@
 # Plan: Decide MTP On/Off by Measurement (MTP A/B)
 
 **Date:** 2026-10-19
-**Status:** Implemented 2026-10-19 (`tools/bench.sh`, `tools/gen_metrics.sh`, `AGENTS.md`). Offline-tested
-(decision and re-bisect logic). Not yet run on the GPU.
+**Status:** Implemented 2026-10-19 (`tools/bench.sh`, `tools/gen_metrics.sh`, `AGENTS.md`). Run on the GPU
+for every CPU-resident MTP family head by 2026-10-21; all of them decided `off`.
 
 **Deviations from the plan as written:**
 1. **Renaming (Step 6) was withdrawn.** `-mtp` in a name marks an MTP-capable model, not MTP on.

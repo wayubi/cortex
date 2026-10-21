@@ -1,5 +1,9 @@
 # Plan: Add Gemma 4 QAT 12B (16K, think + non-think) + batch/ubatch & MTP tuning
 
+> **Historical.** How Gemma 4 QAT was first added (2026-09). Entry names, the `chat-template-kwargs` think toggle
+> and the hand-run tuning steps are superseded: the think toggle is `reasoning = on/off`, and tuning is `bench.sh`.
+> Current Gemma 4 notes are in `AGENTS.md`.
+
 ## Goal
 
 Add `unsloth/gemma-4-12B-it-qat-GGUF:UD-Q4_K_XL` (6.72 GB, dense 12B, hybrid attention) at 16K ctx in two entries — think and non-think — then optimize batch/ubatch and MTP (Gemma 4 ships a separate MTP drafter that "recent llama.cpp auto-discovers").

@@ -22,7 +22,7 @@ curl -X POST http://cortex-openresty-1:5002/v1/translate \
 # Translate English → French with a specific model
 curl -X POST http://cortex-openresty-1:5002/v1/translate \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hello, how are you?", "model": "facebook/nllb-200-distilled-600M", "tgt_lang": "fra_Latn"}'
+  -d '{"text": "Hello, how are you?", "model": "facebook/nllb-200-3.3B", "tgt_lang": "fra_Latn"}'
 ```
 
 ---
@@ -222,7 +222,7 @@ curl -X POST http://cortex-openresty-1:5002/v1/translate \
 # With specific model
 curl -X POST http://cortex-openresty-1:5002/v1/translate \
   -H "Content-Type: application/json" \
-  -d '{"text": "Good morning", "model": "facebook/nllb-200-distilled-600M", "tgt_lang": "deu_Latn"}'
+  -d '{"text": "Good morning", "model": "facebook/nllb-200-3.3B", "tgt_lang": "deu_Latn"}'
 
 # Pashto translation
 curl -X POST http://cortex-openresty-1:5002/v1/translate \

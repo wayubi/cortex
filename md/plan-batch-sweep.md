@@ -1,6 +1,10 @@
 # Plan: Batch sweep optimization for CPU-compute models
 
-## Status: 2026-09-02 — Implementation paused, pending live testing
+## Status: superseded (historical)
+
+Replaced on 2026-09-08 by discover mode (`md/plan-bench-discover-mode.md`). `cpu_saturation_sweep` survives
+only in the `--thorough` path. The "designed, not yet implemented" items 9 and 10 became family inheritance
+(`inherit_json`, `maybe_inherit`). Originally: 2026-09-02, implementation paused pending live testing.
 
 ## Context
 

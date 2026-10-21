@@ -1,5 +1,8 @@
 # Plan: Add Phase-2 saturation test to batch/ubatch stress procedure
 
+> **Historical.** The saturation test it proposes is now automated as `saturation_test` in `bench.sh`, at ~99% of ctx
+> rather than ~90%. The hand-run steps below are superseded; see `AGENTS.md` ("Safety gates").
+
 ## Context
 
 The current proven stress-test procedure in `AGENTS.md` (lines 47-68) validates a batch/ubatch value with a **tiny 20-token request**. That only proves the compute graph fits at near-empty context. With `-fit on` leaving ~zero VRAM headroom, the real memory peak is near full context (KV compaction temp buffers, hybrid/SSM state re-derivation) — a value can survive the 20-token probe and still OOM at ~16K once compaction triggers.

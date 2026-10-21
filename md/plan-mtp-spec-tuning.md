@@ -1,5 +1,9 @@
 # Plan: Benchmark MTP spec-decoding params on qwen3.5-9b-mtp-16k
 
+> **Historical — do not follow.** This first MTP tuning method forced output past EOS (`ignore_eos`) and graded
+> quality by reading it. Forced output loops, and looping inflates draft acceptance and t/s, so it ranked broken
+> runs fastest. `n_max`/`p_min` are speed-only knobs. The current method is `cmd_mtp_discover`; see `AGENTS.md`.
+
 ## Goal
 
 Tune `spec-draft-n-max` and `spec-draft-p-min` (MTP speculative decoding) on `qwen3.5-9b-mtp-16k` (non-think, 16K ctx) to maximize decode t/s without degrading output quality. Baseline: `n-max = 2`, `p-min = 0.7`.

@@ -64,7 +64,6 @@ If adding a new backend, update:
 │   ├── entrypoint.sh
 │   └── server.py           # HF translation (NLLB) FastAPI service
 ├── md/                     # internal planning docs
-├── .opencode/              # opencode config
 └── openresty/
     ├── Dockerfile           # FROM openresty/openresty:bookworm-fat, sed patches error_log
     ├── nginx.conf           # lua_shared_dict directives, 3 server blocks (11434/5002/8080)

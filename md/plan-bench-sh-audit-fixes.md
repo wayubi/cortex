@@ -1,5 +1,8 @@
 # `bench.sh` — Code Audit & Handoff Notes
 
+> **Historical.** An audit of `bench.sh` before discover mode (2026-09). Several functions it covers are gone
+> (`bracketed_halve_down`) or live only in the `--thorough` path. See `AGENTS.md` for the current pipeline.
+
 **Scope:** full read-through of the benchmarking pipeline (`mtpcheck` → `bisect` → `mtp` → `bench`, plus the full-suite orchestrator and inheritance logic).
 **Goal of this doc:** give a follow-up agent a prioritized, actionable list of bugs, dead code, and performance opportunities. Function names are used as anchors since the source has no stable line numbers.
 

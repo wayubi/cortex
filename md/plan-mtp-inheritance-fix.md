@@ -1,7 +1,8 @@
 # Fix: MTP Settings Don't Actually Inherit From Parent to Sibling Models
 
 **Date:** 2026-09-10
-**Status:** Plan only — not yet implemented.
+**Status:** Implemented 2026-09-10 (`652262b`): `inherit_json` now writes `spec-type`, `spec-draft-n-max` and
+`spec-draft-p-min` to the sibling. Since 2026-10-19 a parent whose MTP A/B decided `off` removes them instead.
 
 ## Context
 
