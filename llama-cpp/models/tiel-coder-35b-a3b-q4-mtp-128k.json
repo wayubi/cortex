@@ -1,57 +1,57 @@
 {
-  "model": "qwen-3.6-35b-a3b-q4-mtp-16k-think",
-  "ctx": 16384,
-  "batch": 12736,
-  "ubatch": 12736,
+  "model": "tiel-coder-35b-a3b-q4-mtp-128k",
+  "ctx": 131072,
+  "batch": 5824,
+  "ubatch": 5824,
   "placement": "CPU",
-  "bench_date": "2026-10-20T19:05:27.335074",
+  "bench_date": "2026-10-20T11:24:40.006033",
   "bench_method": "bench_model.sh v2",
   "backend": "llama-cpp",
   "config": {
     "temp": "0.6",
     "top_k": "20",
     "top_p": "0.95",
-    "min_p": "0.00",
+    "min_p": null,
     "repeat_penalty": "1.0",
     "threads": "20",
     "threads_batch": "20",
     "cache_type_k": "q4_0",
     "cache_type_v": "q4_0",
     "ngl": "-1",
-    "hf": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL",
+    "hf": "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP:UD-Q4_K_XL",
     "quant": "UD-Q4_K_XL",
-    "reasoning": "on",
-    "ctx": "16384",
-    "batch": "12736"
+    "reasoning": "off",
+    "ctx": "131072",
+    "batch": "5824"
   },
   "bench": {
     "max_tokens": 4000,
-    "prefill_prompt_tokens": 12288,
-    "decode_prompt_tokens": 108,
-    "model_file_size_gb": 21.28,
+    "prefill_prompt_tokens": 98304,
+    "decode_prompt_tokens": 285,
+    "model_file_size_gb": 21.66,
     "build_info": "llama-cpp 0.3.0-dev (build 1, commit 3737e41)",
-    "wall_time_s": 103
+    "wall_time_s": 133
   },
   "speed": {
-    "prefill_t_s": 1609.05,
-    "prefill_ms": 7478.32,
-    "prefill_ms_per_tok": 0.6215,
-    "decode_t_s": 38.85,
-    "decode_ms": 99544.57,
-    "decode_ms_per_tok": 25.7421
+    "prefill_t_s": 1251.26,
+    "prefill_ms": 52269.65,
+    "prefill_ms_per_tok": 0.7992,
+    "decode_t_s": 31.09,
+    "decode_ms": 128631.58,
+    "decode_ms_per_tok": 32.1659
   },
   "request": {
-    "prefill_prompt_tokens": 12033,
-    "decode_prompt_tokens": 108,
+    "prefill_prompt_tokens": 65582,
+    "decode_prompt_tokens": 285,
     "max_tokens": 4000,
-    "completion_tokens": 3868,
-    "total_tokens": 3976,
-    "cached_tokens": 0,
-    "cache_n": 0,
-    "predicted_n": 3868,
-    "finish_reason": "stop",
-    "truncated": false,
-    "degeneracy": 0.0007
+    "completion_tokens": 4000,
+    "total_tokens": 4285,
+    "cached_tokens": 179,
+    "cache_n": 179,
+    "predicted_n": 4000,
+    "finish_reason": "length",
+    "truncated": true,
+    "degeneracy": 0.0
   },
   "mtp": {
     "acceptance": null,
@@ -62,52 +62,34 @@
     "p_min_loaded": null,
     "tuning_status": "ok",
     "tuning_reason": "A/B only: n_max/p_min from the existing tune",
-    "tuned_n_max": 2,
-    "tuned_p_min": 0.5,
+    "tuned_n_max": 3,
+    "tuned_p_min": 0.7,
     "placement_baseline": "CPU",
     "tuning_samples": [],
-    "tuning_written_at": "2026-10-20T19:03:09.534161",
+    "tuning_written_at": "2026-10-20T11:20:45.681240",
     "ab": {
       "decision": "off",
-      "on_tps": 36.95,
-      "off_tps": 39.3,
-      "speedup": 0.9402,
+      "on_tps": 23.1,
+      "off_tps": 28.3,
+      "speedup": 0.8163,
       "tie": 0.02,
       "clear": 0.05,
-      "rounds": 2,
+      "rounds": 1,
       "on_source": "measured",
       "samples": [
         {
           "side": "on",
-          "tps": 38.6,
+          "tps": 23.1,
           "tokens": 4000,
           "placement": "CPU",
           "oom": 0,
-          "accept": 0.7892,
+          "accept": 0.76619,
           "source": "ab"
         },
         {
           "side": "off",
-          "tps": 39.6,
+          "tps": 28.3,
           "tokens": 4000,
-          "placement": "CPU",
-          "oom": 0,
-          "accept": null,
-          "source": "ab"
-        },
-        {
-          "side": "on",
-          "tps": 35.3,
-          "tokens": 3696,
-          "placement": "CPU",
-          "oom": 0,
-          "accept": 0.77262,
-          "source": "ab"
-        },
-        {
-          "side": "off",
-          "tps": 39.0,
-          "tokens": 3932,
           "placement": "CPU",
           "oom": 0,
           "accept": null,
@@ -126,113 +108,131 @@
       {
         "batch": 256,
         "status": "PASS",
-        "prefill": 370.36
+        "prefill": 341.52
       },
       {
         "batch": 512,
         "status": "PASS",
-        "prefill": 566.64
+        "prefill": 520.92
       },
       {
         "batch": 1024,
         "status": "PASS",
-        "prefill": 836.93
+        "prefill": 755.88
       },
       {
         "batch": 2048,
         "status": "PASS",
-        "prefill": 1112.11
+        "prefill": 969.17
       },
       {
         "batch": 4096,
         "status": "PASS",
-        "prefill": 1315.98
+        "prefill": 1131.66
       },
       {
         "batch": 8192,
         "status": "PASS",
-        "prefill": 1360.63
+        "prefill": 1151.38
       },
       {
         "batch": 16384,
-        "status": "PASS",
-        "prefill": 1373.02
+        "status": "OOM",
+        "prefill": null
       },
       {
-        "batch": 11264,
+        "batch": 8768,
         "status": "REFINE",
-        "prefill": 1303.88
+        "prefill": 1098.38
       },
       {
-        "batch": 13248,
+        "batch": 11648,
         "status": "REFINE",
-        "prefill": 1351.18
+        "prefill": 925.94
       },
       {
-        "batch": 13184,
+        "batch": 6976,
         "status": "REFINE",
-        "prefill": 1393.19
+        "prefill": 1171.56
       },
       {
-        "batch": 14400,
+        "batch": 8704,
         "status": "REFINE",
-        "prefill": 1361.74
+        "prefill": 1123.63
       },
       {
-        "batch": 12416,
+        "batch": 5824,
         "status": "REFINE",
-        "prefill": 1394.12
+        "prefill": 1183.46
       },
       {
-        "batch": 11968,
+        "batch": 6912,
         "status": "REFINE",
-        "prefill": 1305.51
+        "prefill": 1156.79
       },
       {
-        "batch": 12672,
+        "batch": 5120,
         "status": "REFINE",
-        "prefill": 1394.67
+        "prefill": 1107.18
       },
       {
-        "batch": 12864,
+        "batch": 5760,
         "status": "REFINE",
-        "prefill": 1390.11
+        "prefill": 1170.28
       },
       {
-        "batch": 12544,
+        "batch": 6208,
         "status": "REFINE",
-        "prefill": 1372.85
+        "prefill": 1174.2
       },
       {
-        "batch": 12608,
+        "batch": 6144,
         "status": "REFINE",
-        "prefill": 1390.89
+        "prefill": 1180.22
       },
       {
-        "batch": 12736,
+        "batch": 6464,
         "status": "REFINE",
-        "prefill": 1403.52
+        "prefill": 1170.44
+      },
+      {
+        "batch": 6016,
+        "status": "REFINE",
+        "prefill": 1175.93
+      },
+      {
+        "batch": 6272,
+        "status": "REFINE",
+        "prefill": 1178.26
+      },
+      {
+        "batch": 6080,
+        "status": "REFINE",
+        "prefill": 1180.15
       }
     ],
-    "best_prefill": 1373.02,
-    "pick": 12736,
+    "best_prefill": 1151.38,
+    "pick": 5824,
     "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
     "refine_points": [
-      11264,
-      11968,
-      12416,
-      12544,
-      12608,
-      12672,
-      12736,
-      12864,
-      13184,
-      13248,
-      14400
+      5120,
+      5760,
+      5824,
+      6016,
+      6080,
+      6144,
+      6208,
+      6272,
+      6464,
+      6912,
+      6976,
+      8704,
+      8768,
+      11648
     ],
-    "ceiling_coarse": "16384 PASS (not probed higher)",
-    "ladder_break": "0",
-    "written_at": "2026-09-09T12:21:39.905106"
+    "ceiling_coarse": "8192 PASS / 16384 OOM",
+    "ladder_break": "1",
+    "written_at": "2026-09-10T06:59:57.923829"
   },
   "hardware": {
     "gpu": {
@@ -258,24 +258,24 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 1622.3,
-      "avg_gpu_util_pct": 42.3,
-      "avg_gpu_mem_util_pct": 35.1,
-      "cpu_stddev_pct": 333.9,
-      "peak_vram_mib": 10995,
-      "peak_power_w": 97.34,
-      "peak_temp_c": 55,
+      "avg_cpu_pct": 1559.3,
+      "avg_gpu_util_pct": 31.9,
+      "avg_gpu_mem_util_pct": 27.1,
+      "cpu_stddev_pct": 128.7,
+      "peak_vram_mib": 10957,
+      "peak_power_w": 82.2,
+      "peak_temp_c": 57,
       "peak_clocks_sm_mhz": 1965,
       "peak_clocks_mem_mhz": 7301,
-      "final_vram_mib": 10995,
-      "final_temp_c": 52,
-      "final_power_w": 46.07,
-      "ram_used_mib": 37899,
-      "rss_mib": 15431,
-      "sample_count": 43
+      "final_vram_mib": 10957,
+      "final_temp_c": 47,
+      "final_power_w": 40.65,
+      "ram_used_mib": 47221,
+      "rss_mib": 17398,
+      "sample_count": 35
     }
   },
   "propagated": true,
-  "propagated_from": "qwen-3.6-35b-a3b-q4-mtp-16k",
-  "propagated_date": "2026-10-20T19:05:27.414044"
+  "propagated_from": "tiel-coder-35b-a3b-q4-mtp-128k-think",
+  "propagated_date": "2026-10-21T12:17:17.417481"
 }

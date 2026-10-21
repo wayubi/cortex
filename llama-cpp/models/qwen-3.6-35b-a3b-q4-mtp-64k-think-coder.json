@@ -1,16 +1,16 @@
 {
-  "model": "qwen-3.6-35b-a3b-q4-mtp-8k",
-  "ctx": 8192,
-  "batch": 3584,
-  "ubatch": 3584,
+  "model": "qwen-3.6-35b-a3b-q4-mtp-64k-think-coder",
+  "ctx": 65536,
+  "batch": 5568,
+  "ubatch": 5568,
   "placement": "CPU",
-  "bench_date": "2026-10-20T18:54:23.540027",
+  "bench_date": "2026-10-20T19:23:00.874278",
   "bench_method": "bench_model.sh v2",
   "backend": "llama-cpp",
   "config": {
-    "temp": "0.7",
+    "temp": "0.6",
     "top_k": "20",
-    "top_p": "0.8",
+    "top_p": "0.95",
     "min_p": "0.00",
     "repeat_penalty": "1.0",
     "threads": "20",
@@ -20,28 +20,28 @@
     "ngl": "-1",
     "hf": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL",
     "quant": "UD-Q4_K_XL",
-    "reasoning": "off",
-    "ctx": "8192",
-    "batch": "3584"
+    "reasoning": "on",
+    "ctx": "65536",
+    "batch": "5568"
   },
   "bench": {
     "max_tokens": 4000,
-    "prefill_prompt_tokens": 6144,
+    "prefill_prompt_tokens": 49152,
     "decode_prompt_tokens": 108,
     "model_file_size_gb": 21.28,
     "build_info": "llama-cpp 0.3.0-dev (build 1, commit 3737e41)",
-    "wall_time_s": 98
+    "wall_time_s": 105
   },
   "speed": {
-    "prefill_t_s": 1348.22,
-    "prefill_ms": 4467.38,
-    "prefill_ms_per_tok": 0.7417,
-    "decode_t_s": 41.66,
-    "decode_ms": 95985.54,
-    "decode_ms_per_tok": 24.0024
+    "prefill_t_s": 1328.97,
+    "prefill_ms": 36189.67,
+    "prefill_ms_per_tok": 0.7525,
+    "decode_t_s": 38.75,
+    "decode_ms": 103190.09,
+    "decode_ms_per_tok": 25.804
   },
   "request": {
-    "prefill_prompt_tokens": 6023,
+    "prefill_prompt_tokens": 48095,
     "decode_prompt_tokens": 108,
     "max_tokens": 4000,
     "completion_tokens": 4000,
@@ -62,16 +62,16 @@
     "p_min_loaded": null,
     "tuning_status": "ok",
     "tuning_reason": "A/B only: n_max/p_min from the existing tune",
-    "tuned_n_max": 2,
+    "tuned_n_max": 3,
     "tuned_p_min": 0.7,
     "placement_baseline": "CPU",
     "tuning_samples": [],
-    "tuning_written_at": "2026-10-20T18:40:02.159091",
+    "tuning_written_at": "2026-10-20T19:20:12.071800",
     "ab": {
       "decision": "off",
-      "on_tps": 39.0,
-      "off_tps": 38.65,
-      "speedup": 1.0091,
+      "on_tps": 38.15,
+      "off_tps": 38.75,
+      "speedup": 0.9845,
       "tie": 0.02,
       "clear": 0.05,
       "rounds": 2,
@@ -79,17 +79,17 @@
       "samples": [
         {
           "side": "on",
-          "tps": 38.7,
-          "tokens": 4000,
+          "tps": 38.3,
+          "tokens": 3801,
           "placement": "CPU",
           "oom": 0,
-          "accept": 0.88718,
+          "accept": 0.8615,
           "source": "ab"
         },
         {
           "side": "off",
           "tps": 37.6,
-          "tokens": 3894,
+          "tokens": 3917,
           "placement": "CPU",
           "oom": 0,
           "accept": null,
@@ -97,17 +97,17 @@
         },
         {
           "side": "on",
-          "tps": 39.3,
-          "tokens": 4000,
+          "tps": 38.0,
+          "tokens": 3522,
           "placement": "CPU",
           "oom": 0,
-          "accept": 0.89281,
+          "accept": 0.87739,
           "source": "ab"
         },
         {
           "side": "off",
-          "tps": 39.7,
-          "tokens": 3283,
+          "tps": 39.9,
+          "tokens": 3386,
           "placement": "CPU",
           "oom": 0,
           "accept": null,
@@ -126,85 +126,107 @@
       {
         "batch": 256,
         "status": "PASS",
-        "prefill": 376.3
+        "prefill": 363.1
       },
       {
         "batch": 512,
         "status": "PASS",
-        "prefill": 580.18
+        "prefill": 562.56
       },
       {
         "batch": 1024,
         "status": "PASS",
-        "prefill": 866.85
+        "prefill": 830.11
       },
       {
         "batch": 2048,
         "status": "PASS",
-        "prefill": 1168.14
+        "prefill": 1100.47
       },
       {
         "batch": 4096,
-        "status": "OOM",
-        "prefill": null
+        "status": "PASS",
+        "prefill": 1297.52
       },
       {
-        "batch": 2176,
-        "status": "REFINE",
-        "prefill": 1183.51
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 1293.23
       },
       {
-        "batch": 2880,
-        "status": "REFINE",
-        "prefill": 1188.18
+        "batch": 16384,
+        "status": "PASS",
+        "prefill": 1117.99
       },
       {
-        "batch": 3328,
+        "batch": 4352,
         "status": "REFINE",
-        "prefill": 1331.46
+        "prefill": 1293.82
       },
       {
-        "batch": 3584,
+        "batch": 5824,
         "status": "REFINE",
-        "prefill": 1335.55
+        "prefill": 1347.86
       },
       {
-        "batch": 3776,
+        "batch": 5760,
         "status": "REFINE",
-        "prefill": 1332.98
+        "prefill": 1350.08
       },
       {
-        "batch": 3456,
+        "batch": 6720,
         "status": "REFINE",
-        "prefill": 1326.4
+        "prefill": 1321.19
       },
       {
-        "batch": 3520,
+        "batch": 5248,
         "status": "REFINE",
-        "prefill": 1326.2
+        "prefill": 1289.42
       },
       {
-        "batch": 3648,
+        "batch": 6144,
         "status": "REFINE",
-        "prefill": 1331.03
+        "prefill": 1346.36
+      },
+      {
+        "batch": 5568,
+        "status": "REFINE",
+        "prefill": 1355.82
+      },
+      {
+        "batch": 5440,
+        "status": "REFINE",
+        "prefill": 1324.31
+      },
+      {
+        "batch": 5504,
+        "status": "REFINE",
+        "prefill": 1341.93
+      },
+      {
+        "batch": 5632,
+        "status": "REFINE",
+        "prefill": 1339.41
       }
     ],
-    "best_prefill": 1168.14,
-    "pick": 3584,
+    "best_prefill": 1297.52,
+    "pick": 5568,
     "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
     "refine_points": [
-      2176,
-      2880,
-      3328,
-      3456,
-      3520,
-      3584,
-      3648,
-      3776
+      4352,
+      5248,
+      5440,
+      5504,
+      5568,
+      5632,
+      5760,
+      5824,
+      6144,
+      6720
     ],
-    "ceiling_coarse": "2048 PASS / 4096 OOM",
-    "ladder_break": "1",
-    "written_at": "2026-10-20T18:52:16.688085"
+    "ceiling_coarse": "16384 PASS (not probed higher)",
+    "ladder_break": "2",
+    "written_at": "2026-09-09T13:14:15.248914"
   },
   "hardware": {
     "gpu": {
@@ -230,21 +252,24 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 1563.1,
-      "avg_gpu_util_pct": 47.3,
-      "avg_gpu_mem_util_pct": 39.6,
-      "cpu_stddev_pct": 239.1,
-      "peak_vram_mib": 10923,
-      "peak_power_w": 103.29,
-      "peak_temp_c": 57,
-      "peak_clocks_sm_mhz": 1965,
+      "avg_cpu_pct": 1654.1,
+      "avg_gpu_util_pct": 42.3,
+      "avg_gpu_mem_util_pct": 35.6,
+      "cpu_stddev_pct": 245.8,
+      "peak_vram_mib": 10953,
+      "peak_power_w": 104.76,
+      "peak_temp_c": 60,
+      "peak_clocks_sm_mhz": 1957,
       "peak_clocks_mem_mhz": 7301,
-      "final_vram_mib": 10923,
+      "final_vram_mib": 10953,
       "final_temp_c": 54,
-      "final_power_w": 54.53,
-      "ram_used_mib": 34906,
-      "rss_mib": 12758,
-      "sample_count": 41
+      "final_power_w": 56.1,
+      "ram_used_mib": 37111,
+      "rss_mib": 15030,
+      "sample_count": 44
     }
-  }
+  },
+  "propagated": true,
+  "propagated_from": "qwen-3.6-35b-a3b-q4-mtp-64k",
+  "propagated_date": "2026-10-20T19:23:00.952117"
 }

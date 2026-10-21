@@ -8,7 +8,7 @@
   "bench_method": "bench_model.sh v2",
   "backend": "llama-cpp",
   "config": {
-    "temp": "0.6",
+    "temp": "1.0",
     "top_k": "20",
     "top_p": "0.95",
     "min_p": "0.00",
@@ -240,5 +240,5 @@
   },
   "propagated": true,
   "propagated_from": "qwen-3.6-35b-a3b-q4-mtp-256k",
-  "propagated_date": "2026-10-21T09:40:27.164911"
+  "propagated_date": "2026-10-21T12:22:37.863622"
 }
