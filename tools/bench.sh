@@ -9,6 +9,8 @@
 #   ./tools/bench.sh mtpverify <models...>      # MTP-on vs off output check (premise test)
 #   ./tools/bench.sh bisect <model> [test-batch]
 #   ./tools/bench.sh residency <model>          # fast GPU/CPU pre-check (no bench)
+#   ./tools/bench.sh vision <models...>         # add [<model>-vision] when the repo ships an
+#                                               # mmproj and an image request works
 #   ./tools/bench.sh mtp <models...>            # n_max/p_min tuning (requires mtpcheck first)
 #   ./tools/bench.sh bench <models...>          # full benchmark JSON record
 #   ./tools/bench.sh mtpab <heads...>           # MTP on/off A/B on an already-tuned entry, then
@@ -2755,6 +2757,166 @@ open(os.environ['INI'], 'w').write(c.replace('[' + os.environ['CTXMAX_PROBE_OLD'
   log "  max GPU-resident ctx: $LO (trained ctx $TRAIN, source ctx $CTX0, batch $(MODEL=$NEW read_batch))"
   log "  new entry: [$NEW] — a new family head (same hf, new ctx); run the full suite on it to record a bench"
   log "  (restart $SERVICE, or run the suite, before using it — the router reads models.ini only at start)"
+}
+
+# ── SUBCOMMAND: vision ──────────────────────────────────────
+# Add a -vision entry for an existing one when its model can take images. The
+# repo must ship an mmproj-*.gguf (HF file listing, else the local cache); then
+# the section is copied to [<src>-vision] (inserted after the source, which is
+# never modified) with no-mmproj = false, and the copy is tested with a real
+# image request. The router downloads the projector on that first load. The copy
+# is kept only if the image request is answered; a load OOM at the source's
+# batch is retried once at batch 256 (the bisect's first rung). The new entry is
+# its own family head (the projector costs VRAM), so it has no bench record
+# until the full suite runs on it. On any failure exit the copy is removed.
+# One result line per model goes to $VISION_RESULTS for the summary.
+VISION_ENTRY=""
+VISION_DONE=0
+VISION_RESULTS="/tmp/bench_vision_results_$$"
+
+vision_cleanup() {
+  if [ "${VISION_DONE:-0}" -eq 0 ] && [ -n "$VISION_ENTRY" ]; then
+    drop_section "$VISION_ENTRY" >/dev/null 2>&1 || true
+    log "  vision: section [$VISION_ENTRY] removed"
+  fi
+  VISION_DONE=1
+}
+
+vision_result() { echo "$1|$2" >> "$VISION_RESULTS"; log "  $1: $2"; }
+
+# Print the repo's mmproj file names (space-separated; empty = none), or
+# "unknown" when neither the HF listing nor the local cache can answer.
+repo_mmproj() {
+  local HF REPO
+  HF=$(read_ini_val hf)
+  [ -z "$HF" ] && { echo unknown; return 0; }
+  REPO="${HF%%:*}"
+  curl -s --max-time 15 "https://huggingface.co/api/models/$REPO" 2>/dev/null \
+    | HUB="$ROOT/.local/llama-cpp_data/hub/models--${REPO/\//--}" python3 -c "
+import glob, json, os, sys
+try:
+    files = [s['rfilename'] for s in json.load(sys.stdin)['siblings']]
+except Exception:
+    snaps = glob.glob(os.path.join(os.environ['HUB'], 'snapshots', '*', '*'))
+    if not snaps: print('unknown'); sys.exit()
+    files = [os.path.basename(f) for f in snaps]
+print(' '.join(sorted({os.path.basename(f) for f in files
+                       if 'mmproj' in os.path.basename(f).lower() and f.endswith('.gguf')})))
+"
+}
+
+# One image request on [$MODEL]. Returns 0 = answered, 1 = OOM / load failure,
+# 3 = served but the image was refused (no projector loaded), 2 = STALL.
+vision_probe() {
+  python3 - "$MODEL" <<'EOF'
+import base64, json, struct, sys, zlib
+def chunk(t, d): return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+w = h = 256
+raw = b''.join(b'\x00' + b'\xd0\x10\x10' * w for _ in range(h))   # solid red
+png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+       + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+url = 'data:image/png;base64,' + base64.b64encode(png).decode()
+payload = {'model': sys.argv[1], 'max_tokens': 1024, 'messages': [{'role': 'user', 'content': [
+    {'type': 'image_url', 'image_url': {'url': url}},
+    {'type': 'text', 'text': 'What colour fills this image? Answer with one word.'}]}]}
+json.dump(payload, open('/tmp/vision_payload.json', 'w'))
+EOF
+  local RC=0
+  fire_request /tmp/vision_payload.json /tmp/vision_response.json "vision-probe" 900 || RC=$?
+  [ "$RC" -eq 2 ] && return 2
+  wait "$FIRE_PID" 2>/dev/null || true
+  if [ "$(oom_count_since_mark)" -gt 0 ]; then
+    log "  OOM: $(oom_since_mark | head -1)"
+    return 1
+  fi
+  local OUT
+  RC=0
+  OUT=$(python3 - 2>&1 <<'EOF'
+import json, sys
+try:
+    d = json.load(open('/tmp/vision_response.json'))
+except Exception:
+    print('  vision-probe: no JSON response', file=sys.stderr); sys.exit(1)
+if 'choices' not in d:
+    msg = json.dumps(d.get('error', d))[:300]
+    print('  vision-probe: refused: ' + msg, file=sys.stderr)
+    sys.exit(3 if any(k in msg.lower() for k in ('image', 'multimodal', 'mmproj')) else 1)
+m = d['choices'][0].get('message', {})
+text = ((m.get('content') or '') + ' ' + (m.get('reasoning_content') or '')).lower()
+print('  vision-probe: answered (%s) — %r' % ('saw red' if 'red' in text else 'did not name the colour',
+                                             (m.get('content') or '').strip()[:80]), file=sys.stderr)
+EOF
+) || RC=$?
+  log "$OUT"
+  return "$RC"
+}
+
+# The copied batch and spec-* values were tuned without the projector. Note that
+# on each line until the full suite retunes them (set_batch / set_key rewrite the
+# whole line, so the note goes away with the first tuned value).
+vision_mark_untuned() {
+  SRC=$1 MODEL=$MODEL INI=$INI python3 - <<'EOF'
+import os, re
+src, model, ini = os.environ['SRC'], os.environ['MODEL'], os.environ['INI']
+c = open(ini).read()
+m = re.search(r'(\[' + re.escape(model) + r'\])(.*?)(?=\n\[|\Z)', c, re.DOTALL)
+note = '; from [%s], untuned with the projector — run bench.sh all %s' % (src, model)
+out = []
+for line in m.group(2).split('\n'):
+    # Numeric keys only: inline comments after a number are already used here
+    # (discover pick, ctxmax pick); none follow a string value like spec-type.
+    if re.match(r'\s*(u?batch-size|spec-draft-n-max|spec-draft-p-min)\s*=', line):
+        line = line.split(';')[0].rstrip() + ' ' + note
+    out.append(line)
+open(ini, 'w').write(c[:m.start(2)] + '\n'.join(out) + c[m.end(2):])
+EOF
+}
+
+cmd_vision() {
+  local SRC=$MODEL NAME="${MODEL}-vision"
+  case "$SRC" in *-vision) vision_result "$SRC" "skipped (already a vision entry)"; return 0 ;; esac
+  if [ "$(read_ini_val no-mmproj)" = "false" ]; then
+    vision_result "$SRC" "skipped (no-mmproj = false already: it loads the projector)"; return 0
+  fi
+  if grep -qF "[$NAME]" "$INI"; then
+    vision_result "$SRC" "skipped ([$NAME] already exists)"; return 0
+  fi
+  local MMPROJ
+  MMPROJ=$(repo_mmproj)
+  log "Model: $SRC | hf: $(read_ini_val hf) | mmproj: ${MMPROJ:-none}"
+  if [ "$MMPROJ" = "unknown" ]; then
+    vision_result "$SRC" "skipped (could not list the repo's files)"; return 0
+  fi
+  if [ -z "$MMPROJ" ]; then
+    vision_result "$SRC" "no vision (the repo ships no mmproj)"; return 0
+  fi
+
+  local CTX
+  CTX=$(read_ctx)
+  SERVED_GRACE=$(served_grace "${CTX:-0}")
+  VISION_ENTRY=$NAME; VISION_DONE=0
+  clone_section "$SRC" "$NAME"
+  trap 'vision_cleanup' EXIT
+  MODEL=$NAME
+  set_key no-mmproj false >/dev/null
+  log "  section [$NAME] created (copy of [$SRC], no-mmproj = false)"
+
+  local RC=0
+  restart
+  vision_probe || RC=$?
+  if [ "$RC" -eq 1 ]; then
+    log "  load failed at batch $(read_batch) — retrying at batch 256"
+    set_batch 256 >/dev/null
+    RC=0; restart; vision_probe || RC=$?
+  fi
+  case "$RC" in
+    0) vision_mark_untuned "$SRC"
+       VISION_DONE=1
+       vision_result "$SRC" "added [$NAME] (batch $(read_batch); own family head — run 'bench.sh all $NAME')" ;;
+    2) vision_result "$SRC" "STALL (model never served)"; exit 2 ;;
+    3) vision_result "$SRC" "no vision (the image was refused with the projector enabled)"; exit 1 ;;
+    *) vision_result "$SRC" "failed (load / OOM even at batch 256)"; exit 1 ;;
+  esac
 }
 
 # ── SUBCOMMAND: mtpcheck ────────────────────────────────────
@@ -5951,8 +6113,16 @@ if [ "$#" -eq 0 ]; then
 
   # ── Action: full suite or a quick residency check ──
   echo ""
-  read -r -p "Run? [f]ull suite / [r]esidency check / [c]tx max / MTP [a]/b (default f): " RUN_INPUT
+  read -r -p "Run? [f]ull suite / [r]esidency check / [c]tx max / MTP [a]/b / [v]ision (default f): " RUN_INPUT
   case "${RUN_INPUT:-f}" in
+    [vV]*)
+      echo ""
+      echo "=== VISION PLAN ==="
+      for i in $MODEL_IDXS; do echo "  $(model_name "$i"): repo ships an mmproj? → add [$(model_name "$i")-vision] → image test"; done
+      echo ""
+      confirm "Proceed with this plan?" || { echo "Aborted."; exit 1; }
+      exec "$0" vision $(for i in $MODEL_IDXS; do echo -n "$(model_name "$i") "; done)
+      ;;
     [aA]*)
       echo ""
       echo "=== MTP A/B PLAN ==="
@@ -6092,6 +6262,20 @@ case "$CMD" in
       ( cmd_ctxmax ) || echo "  $m: ctxmax did not complete (see log)"
     done
     ;;
+  vision)
+    rm -f "$VISION_RESULTS"
+    for m in "$@"; do
+      MODEL=$m
+      lshow ""
+      lshow "=== VISION: $m ==="
+      ensure_model_cached "$m" || { vision_result "$m" "STALL (download failed — skipping)"; continue; }
+      ( cmd_vision ) || true
+    done
+    lshow ""
+    lshow "=== VISION SUMMARY ==="
+    while IFS='|' read -r M R; do lshow "  $M: $R"; done < "$VISION_RESULTS"
+    rm -f "$VISION_RESULTS"
+    ;;
   mtp)
     for m in "$@"; do
       MODEL=$m
@@ -6149,7 +6333,7 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|mtp|mtpab|bench] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|vision|mtp|mtpab|bench] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
@@ -6157,6 +6341,7 @@ case "$CMD" in
     echo "       bench.sh bisect <model> [test-batch]"
     echo "       bench.sh residency <model>                  # fast GPU/CPU pre-check (no bench)"
     echo "       bench.sh ctxmax <models...>                 # largest GPU-resident ctx → new entry"
+    echo "       bench.sh vision <models...>                 # add [<model>-vision] if the repo ships an mmproj (image test)"
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning, then MTP on/off A/B"
     echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
