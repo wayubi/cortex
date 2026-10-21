@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-21
 **Status:** Option 1 applied 2026-10-21 to both routers (`load-mode = mmap+mlock`); its decode/prefill
-re-bench (Option 1 step 5) is still pending a quiet window. Options 2–5: plan only, to be reviewed one by one.
+re-bench (Option 1 step 5) is still pending a quiet window. Option 2: not pursued (see its section).
+Option 3: design agreed, not built. Options 4–5: plan only.
 
 Option 1 load measurements (3 runs each; cold = the GGUF evicted from the page cache first):
 
@@ -115,6 +116,18 @@ request stalls noticeably more than baseline.
 
 ## Option 2: Serve all variants of a model from one loaded instance
 
+> **Not pursued (2026-10-21).** The premise holds: on presets started with either `--reasoning on` or `off`,
+> a request-level `chat_template_kwargs.enable_thinking` switches thinking on and off, and request-level
+> sampling replaces the preset's (checked live on Gemma 4, the Qwen3.6-based Tiel, and GLM-4.7, via the
+> response's `reasoning_content` and `GET /slots`). A working implementation (`openresty/families.lua`,
+> the rewrite in `coordinator.lua`, two mounts, an `X-Cortex-Alias: off` bypass for `bench.sh`, a
+> coordinator test) was built and dropped before deployment. A swap between siblings costs ~7–12 s on
+> gemma-12b and ~15–25 s on tiel q4 with the GGUF cached (process restart, `-fit`, VRAM upload, buffers,
+> warm-up, and the lost prompt cache); openresty's own part is milliseconds. That saving, only for clients
+> that alternate siblings, did not justify rewriting every request body, a second copy of `family_scan`
+> in Lua, and responses naming a different preset. A client that wants this can use one preset per
+> weights-and-ctx and set sampling and thinking per request itself.
+
 **Goal:** moving between `-think`, `-think-coder`, `-coder` and plain variants of the same weights and ctx
 does not unload and reload the model.
 
@@ -161,46 +174,103 @@ after its head, and assert no unload, a rewritten `model`, and the merged parame
 
 ---
 
-## Option 3: Keep the models used most on the NVMe drive
+## Option 3: An automatic NVMe copy of the models used most (`model-cache` service)
 
-**Goal:** cold loads of the models used most read at NVMe speed (several GB/s) instead of 100–500 MB/s.
-They are not held in RAM.
+**Status:** design agreed 2026-10-21; not built. Run the three checks below before building.
 
-**Constraint:** llama.cpp's `-hf` loader uses one HF cache (`/root/.cache/huggingface` in the container,
-`.local/llama-cpp_data` on the host, 308 GB). The root filesystem (NVMe) has ~340 GB free, too little to
-move the whole cache safely.
+**Goal:** loads of the models used most read from the NVMe (several GB/s) instead of the SATA RAID
+(100–500 MB/s), with no maintenance and without filling the NVMe.
 
-**Design: move individual blobs and leave a symlink.** HF snapshots already hold symlinks into `blobs/`.
-Move a chosen blob to the NVMe and replace it with a symlink whose target path is **identical on the host
-and in the containers**, so it resolves in both:
-1. Create `/opt/model-nvme/blobs/` on the root filesystem.
-2. Mount it into `llama-cpp` and `prism-llama-cpp` at the **same path**:
-   `- /opt/model-nvme:/opt/model-nvme:ro` in `compose.override.yml` (machine-local; it already holds the
-   cache mounts).
-3. For each chosen model: copy the blob to `/opt/model-nvme/blobs/<sha256>`, check the sha256 matches the
-   file name, then atomically replace the blob in the cache with a symlink to it
-   (`ln -s … blob.tmp && mv -T blob.tmp blob`).
-4. Write `tools/nvme_models.sh` with `move <model>`, `restore <model>` (copy back, replace the symlink) and
-   `list`, so this is repeatable and reversible. The model's other files (MTP drafter, mmproj) can stay on
-   the RAID.
+**Decisions (from review):**
+- **Copy, never move.** The SSD copy in the HF cache stays complete and untouched; the NVMe holds a second copy.
+- **Automatic.** No list to maintain. A file is copied to the NVMe on its **3rd load within 7 days**, so a
+  one-off test load does not push out a model in regular use. A file evicted earlier earns its place back the same way.
+- **Cap 64 GB.** When a new copy would exceed it, the copies loaded least recently are removed first.
+- **Location `/opt/cortex-models`**, a real directory on the NVMe root filesystem. `/opt/docker-containers` is a
+  symlink to `/mnt/md2` and must not be used.
+- **Switchable, on by default.** Settings live in the service's `environment:` in `compose.yml` (not `.env`).
 
-**Before you start:**
-- Ask the user which models to move. Candidates from current use: gemma-4-12b (6.7 GB), tiel-coder q4
-  (~22 GB), tiel-coder APEX (~15 GB), lfm-2.5-8b (~5 GB), GLM-4.7-Flash (17.5 GB).
-- Confirm free space on `/` leaves a comfortable margin (keep at least 100 GB free).
-- Do it with the model unloaded. A loaded model keeps reading the old inode until it unloads, which is
-  harmless.
+### How a file is served from the NVMe
 
-**Risks:**
-- **Re-downloads:** the HF downloader verifies blobs by name and size. Check that a restart plus load does
-  not re-download or replace the symlink (watch for `*.downloadInProgress` in the repo's dir).
-- **Backups:** if `/mnt/md2` is backed up, the blob now lives on `/`. Make sure that is acceptable.
-- **No mirror:** the NVMe copy has no RAID1 redundancy. It is a copy of a public download, so losing it
-  means re-downloading.
+The HF cache keeps each file as `snapshots/<rev>/<name>.gguf` → `../../blobs/<sha256>` (the real file, on the SSD).
+- **Promote:** copy `blobs/<sha256>` to `/opt/cortex-models/<sha256>`, check its sha256 against the name, then
+  atomically repoint the **snapshot** link to it (`ln -s /opt/cortex-models/<sha256> tmp && mv -T tmp <link>`).
+  The blob is not touched.
+- **Evict:** repoint the snapshot link back to `../../blobs/<sha256>` first, then delete the NVMe copy.
+- **Same path everywhere:** `/opt/cortex-models` is mounted at the same path in `llama-cpp` and `prism-llama-cpp`
+  (read-only), so the absolute link resolves on the host and in both containers.
+- **No restarts:** the router starts a new `llama-server` per load, which resolves the link at start, so the
+  next load uses whichever copy the link points to. A loaded model keeps the file it opened; repointing or
+  deleting under it is safe (the NVMe space frees when it unloads).
+- **Per file, not per entry:** every models.ini entry with the same `hf = repo:quant` (all variants and all ctx
+  sizes) shares the file, and their loads count together. A file's companions in the same snapshot (the
+  `mtp-*.gguf` drafter, an `mmproj-*.gguf` when a `-vision` entry loads it) are promoted and evicted with it.
 
-**Verify:** cold-load times (§1) for each moved model, three runs.
+### The service
 
----
+A small Python service `model-cache` in `compose.yml` (image `python:3.12-slim`, script `tools/model_cache.py`
+mounted read-only, `restart: unless-stopped`, on `cortex_network`):
+
+```yaml
+  model-cache:
+    image: python:3.12-slim
+    restart: unless-stopped
+    command: ["python", "-u", "/model_cache.py"]
+    networks: [cortex_network]
+    volumes:
+      - ./tools/model_cache.py:/model_cache.py:ro
+      - llama-cpp_data:/root/.cache/huggingface          # compose.override maps it to .local/llama-cpp_data
+      - /opt/cortex-models:/opt/cortex-models
+    environment:
+      - CORTEX_NVME_CACHE=on              # on | off
+      - CORTEX_NVME_CACHE_GB=64           # size cap for the NVMe copies
+      - CORTEX_NVME_CACHE_LOADS=3         # copy a file on its Nth load ...
+      - CORTEX_NVME_CACHE_DAYS=7          # ... within this many days
+      - CORTEX_NVME_CACHE_DIR=/opt/cortex-models
+```
+Add the HF-cache mapping to `compose.override.yml` like the routers' (`./.local/llama-cpp_data:/root/.cache/huggingface`),
+and `- /opt/cortex-models:/opt/cortex-models:ro` to both routers there or in `compose.yml`.
+
+**Loop (every 5 s):**
+1. `GET http://llama-cpp:8080/v1/models` and `http://prism-llama-cpp:8080/v1/models`. A preset whose
+   `status.value` changes to `loaded` is one load. Its `status.args` carry `--hf-repo repo:quant`; resolve that to
+   the snapshot file the same way `bench.sh` does (`refs/main` → snapshot → the gguf named `-<quant>.gguf`, or
+   the first split `-<quant>-00001-of-`).
+2. Record the load in `/opt/cortex-models/state.json`: per sha256, the load timestamps (pruned to the window), the
+   last load, and whether it is promoted. Write it atomically (temp file + rename).
+3. When a file reaches `LOADS` within `DAYS` and is not promoted: evict least-recently-loaded copies until
+   `used + size ≤ GB`. If the file alone is larger than the cap, skip it. Then copy it straight away, while it is
+   still in the page cache from the load, so the copy reads RAM, not the SSD. Copy to `<sha256>.part`, fsync,
+   check sha256, rename, repoint the link.
+4. Copy with low I/O priority (`os.posix_fadvise`, small chunks, `ionice`-like pacing) so a load in progress is not slowed.
+
+**Startup and safety:**
+- On start, check every snapshot link that points into `/opt/cortex-models`. If its target is missing or its
+  sha256 is wrong, repoint it to the blob and drop the entry. A link must never dangle.
+- Delete stray `*.part` files.
+- A newer revision of a model downloads to the SSD as a new blob with a new link; the old NVMe copy then has no
+  link pointing at it and is removed as stale.
+- **`CORTEX_NVME_CACHE=off`:** on start, repoint every link back to its blob, delete all NVMe copies and
+  `state.json`, then idle. Switching back to `on` starts counting from zero. Either way: edit the value, then
+  `docker compose up -d model-cache`. The routers and openresty are not touched.
+
+### Checks before building (stop and report if one fails)
+
+1. **The loader follows the snapshot link.** Repoint one small model's snapshot link (gemma's drafter is too small
+   to matter; use `lfm-2.5-8b`, 5 GB) to a copy in `/opt/cortex-models` with the routers' mount in place, load it,
+   and confirm in `/proc/<pid>/maps` (now that `load-mode` is `mmap+mlock`) that it maps `/opt/cortex-models/<sha256>`.
+2. **No re-download.** After that load, the repo directory has no new `*.downloadInProgress` file and the link was
+   not rewritten.
+3. **A swap during a load is safe.** Repoint the link back while that model is loading; the load completes.
+Restore the link and delete the test copy afterwards.
+
+### Deploy
+
+1. Add the mounts and the service; `docker compose up -d llama-cpp prism-llama-cpp model-cache` (the routers
+   are recreated once for the new mount). Do it while `/availability` shows cortex idle.
+2. Watch `docker logs -f cortex-model-cache-1` through a few loads.
+3. Docs: `AGENTS.md` (architecture list, file layout, a "model-cache" section with the settings and the off switch),
+   README (one paragraph), `tools/` layout.
 
 ## Option 4: Rewrite the models used most on the RAID periodically
 
@@ -218,7 +288,7 @@ mirrors:
 4. `tools/refresh_models.sh <model…>` plus a systemd timer (monthly). Data drops to its slow state within
    about 6 weeks (Qwen3-Coder, written Sep 10, already read at the same speed as GLM from Aug 31).
 
-**Before you start:** ask which models. If Option 3 moves a model to the NVMe, it no longer needs this.
+**Before you start:** ask which models. A model Option 3 keeps on the NVMe does not need this.
 
 **Verify:** the O_DIRECT per-mirror read test (§0) on a refreshed blob, right after the refresh and again
 a month later. The test script used on 2026-10-21 maps a file's extents to each mirror with `filefrag` and
@@ -256,8 +326,8 @@ explicit go-ahead.
 | Order | Option | Changes | Needs |
 |---|---|---|---|
 | 1 | Option 1, mmap + mlock | cortex `[*]` | a quiet bench window |
-| 2 | Option 3, models on NVMe | `compose.override.yml`, new tool | the user's list of models |
-| 3 | Option 2, one instance per family | openresty, new generator, tests | the §Option 2 checks to pass |
+| 2 | Option 3, automatic NVMe copy | `compose.yml` service + mounts, `tools/model_cache.py` | the three checks to pass |
+| — | Option 2, one instance per family | — | not pursued |
 | 4 | Option 4, refresh timer | new tool + timer | only for models not moved to NVMe |
 | 5 | Option 5, read policy | kernel | the user's explicit decision |
 
