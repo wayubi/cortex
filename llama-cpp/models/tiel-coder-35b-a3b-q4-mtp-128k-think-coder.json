@@ -101,7 +101,139 @@
     "configured_p_min": null,
     "drafter": "none"
   },
-  "discover": {},
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 341.52
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 520.92
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 755.88
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 969.17
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1131.66
+      },
+      {
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 1151.38
+      },
+      {
+        "batch": 16384,
+        "status": "OOM",
+        "prefill": null
+      },
+      {
+        "batch": 8768,
+        "status": "REFINE",
+        "prefill": 1098.38
+      },
+      {
+        "batch": 11648,
+        "status": "REFINE",
+        "prefill": 925.94
+      },
+      {
+        "batch": 6976,
+        "status": "REFINE",
+        "prefill": 1171.56
+      },
+      {
+        "batch": 8704,
+        "status": "REFINE",
+        "prefill": 1123.63
+      },
+      {
+        "batch": 5824,
+        "status": "REFINE",
+        "prefill": 1183.46
+      },
+      {
+        "batch": 6912,
+        "status": "REFINE",
+        "prefill": 1156.79
+      },
+      {
+        "batch": 5120,
+        "status": "REFINE",
+        "prefill": 1107.18
+      },
+      {
+        "batch": 5760,
+        "status": "REFINE",
+        "prefill": 1170.28
+      },
+      {
+        "batch": 6208,
+        "status": "REFINE",
+        "prefill": 1174.2
+      },
+      {
+        "batch": 6144,
+        "status": "REFINE",
+        "prefill": 1180.22
+      },
+      {
+        "batch": 6464,
+        "status": "REFINE",
+        "prefill": 1170.44
+      },
+      {
+        "batch": 6016,
+        "status": "REFINE",
+        "prefill": 1175.93
+      },
+      {
+        "batch": 6272,
+        "status": "REFINE",
+        "prefill": 1178.26
+      },
+      {
+        "batch": 6080,
+        "status": "REFINE",
+        "prefill": 1180.15
+      }
+    ],
+    "best_prefill": 1151.38,
+    "pick": 5824,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      5120,
+      5760,
+      5824,
+      6016,
+      6080,
+      6144,
+      6208,
+      6272,
+      6464,
+      6912,
+      6976,
+      8704,
+      8768,
+      11648
+    ],
+    "ceiling_coarse": "8192 PASS / 16384 OOM",
+    "ladder_break": "1",
+    "written_at": "2026-09-10T06:59:57.923829"
+  },
   "hardware": {
     "gpu": {
       "name": "NVIDIA GeForce RTX 3060",

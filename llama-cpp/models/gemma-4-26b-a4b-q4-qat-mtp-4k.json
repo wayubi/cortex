@@ -119,7 +119,81 @@
     "configured_p_min": null,
     "drafter": "none"
   },
-  "discover": {},
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 728.1
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 1053.37
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 1376.78
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 1459.12
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1707.19
+      },
+      {
+        "batch": 2816,
+        "status": "REFINE",
+        "prefill": 1563.58
+      },
+      {
+        "batch": 3264,
+        "status": "REFINE",
+        "prefill": 1793.1
+      },
+      {
+        "batch": 3584,
+        "status": "REFINE",
+        "prefill": 1683.2
+      },
+      {
+        "batch": 3072,
+        "status": "REFINE",
+        "prefill": 1746.25
+      },
+      {
+        "batch": 3328,
+        "status": "REFINE",
+        "prefill": 1807.41
+      },
+      {
+        "batch": 3456,
+        "status": "REFINE",
+        "prefill": 1786.54
+      }
+    ],
+    "best_prefill": 1707.19,
+    "pick": 3328,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      2816,
+      3072,
+      3264,
+      3328,
+      3456,
+      3584
+    ],
+    "ceiling_coarse": "4096 PASS (not probed higher)",
+    "ladder_break": "0",
+    "written_at": "2026-09-08T17:34:51.968964"
+  },
   "hardware": {
     "gpu": {
       "name": "NVIDIA GeForce RTX 3060",

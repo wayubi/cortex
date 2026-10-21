@@ -5531,6 +5531,15 @@ if os.path.exists(_disc_path):
         with open(_disc_path) as _df: discover = json.load(_df)
     except Exception:
         discover = {}
+# No ladder this run (mtpab, bench-only): keep the previous record's ladder when
+# its pick is still the batch, so a re-bench does not erase how it was chosen.
+if not discover and os.path.exists('$JSON_FILE'):
+    try:
+        with open('$JSON_FILE') as _pf: _prev = (json.load(_pf).get('discover') or {})
+        if _prev.get('pick') == $BATCH:
+            discover = _prev
+    except Exception:
+        pass
 
 data = {
     'model': '$MODEL',

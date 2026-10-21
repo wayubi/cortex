@@ -101,7 +101,120 @@
     "configured_p_min": null,
     "drafter": "none"
   },
-  "discover": {},
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 327.27
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 507.78
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 748.69
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 948.37
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1109.15
+      },
+      {
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 1133.3
+      },
+      {
+        "batch": 16384,
+        "status": "OOM",
+        "prefill": null
+      },
+      {
+        "batch": 8768,
+        "status": "REFINE",
+        "prefill": 1129.11
+      },
+      {
+        "batch": 11648,
+        "status": "REFINE",
+        "prefill": 899.32
+      },
+      {
+        "batch": 6976,
+        "status": "REFINE",
+        "prefill": 1137.08
+      },
+      {
+        "batch": 8704,
+        "status": "REFINE",
+        "prefill": 1141.35
+      },
+      {
+        "batch": 9856,
+        "status": "REFINE",
+        "prefill": 1065.07
+      },
+      {
+        "batch": 8064,
+        "status": "REFINE",
+        "prefill": 1165.33
+      },
+      {
+        "batch": 7616,
+        "status": "REFINE",
+        "prefill": 1183.27
+      },
+      {
+        "batch": 8000,
+        "status": "REFINE",
+        "prefill": 1170.14
+      },
+      {
+        "batch": 7360,
+        "status": "REFINE",
+        "prefill": 1150.7
+      },
+      {
+        "batch": 7552,
+        "status": "REFINE",
+        "prefill": 1146.6
+      },
+      {
+        "batch": 7168,
+        "status": "FAIL",
+        "prefill": null
+      }
+    ],
+    "best_prefill": 1133.3,
+    "pick": 7616,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      6976,
+      7360,
+      7552,
+      7616,
+      8000,
+      8064,
+      8704,
+      8768,
+      9856,
+      11648
+    ],
+    "ceiling_coarse": "8192 PASS / 16384 OOM",
+    "ladder_break": "1",
+    "written_at": "2026-09-11T17:00:40.934976"
+  },
   "hardware": {
     "gpu": {
       "name": "NVIDIA GeForce RTX 3060",

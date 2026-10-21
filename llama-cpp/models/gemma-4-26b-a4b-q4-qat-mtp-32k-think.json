@@ -119,7 +119,103 @@
     "configured_p_min": null,
     "drafter": "none"
   },
-  "discover": {},
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 800.44
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 1121.3
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 1464.9
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 1710.03
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1768.96
+      },
+      {
+        "batch": 8192,
+        "status": "OOM",
+        "prefill": null
+      },
+      {
+        "batch": 4352,
+        "status": "FAIL",
+        "prefill": null
+      },
+      {
+        "batch": 2880,
+        "status": "REFINE",
+        "prefill": 1716.68
+      },
+      {
+        "batch": 3456,
+        "status": "REFINE",
+        "prefill": 1764.44
+      },
+      {
+        "batch": 3392,
+        "status": "REFINE",
+        "prefill": 1767.82
+      },
+      {
+        "batch": 3776,
+        "status": "REFINE",
+        "prefill": 1727.37
+      },
+      {
+        "batch": 3200,
+        "status": "REFINE",
+        "prefill": 1788.74
+      },
+      {
+        "batch": 3072,
+        "status": "REFINE",
+        "prefill": 1743.69
+      },
+      {
+        "batch": 3136,
+        "status": "REFINE",
+        "prefill": 1744.19
+      },
+      {
+        "batch": 3264,
+        "status": "REFINE",
+        "prefill": 1780.44
+      }
+    ],
+    "best_prefill": 1768.96,
+    "pick": 3200,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      2880,
+      3072,
+      3136,
+      3200,
+      3264,
+      3392,
+      3456,
+      3776
+    ],
+    "ceiling_coarse": "4096 PASS / 8192 OOM",
+    "ladder_break": "1",
+    "written_at": "2026-09-11T04:23:44.837489"
+  },
   "hardware": {
     "gpu": {
       "name": "NVIDIA GeForce RTX 3060",

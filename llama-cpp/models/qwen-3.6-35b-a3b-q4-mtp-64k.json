@@ -119,7 +119,115 @@
     "configured_p_min": null,
     "drafter": "none"
   },
-  "discover": {},
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 363.1
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 562.56
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 830.11
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 1100.47
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1297.52
+      },
+      {
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 1293.23
+      },
+      {
+        "batch": 16384,
+        "status": "PASS",
+        "prefill": 1117.99
+      },
+      {
+        "batch": 4352,
+        "status": "REFINE",
+        "prefill": 1293.82
+      },
+      {
+        "batch": 5824,
+        "status": "REFINE",
+        "prefill": 1347.86
+      },
+      {
+        "batch": 5760,
+        "status": "REFINE",
+        "prefill": 1350.08
+      },
+      {
+        "batch": 6720,
+        "status": "REFINE",
+        "prefill": 1321.19
+      },
+      {
+        "batch": 5248,
+        "status": "REFINE",
+        "prefill": 1289.42
+      },
+      {
+        "batch": 6144,
+        "status": "REFINE",
+        "prefill": 1346.36
+      },
+      {
+        "batch": 5568,
+        "status": "REFINE",
+        "prefill": 1355.82
+      },
+      {
+        "batch": 5440,
+        "status": "REFINE",
+        "prefill": 1324.31
+      },
+      {
+        "batch": 5504,
+        "status": "REFINE",
+        "prefill": 1341.93
+      },
+      {
+        "batch": 5632,
+        "status": "REFINE",
+        "prefill": 1339.41
+      }
+    ],
+    "best_prefill": 1297.52,
+    "pick": 5568,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      4352,
+      5248,
+      5440,
+      5504,
+      5568,
+      5632,
+      5760,
+      5824,
+      6144,
+      6720
+    ],
+    "ceiling_coarse": "16384 PASS (not probed higher)",
+    "ladder_break": "2",
+    "written_at": "2026-09-09T13:14:15.248914"
+  },
   "hardware": {
     "gpu": {
       "name": "NVIDIA GeForce RTX 3060",
