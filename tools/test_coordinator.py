@@ -5,9 +5,9 @@
     python3 tools/test_coordinator.py --ref HEAD # a commit, to show what fails
 
 Starts a private docker network with tools/coord_mock.py standing in for all
-four backends (a second mock plays prism-llama-cpp, the PrismML router that
-shares :8080 with llama-cpp) and a throwaway openresty running the real nginx.conf and Lua
-from openresty/. Nothing touches the live stack or the GPU. cortex.lua's
+five backends (more mocks play prism-llama-cpp and flint-llama-cpp, the
+routers that share :8080 with llama-cpp) and a throwaway openresty running the
+real nginx.conf and Lua from openresty/. Nothing touches the live stack or the GPU. cortex.lua's
 HUMAN_HOLD and BOT_HOLD_CAP are shortened to HOLD and CAP below so a run takes
 about a minute; every other line is the shipped code.
 """
@@ -30,8 +30,21 @@ MOCK_IMAGE = "python:3.11-slim"
 HOLD = 3
 CAP = 6
 LUA = ("coordinator.lua", "availability.lua", "cortex.lua", "log.lua", "models_list.lua")
-# :8080 models that route to prism-llama-cpp (its models.ini section names)
+# :8080 models that route to prism-llama-cpp / flint-llama-cpp (their
+# models.ini section names); every other :8080 model goes to llama-cpp
 PRISM_MODELS = ("m-prism", "m-prism2")
+FLINT_MODELS = ("m-flint", "m-flint2")
+# the extra :8080 routers: (suffix, host, backend key, its models)
+EXTRA = (("pmock", "prism-llama-cpp", "prism_llama_cpp", PRISM_MODELS),
+         ("fmock", "flint-llama-cpp", "flint_llama_cpp", FLINT_MODELS))
+
+
+def router_of(model):
+    """The backend key that should serve a :8080 model."""
+    for _, _, key, models in EXTRA:
+        if model in models:
+            return key
+    return "llama_cpp"
 
 
 def sh(*cmd, check=True):
@@ -58,8 +71,9 @@ def stage(ref, out):
         s = re.sub(r"M\.HUMAN_HOLD = \d+", f"M.HUMAN_HOLD = {HOLD}", s)
         s = re.sub(r"M\.BOT_HOLD_CAP = \d+", f"M.BOT_HOLD_CAP = {CAP}", s)
         open(pol, "w").write(s)
-    with open(os.path.join(out, "prism-models.ini"), "w") as fh:
-        fh.write("[*]\nctx-size = 4096\n\n" + "".join(f"[{m}]\nhf = x/y\n\n" for m in PRISM_MODELS))
+    for _, host, _, models in EXTRA:
+        with open(os.path.join(out, host.split("-")[0] + "-models.ini"), "w") as fh:
+            fh.write("[*]\nctx-size = 4096\n\n" + "".join(f"[{m}]\nhf = x/y\n\n" for m in models))
 
 
 class Stack:
@@ -71,12 +85,14 @@ class Stack:
            "--network-alias", "nllb",
            "-v", os.path.join(ROOT, "tools", "coord_mock.py") + ":/m.py:ro",
            MOCK_IMAGE, "python", "-u", "/m.py")
-        sh("docker", "run", "-d", "--name", self.name + "-pmock", "--network", self.name,
-           "--network-alias", "prism-llama-cpp", "-e", "MOCK_8080=prism_llama_cpp",
-           "-v", os.path.join(ROOT, "tools", "coord_mock.py") + ":/m.py:ro",
-           MOCK_IMAGE, "python", "-u", "/m.py")
-        vols = ["-v", os.path.join(conf_dir, "nginx.conf") + ":/etc/nginx/conf.d/default.conf:ro",
-                "-v", os.path.join(conf_dir, "prism-models.ini") + ":/etc/nginx/prism-models.ini:ro"]
+        vols = ["-v", os.path.join(conf_dir, "nginx.conf") + ":/etc/nginx/conf.d/default.conf:ro"]
+        for suffix, host, key, _ in EXTRA:
+            sh("docker", "run", "-d", "--name", self.name + "-" + suffix, "--network", self.name,
+               "--network-alias", host, "-e", "MOCK_8080=" + key,
+               "-v", os.path.join(ROOT, "tools", "coord_mock.py") + ":/m.py:ro",
+               MOCK_IMAGE, "python", "-u", "/m.py")
+            ini = host.split("-")[0] + "-models.ini"
+            vols += ["-v", os.path.join(conf_dir, ini) + ":/etc/nginx/" + ini + ":ro"]
         for f in LUA:
             p = os.path.join(conf_dir, f)
             if os.path.exists(p):
@@ -118,7 +134,7 @@ class Stack:
                            text=True).stderr
 
     def close(self):
-        for c in ("-or", "-mock", "-pmock"):
+        for c in ("-or", "-mock") + tuple("-" + e[0] for e in EXTRA):
             subprocess.run(["docker", "rm", "-f", self.name + c], capture_output=True)
         subprocess.run(["docker", "network", "rm", self.name], capture_output=True)
 
@@ -304,7 +320,7 @@ def loaded_on_8080(stack):
     out = {}
     for e in stack.get(8080, "/v1/models").get("data", []):
         if (e.get("status") or {}).get("value") == "loaded":
-            out[e["id"]] = "prism" if e["id"] in PRISM_MODELS else "llama"
+            out[e["id"]] = router_of(e["id"])
     return out
 
 
@@ -321,7 +337,7 @@ def scenario_prism_routes_by_model_and_switches(stack):
     p.start(); p.join()
     check("a prism model is served by prism-llama-cpp", p.status == 200
           and (p.body or {}).get("backend") == "prism_llama_cpp", (p.status, p.body))
-    check("and llama-cpp was unloaded first", loaded_on_8080(stack) == {"m-prism": "prism"},
+    check("and llama-cpp was unloaded first", loaded_on_8080(stack) == {"m-prism": "prism_llama_cpp"},
           loaded_on_8080(stack))
     av = stack.get(8080, "/availability")
     check("availability names the prism backend", av.get("backend") == "prism_llama_cpp"
@@ -329,7 +345,7 @@ def scenario_prism_routes_by_model_and_switches(stack):
     b = Call(stack, time.time(), 8080, "m-a", 0.1, bot=False)
     b.start(); b.join()
     check("back to llama-cpp unloads prism-llama-cpp", b.status == 200
-          and loaded_on_8080(stack) == {"m-a": "llama"}, (b.status, loaded_on_8080(stack)))
+          and loaded_on_8080(stack) == {"m-a": "llama_cpp"}, (b.status, loaded_on_8080(stack)))
     props = stack.get(8080, "/props?model=m-prism")
     check("a GET naming a prism model reaches prism-llama-cpp",
           props.get("backend") == "prism_llama_cpp", props)
@@ -338,11 +354,35 @@ def scenario_prism_routes_by_model_and_switches(stack):
     settle(stack)
 
 
+def scenario_flint_routes_by_model_and_switches(stack):
+    """A third :8080 router, flint-llama-cpp, routes and switches like prism."""
+    print("a Flint model on :8080 goes to flint-llama-cpp; switching unloads the router it leaves")
+    p = Call(stack, time.time(), 8080, "m-prism", 0.1, bot=False)
+    p.start(); p.join()
+    e = Call(stack, time.time(), 8080, "m-flint", 0.1, bot=False)
+    e.start(); e.join()
+    check("a Flint model is served by flint-llama-cpp", e.status == 200
+          and (e.body or {}).get("backend") == "flint_llama_cpp", (e.status, e.body))
+    check("and prism-llama-cpp was unloaded first", loaded_on_8080(stack) == {"m-flint": "flint_llama_cpp"},
+          loaded_on_8080(stack))
+    av = stack.get(8080, "/availability")
+    check("availability names the flint backend", av.get("backend") == "flint_llama_cpp"
+          and "flint_llama_cpp" in av.get("in_flight", {}), av)
+    check("a GET naming a Flint model reaches flint-llama-cpp",
+          stack.get(8080, "/props?model=m-flint").get("backend") == "flint_llama_cpp",
+          stack.get(8080, "/props?model=m-flint"))
+    a = Call(stack, time.time(), 8080, "m-a", 0.1, bot=False)
+    a.start(); a.join()
+    check("back to llama-cpp unloads flint-llama-cpp", a.status == 200
+          and loaded_on_8080(stack) == {"m-a": "llama_cpp"}, (a.status, loaded_on_8080(stack)))
+    settle(stack)
+
+
 def scenario_mixed_routers_concurrently(stack):
-    print("concurrent requests across both :8080 routers all complete, nothing left counted")
+    print("concurrent requests across all :8080 routers all complete, nothing left counted")
     t0 = time.time()
-    calls = [Call(stack, t0, 8080, m, 0.3, bot=False, timeout=15)
-             for m in ("m-a", "m-prism", "m-b", "m-prism2", "m-prism")]
+    calls = [Call(stack, t0, 8080, m, 0.3, bot=False, timeout=20)
+             for m in ("m-a", "m-prism", "m-flint", "m-b", "m-prism2", "m-flint2", "m-prism")]
     for c in calls:
         c.start()
     for c in calls:
@@ -350,7 +390,7 @@ def scenario_mixed_routers_concurrently(stack):
     check("every request served", all(c.status == 200 for c in calls),
           [(c.status, c.end) for c in calls])
     check("each by its own router", all((c.body or {}).get("backend") ==
-          ("prism_llama_cpp" if c.args[3] in PRISM_MODELS else "llama_cpp") for c in calls),
+          router_of(c.args[3]) for c in calls),
           [(c.args[3], (c.body or {}).get("backend")) for c in calls])
     check("one model resident at the end", len(loaded_on_8080(stack)) == 1, loaded_on_8080(stack))
     settle(stack)
@@ -360,15 +400,15 @@ def scenario_fresh_state_unloads_what_is_resident(stack):
     """After an openresty restart the shared dicts are empty while a router
     still holds a model; the first switch must clear it, not load beside it."""
     print("after an openresty restart the first request clears what a backend still holds")
-    a = Call(stack, time.time(), 8080, "m-a", 0.1, bot=False)
+    a = Call(stack, time.time(), 8080, "m-flint", 0.1, bot=False)
     a.start(); a.join()
     stack.restart_openresty()
     check("state is empty after the restart", stack.get(8080, "/availability").get("backend") is None,
           stack.get(8080, "/availability"))
     p = Call(stack, time.time(), 8080, "m-prism", 0.1, bot=False)
     p.start(); p.join()
-    check("llama-cpp's leftover model was unloaded", p.status == 200
-          and loaded_on_8080(stack) == {"m-prism": "prism"}, (p.status, loaded_on_8080(stack)))
+    check("flint-llama-cpp's leftover model was unloaded", p.status == 200
+          and loaded_on_8080(stack) == {"m-prism": "prism_llama_cpp"}, (p.status, loaded_on_8080(stack)))
     settle(stack)
 
 
@@ -387,6 +427,7 @@ def main():
                    scenario_aborts_release_everything,
                    scenario_concurrent_switches_do_not_deadlock,
                    scenario_prism_routes_by_model_and_switches,
+                   scenario_flint_routes_by_model_and_switches,
                    scenario_mixed_routers_concurrently,
                    scenario_fresh_state_unloads_what_is_resident):
             try:

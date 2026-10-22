@@ -4,8 +4,11 @@ local cortex = require "cortex"
 local state_dict   = ngx.shared.backend_state
 local counts_dict  = ngx.shared.request_counts
 
-local HOST = { ollama = "ollama", llama_cpp = "llama-cpp",
-               prism_llama_cpp = "prism-llama-cpp", nllb = "nllb" }
+-- DNS name per backend key; the llama.cpp routers come from cortex.ROUTERS.
+local HOST = { ollama = "ollama", nllb = "nllb" }
+for _, r in ipairs(cortex.ROUTERS) do
+    HOST[r.key] = r.host
+end
 
 local DRAIN_TIMEOUT = 600
 
@@ -156,8 +159,8 @@ local function unload_ollama()
 end
 
 
--- llama-cpp and prism-llama-cpp are both llama.cpp routers with the same API;
--- `key` is the backend key (llama_cpp / prism_llama_cpp), HOST[key] its host.
+-- Every :8080 router (cortex.ROUTERS) is a llama.cpp router with the same API;
+-- `key` is its backend key (llama_cpp, prism_llama_cpp, ...), HOST[key] its host.
 local function unload_llamacpp(key)
     local host = HOST[key]
     local res, err = http_request("GET", host, 8080, "/v1/models")
@@ -492,7 +495,7 @@ local function switch_to(target, target_model, bot)
     if current_backend == "ollama" then
         unload_ollama()
         wait_until_clear(is_ollama_clear, "ollama")
-    elseif current_backend == "llama_cpp" or current_backend == "prism_llama_cpp" then
+    elseif cortex.ROUTER[current_backend] then
         unload_llamacpp(current_backend)
         wait_until_clear(function() return is_llamacpp_clear(current_backend) end,
                          current_backend)
@@ -508,8 +511,9 @@ local function switch_to(target, target_model, bot)
         -- it would leave two models on the GPU, so unload whatever each backend
         -- reports. A backend that holds nothing (or is down) costs one GET.
         if unload_ollama() > 0 then wait_until_clear(is_ollama_clear, "ollama") end
-        clear_llamacpp("llama_cpp")
-        clear_llamacpp("prism_llama_cpp")
+        for _, r in ipairs(cortex.ROUTERS) do
+            clear_llamacpp(r.key)
+        end
         if unload_nllb() > 0 then wait_until_clear(is_nllb_clear, "nllb") end
     end
 
@@ -603,13 +607,14 @@ local function admit(target, target_model, bot)
 end
 
 
--- :8080 fronts two llama.cpp routers; a model in prism-llama-cpp/models.ini is
--- proxied to the fork instead of llama-cpp (cortex.lua). The location's
--- upstream variable is overridden here, in the access phase, before proxy_pass.
+-- :8080 fronts several llama.cpp routers; a model named in another router's
+-- models.ini is proxied there instead of llama-cpp (cortex.router_for). The
+-- location's upstream variable is overridden here, in the access phase,
+-- before proxy_pass.
 local function route(target)
     ngx.ctx.target = target
-    if target == "prism_llama_cpp" then
-        ngx.var.llamacpp_upstream = cortex.PRISM_UPSTREAM
+    if cortex.ROUTER[target] and target ~= cortex.ROUTERS[1].key then
+        ngx.var.llamacpp_upstream = cortex.upstream(target)
     end
 end
 

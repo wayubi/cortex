@@ -1,0 +1,237 @@
+{
+  "model": "flint-40b-a2.5b-q4-256k-think",
+  "ctx": 262144,
+  "batch": 8512,
+  "ubatch": 8512,
+  "placement": "CPU",
+  "bench_date": "2026-10-22T11:30:36.384734",
+  "bench_method": "bench_model.sh v2",
+  "backend": "flint-llama-cpp",
+  "config": {
+    "temp": "1.0",
+    "top_k": "20",
+    "top_p": "0.95",
+    "min_p": "0.00",
+    "repeat_penalty": "1.0",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "unsloth/flint-GGUF:UD-Q4_K_XL",
+    "quant": "UD-Q4_K_XL",
+    "reasoning": "on",
+    "ctx": "262144",
+    "batch": "8512"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 196608,
+    "decode_prompt_tokens": 88,
+    "model_file_size_gb": 23.33,
+    "build_info": "flint-llama-cpp 0.7.0-dev (build 1, commit d772569)",
+    "wall_time_s": 112
+  },
+  "speed": {
+    "prefill_t_s": 646.63,
+    "prefill_ms": 302790.0,
+    "prefill_ms_per_tok": 1.5465,
+    "decode_t_s": 33.7,
+    "decode_ms": 106901.69,
+    "decode_ms_per_tok": 29.6702
+  },
+  "request": {
+    "prefill_prompt_tokens": 196183,
+    "decode_prompt_tokens": 88,
+    "max_tokens": 4000,
+    "completion_tokens": 3604,
+    "total_tokens": 3692,
+    "cached_tokens": 0,
+    "cache_n": 0,
+    "predicted_n": 3604,
+    "finish_reason": "stop",
+    "truncated": false,
+    "degeneracy": 0.0
+  },
+  "mtp": {
+    "acceptance": null,
+    "draft_accepted": null,
+    "draft_generated": null,
+    "draft_mean_len": null,
+    "n_max_loaded": null,
+    "p_min_loaded": null,
+    "tuning_status": "not_mtp",
+    "tuning_reason": null,
+    "tuned_n_max": null,
+    "tuned_p_min": null,
+    "placement_baseline": null,
+    "tuning_samples": [],
+    "tuning_written_at": "2026-10-22T10:49:24.900763",
+    "ab": null,
+    "configured_n_max": null,
+    "configured_p_min": null,
+    "drafter": "none"
+  },
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 252.56
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 432.0
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 696.46
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 980.73
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1242.16
+      },
+      {
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 1325.84
+      },
+      {
+        "batch": 16384,
+        "status": "PASS",
+        "prefill": 1062.43
+      },
+      {
+        "batch": 8768,
+        "status": "REFINE",
+        "prefill": 1285.79
+      },
+      {
+        "batch": 11648,
+        "status": "REFINE",
+        "prefill": 1187.06
+      },
+      {
+        "batch": 6976,
+        "status": "REFINE",
+        "prefill": 1214.55
+      },
+      {
+        "batch": 8704,
+        "status": "REFINE",
+        "prefill": 1310.03
+      },
+      {
+        "batch": 9856,
+        "status": "REFINE",
+        "prefill": 1289.27
+      },
+      {
+        "batch": 8064,
+        "status": "REFINE",
+        "prefill": 1204.36
+      },
+      {
+        "batch": 9152,
+        "status": "REFINE",
+        "prefill": 1294.56
+      },
+      {
+        "batch": 8448,
+        "status": "REFINE",
+        "prefill": 1318.52
+      },
+      {
+        "batch": 8256,
+        "status": "REFINE",
+        "prefill": 1316.86
+      },
+      {
+        "batch": 8384,
+        "status": "REFINE",
+        "prefill": 1315.14
+      },
+      {
+        "batch": 8512,
+        "status": "REFINE",
+        "prefill": 1330.71
+      },
+      {
+        "batch": 8576,
+        "status": "REFINE",
+        "prefill": 1282.79
+      }
+    ],
+    "best_prefill": 1325.84,
+    "pick": 8512,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      6976,
+      8064,
+      8256,
+      8384,
+      8448,
+      8512,
+      8576,
+      8704,
+      8768,
+      9152,
+      9856,
+      11648
+    ],
+    "ceiling_coarse": "16384 PASS (not probed higher)",
+    "ladder_break": "0",
+    "written_at": "2026-10-22T11:23:17.118389"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 1731.5,
+      "avg_gpu_util_pct": 35.2,
+      "avg_gpu_mem_util_pct": 21.0,
+      "cpu_stddev_pct": 393.2,
+      "peak_vram_mib": 11017,
+      "peak_power_w": 137.54,
+      "peak_temp_c": 62,
+      "peak_clocks_sm_mhz": 1965,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 11017,
+      "final_temp_c": 50,
+      "final_power_w": 45.55,
+      "ram_used_mib": 51123,
+      "rss_mib": 29448,
+      "sample_count": 47
+    }
+  }
+}

@@ -4,7 +4,7 @@
 # Usage: ./tools/gen_metrics.sh
 #
 # For each models.ini entry of every benchable backend (llama-cpp,
-# prism-llama-cpp), fills the metrics table from <backend>/models/<name>.json
+# prism-llama-cpp, flint-llama-cpp), fills the metrics table from <backend>/models/<name>.json
 # if present. Missing JSON → '—' / 'unverified'.
 # Each model (including -coder variants) is benched independently — no copying.
 
@@ -12,7 +12,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/full-metrics.md"
-BACKENDS="llama-cpp prism-llama-cpp"   # same list as tools/bench.sh BENCH_BACKENDS
+BACKENDS="llama-cpp prism-llama-cpp flint-llama-cpp"   # same list as tools/bench.sh BENCH_BACKENDS
 
 python3 - "$ROOT" "$OUT" $BACKENDS << 'PYEOF'
 import json, os, re, sys
@@ -149,7 +149,7 @@ lines.append("")
 lines.append("| Column | Description |")
 lines.append("|---|---|")
 lines.append("| model | Section header name from models.ini |")
-lines.append("| backend | llama-cpp (upstream llama.cpp) / prism-llama-cpp (PrismML fork) |")
+lines.append("| backend | llama-cpp (upstream llama.cpp) / prism-llama-cpp (PrismML fork) / flint-llama-cpp (upstream build for Flint) |")
 lines.append("| ctx | Context window size |")
 lines.append("| batch | batch-size |")
 lines.append("| n_max | spec-draft-n-max (MTP models only) |")

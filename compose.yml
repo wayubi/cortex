@@ -93,6 +93,54 @@ services:
       - "--host"
       - "0.0.0.0"
 
+  flint-llama-build:
+    # docker compose --profile build build flint-llama-build
+    # The llama.cpp build for RecursiveSI Flint: upstream at b11820
+    # (2026-10-22; the `flint` arch landed in b11803). llama-build's pin
+    # cannot load Flint, and bumping it would invalidate the benched catalogue,
+    # so Flint gets its own router. Bump this tag only to re-bench Flint.
+    profiles: ["build"]
+    build:
+      context: ./llama-cpp
+      dockerfile: Dockerfile
+      args:
+        BUILD_JOBS: "20"
+        LLAMA_REPO: "https://github.com/ggml-org/llama.cpp.git"
+        LLAMA_REF: "b11820"
+      tags:
+        - "flint-llama-cpp:b11820"
+    image: flint-llama-cpp:latest
+
+  flint-llama-cpp:
+    # Served on openresty :8080 like prism-llama-cpp: a request whose model is
+    # a section of flint-llama-cpp/models.ini is routed here (cortex.lua).
+    runtime: nvidia
+    restart: unless-stopped
+    image: flint-llama-cpp:latest
+    pull_policy: never
+    networks:
+      - cortex_network
+    volumes:
+      - llama-cpp_data:/root/.cache/huggingface
+      - ./flint-llama-cpp/models.ini:/models.ini
+      - /opt/cortex-models:/opt/cortex-models:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      core:
+        soft: 0
+        hard: 0
+    command:
+      - "--models-preset"
+      - "/models.ini"
+      - "--port"
+      - "8080"
+      - "--host"
+      - "0.0.0.0"
+
   ollama:
     image: ollama/ollama
     restart: unless-stopped
@@ -140,10 +188,11 @@ services:
       # human/bot policy (required by the other three) and the log phase
       - ./openresty/cortex.lua:/etc/nginx/lua/cortex.lua
       - ./openresty/log.lua:/etc/nginx/lua/log.lua
-      # GET /v1/models on :8080 — llama-cpp's and prism-llama-cpp's lists merged
+      # GET /v1/models on :8080 — every llama.cpp router's list merged
       - ./openresty/models_list.lua:/etc/nginx/lua/models_list.lua
-      # which :8080 models go to prism-llama-cpp (its section names)
+      # which :8080 models go to prism-llama-cpp / flint-llama-cpp (their section names)
       - ./prism-llama-cpp/models.ini:/etc/nginx/prism-models.ini:ro
+      - ./flint-llama-cpp/models.ini:/etc/nginx/flint-models.ini:ro
     networks:
       - cortex_network
       - enhasa_network

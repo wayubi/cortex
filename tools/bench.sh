@@ -17,12 +17,13 @@
 #   ./tools/bench.sh mtpab <heads...>           # MTP on/off A/B on an already-tuned entry, then
 #                                               # bench and re-inherit the family
 #
-# Backends: llama-cpp (llama-cpp/models.ini) and prism-llama-cpp
-# (prism-llama-cpp/models.ini, the PrismML fork) are benchable; ollama and nllb
+# Backends: llama-cpp (llama-cpp/models.ini), prism-llama-cpp
+# (prism-llama-cpp/models.ini, the PrismML fork) and flint-llama-cpp
+# (flint-llama-cpp/models.ini, the upstream build for Flint) are benchable; ollama and nllb
 # are stubs (no benchmark support yet). The subcommands pick the backend from the
 # model names given; the interactive menu asks; --backend=<name> (or env
 # BENCH_BACKEND) forces one. Requests always go through openresty :8080, which
-# routes each model to its router and unloads the other.
+# routes each model to its router and unloads the others.
 #
 # Global flags (before the subcommand): --backend=<name>, --no-inherit, --reset-parent,
 # --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
@@ -53,7 +54,7 @@ LOG_FILE="$LOG_DIR/bench_$(date +%Y%m%d-%H%M).log"
 # <name>/models/ (bench JSONs), compose service <name>, container cortex-<name>-1.
 # Every engine below reads INI / MODELS_DIR / SERVICE / DOCKER_LOG, so selecting
 # a backend is only setting these four.
-BENCH_BACKENDS="llama-cpp prism-llama-cpp"
+BENCH_BACKENDS="llama-cpp prism-llama-cpp flint-llama-cpp"
 STUB_BACKENDS="ollama nllb"     # in cortex, but bench.sh has no engine for them yet
 BACKEND="" INI="" MODELS_DIR="" SERVICE="" DOCKER_LOG=""
 use_backend() {
@@ -6139,6 +6140,25 @@ elif [ "$#" -eq 0 ]; then
 fi
 lshow "  Backend: $BACKEND ($INI)"
 
+# ── One run at a time ──
+# Two runs fight even on different routers: each restarts its router and edits
+# its models.ini (fetch's temporary `offline = false`), and openresty unloads
+# one run's model to load the other's on the one GPU. 2026-10-22: a background
+# fetch and an interactive suite on flint-llama-cpp restarted the router under
+# each other and both downloads died. The lock is held on fd 9 until this
+# process exits; the file records the holder for the refusal message.
+BENCH_LOCK="/tmp/cortex-bench.lock"
+exec 9>>"$BENCH_LOCK"
+if ! flock -n 9; then
+  echo "ERROR: another bench.sh run is using the GPU — $(cat "$BENCH_LOCK" 2>/dev/null)"
+  echo "       wait for it to finish (or stop it) and run again"
+  # The EXIT trap restarts the router when models.ini changed since this run
+  # read it — here the other run changed it, and the restart would break it.
+  rm -f "$INI_LOADED_MARK"
+  exit 1
+fi
+echo "pid $$ ($BACKEND, started $(date '+%F %T')): $0 $*" > "$BENCH_LOCK"
+
 load_models
 N_MODELS=${#MODEL_NAMES[@]}
 if [ "$N_MODELS" -eq 0 ]; then
@@ -6425,7 +6445,7 @@ case "$CMD" in
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning, then MTP on/off A/B"
     echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
-    echo "       global flags: --backend=llama-cpp|prism-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
+    echo "       global flags: --backend=llama-cpp|prism-llama-cpp|flint-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
     echo "       env: BENCH_REFINE=64|coarse|off sets the discover refinement depth (default 64)"
     exit 1

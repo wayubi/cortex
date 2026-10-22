@@ -8,8 +8,8 @@
 -- `backend` are what is resident right now, so a caller can also choose work
 -- that avoids a reload; `idle_for` is how long it has been quiet.
 --
--- Each server block defines the internal /__slots location this subrequests,
--- because a subrequest stays within its own server.
+-- Each server block defines the internal /__slots/<host> location this
+-- subrequests, because a subrequest stays within its own server.
 
 local cjson = require "cjson"
 local cortex = require "cortex"
@@ -22,7 +22,7 @@ for _, b in ipairs(cortex.BACKENDS) do
     total = total + n
 end
 
--- The llama.cpp routers' own view (llama-cpp and prism-llama-cpp), when they
+-- The llama.cpp routers' own view (every router in cortex.ROUTERS), when they
 -- have one. The in-flight counter only sees traffic that came through here;
 -- /slots also catches work submitted to a router directly. A router whose
 -- endpoint is absent, disabled (--no-slots) or slow adds nothing; if neither
@@ -48,8 +48,8 @@ local function read_slots(loc)
 end
 
 local slots = nil
-for _, loc in ipairs({ "/__slots", "/__slots_prism" }) do
-    local s = read_slots(loc)
+for _, r in ipairs(cortex.ROUTERS) do
+    local s = read_slots("/__slots/" .. r.host)
     if s then
         slots = slots or { processing = 0, total = 0 }
         slots.processing = slots.processing + s.processing

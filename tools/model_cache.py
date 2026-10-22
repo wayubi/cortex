@@ -37,7 +37,8 @@ WINDOW = float(os.environ.get("CORTEX_NVME_CACHE_DAYS", "7")) * 86400
 DIR = os.environ.get("CORTEX_NVME_CACHE_DIR", "/opt/cortex-models").rstrip("/")
 HUB = os.environ.get("HF_HUB", "/root/.cache/huggingface/hub")
 ROUTERS = [u for u in os.environ.get(
-    "CORTEX_ROUTERS", "http://llama-cpp:8080,http://prism-llama-cpp:8080").split(",") if u]
+    "CORTEX_ROUTERS",
+    "http://llama-cpp:8080,http://prism-llama-cpp:8080,http://flint-llama-cpp:8080").split(",") if u]
 POLL = 5
 RECONCILE_EVERY = 3600
 KEEP_FREE = 50e9           # never let a copy leave less than this free on DIR's filesystem
