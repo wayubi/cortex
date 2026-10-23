@@ -1,0 +1,367 @@
+{
+  "model": "sage-a1.5-35b-a3b-q4-mtp-64k-think",
+  "ctx": 65536,
+  "batch": 8768,
+  "ubatch": 8768,
+  "placement": "CPU",
+  "bench_date": "2026-10-23T10:28:19.858396",
+  "bench_method": "bench_model.sh v2",
+  "backend": "llama-cpp",
+  "config": {
+    "temp": "1.0",
+    "top_k": "20",
+    "top_p": "0.95",
+    "min_p": "0.00",
+    "repeat_penalty": "1.0",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "InternScience/Sage-A1.5-Q4_K_M-GGUF:Q4_K_M",
+    "quant": "Q4_K_M",
+    "reasoning": "on",
+    "ctx": "65536",
+    "batch": "8768"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 49152,
+    "decode_prompt_tokens": 108,
+    "model_file_size_gb": 20.22,
+    "build_info": "llama-cpp 0.3.0-dev (build 1, commit 3737e41)",
+    "wall_time_s": 87
+  },
+  "speed": {
+    "prefill_t_s": 1313.76,
+    "prefill_ms": 36608.7,
+    "prefill_ms_per_tok": 0.7612,
+    "decode_t_s": 42.98,
+    "decode_ms": 84405.63,
+    "decode_ms_per_tok": 23.2651
+  },
+  "request": {
+    "prefill_prompt_tokens": 48095,
+    "decode_prompt_tokens": 108,
+    "max_tokens": 4000,
+    "completion_tokens": 3629,
+    "total_tokens": 3737,
+    "cached_tokens": 0,
+    "cache_n": 0,
+    "predicted_n": 3629,
+    "finish_reason": "stop",
+    "truncated": false,
+    "degeneracy": 0.0007
+  },
+  "mtp": {
+    "acceptance": null,
+    "draft_accepted": null,
+    "draft_generated": null,
+    "draft_mean_len": null,
+    "n_max_loaded": null,
+    "p_min_loaded": null,
+    "tuning_status": "ok",
+    "tuning_reason": null,
+    "tuned_n_max": 2,
+    "tuned_p_min": 0.5,
+    "placement_baseline": "CPU",
+    "tuning_samples": [
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 36.5,
+        "tokens": 3564,
+        "placement": "CPU",
+        "accept": 0.8631,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.3
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 36.3,
+        "tokens": 3361,
+        "placement": "CPU",
+        "accept": 0.81304,
+        "degeneracy": 0.0016,
+        "oom": 0,
+        "mean_draft_len": 2.48
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 35.4,
+        "tokens": 3916,
+        "placement": "CPU",
+        "accept": 0.83589,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.49
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 36.6,
+        "tokens": 3370,
+        "placement": "CPU",
+        "accept": 0.84577,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.6
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 35.5,
+        "tokens": 3933,
+        "placement": "CPU",
+        "accept": 0.8628,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.31
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.5,
+        "tps": 37.1,
+        "tokens": 2715,
+        "placement": "CPU",
+        "accept": 0.74293,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.26
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.9,
+        "tps": 35.6,
+        "tokens": 3495,
+        "placement": "CPU",
+        "accept": 0.95833,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.28
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.5,
+        "tps": 38.7,
+        "tokens": 3347,
+        "placement": "CPU",
+        "accept": 0.7577,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.29
+      }
+    ],
+    "tuning_written_at": "2026-10-23T10:25:57.648715",
+    "ab": {
+      "decision": "off",
+      "on_tps": 37.9,
+      "off_tps": 43.4,
+      "speedup": 0.8733,
+      "tie": 0.02,
+      "clear": 0.05,
+      "rounds": 1,
+      "on_source": "tuner",
+      "samples": [
+        {
+          "side": "on",
+          "tps": 37.1,
+          "tokens": 2715,
+          "placement": "CPU",
+          "oom": 0,
+          "accept": 0.74293,
+          "source": "tuner"
+        },
+        {
+          "side": "on",
+          "tps": 38.7,
+          "tokens": 3347,
+          "placement": "CPU",
+          "oom": 0,
+          "accept": 0.7577,
+          "source": "tuner"
+        },
+        {
+          "side": "off",
+          "tps": 43.4,
+          "tokens": 2843,
+          "placement": "CPU",
+          "oom": 0,
+          "accept": null,
+          "source": "ab"
+        }
+      ]
+    },
+    "configured_n_max": null,
+    "configured_p_min": null,
+    "drafter": "none"
+  },
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 298.55
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 500.62
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 732.23
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 966.46
+      },
+      {
+        "batch": 4096,
+        "status": "PASS",
+        "prefill": 1193.46
+      },
+      {
+        "batch": 8192,
+        "status": "PASS",
+        "prefill": 1282.62
+      },
+      {
+        "batch": 16384,
+        "status": "PASS",
+        "prefill": 1200.39
+      },
+      {
+        "batch": 8768,
+        "status": "REFINE",
+        "prefill": 1306.02
+      },
+      {
+        "batch": 11648,
+        "status": "REFINE",
+        "prefill": 1256.39
+      },
+      {
+        "batch": 6976,
+        "status": "REFINE",
+        "prefill": 1226.23
+      },
+      {
+        "batch": 8704,
+        "status": "REFINE",
+        "prefill": 1287.16
+      },
+      {
+        "batch": 9856,
+        "status": "REFINE",
+        "prefill": 1292.84
+      },
+      {
+        "batch": 9792,
+        "status": "REFINE",
+        "prefill": 1262.85
+      },
+      {
+        "batch": 10496,
+        "status": "REFINE",
+        "prefill": 1271.03
+      },
+      {
+        "batch": 10880,
+        "status": "REFINE",
+        "prefill": 1275.72
+      },
+      {
+        "batch": 11200,
+        "status": "REFINE",
+        "prefill": 1250.0
+      },
+      {
+        "batch": 10752,
+        "status": "REFINE",
+        "prefill": 1248.37
+      },
+      {
+        "batch": 11008,
+        "status": "REFINE",
+        "prefill": 1265.58
+      },
+      {
+        "batch": 10816,
+        "status": "REFINE",
+        "prefill": 1247.76
+      }
+    ],
+    "best_prefill": 1282.62,
+    "pick": 8768,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      6976,
+      8704,
+      8768,
+      9792,
+      9856,
+      10496,
+      10752,
+      10816,
+      10880,
+      11008,
+      11200,
+      11648
+    ],
+    "ceiling_coarse": "16384 PASS (not probed higher)",
+    "ladder_break": "0",
+    "written_at": "2026-10-23T10:09:20.628930"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 1695.9,
+      "avg_gpu_util_pct": 40.2,
+      "avg_gpu_mem_util_pct": 28.7,
+      "cpu_stddev_pct": 270.3,
+      "peak_vram_mib": 10913,
+      "peak_power_w": 103.86,
+      "peak_temp_c": 56,
+      "peak_clocks_sm_mhz": 1965,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 10913,
+      "final_temp_c": 50,
+      "final_power_w": 40.27,
+      "ram_used_mib": 45295,
+      "rss_mib": 22780,
+      "sample_count": 37
+    }
+  },
+  "propagated": true,
+  "propagated_from": "sage-a1.5-35b-a3b-q4-mtp-64k",
+  "propagated_date": "2026-10-23T10:28:19.985152"
+}
