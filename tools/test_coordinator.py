@@ -5,7 +5,7 @@
     python3 tools/test_coordinator.py --ref HEAD # a commit, to show what fails
 
 Starts a private docker network with tools/coord_mock.py standing in for all
-five backends (more mocks play prism-llama-cpp and flint-llama-cpp, the
+the backends (more mocks play prism-, flint- and raon-llama-cpp, the
 routers that share :8080 with llama-cpp) and a throwaway openresty running the
 real nginx.conf and Lua from openresty/. Nothing touches the live stack or the GPU. cortex.lua's
 HUMAN_HOLD and BOT_HOLD_CAP are shortened to HOLD and CAP below so a run takes
@@ -30,13 +30,15 @@ MOCK_IMAGE = "python:3.11-slim"
 HOLD = 3
 CAP = 6
 LUA = ("coordinator.lua", "availability.lua", "cortex.lua", "log.lua", "models_list.lua")
-# :8080 models that route to prism-llama-cpp / flint-llama-cpp (their
+# :8080 models that route to prism- / flint- / raon-llama-cpp (their
 # models.ini section names); every other :8080 model goes to llama-cpp
 PRISM_MODELS = ("m-prism", "m-prism2")
 FLINT_MODELS = ("m-flint", "m-flint2")
+RAON_MODELS = ("m-raon",)
 # the extra :8080 routers: (suffix, host, backend key, its models)
 EXTRA = (("pmock", "prism-llama-cpp", "prism_llama_cpp", PRISM_MODELS),
-         ("fmock", "flint-llama-cpp", "flint_llama_cpp", FLINT_MODELS))
+         ("fmock", "flint-llama-cpp", "flint_llama_cpp", FLINT_MODELS),
+         ("rmock", "raon-llama-cpp", "raon_llama_cpp", RAON_MODELS))
 
 
 def router_of(model):
@@ -378,11 +380,30 @@ def scenario_flint_routes_by_model_and_switches(stack):
     settle(stack)
 
 
+def scenario_raon_routes_and_switches_from_another_extra_router(stack):
+    """A fourth router, raon-llama-cpp: moving between two non-default routers
+    unloads the one left behind."""
+    print("a Raon model goes to raon-llama-cpp; leaving flint-llama-cpp for it unloads flint")
+    f = Call(stack, time.time(), 8080, "m-flint", 0.1, bot=False)
+    f.start(); f.join()
+    r = Call(stack, time.time(), 8080, "m-raon", 0.1, bot=False)
+    r.start(); r.join()
+    check("a Raon model is served by raon-llama-cpp", r.status == 200
+          and (r.body or {}).get("backend") == "raon_llama_cpp", (r.status, r.body))
+    check("and flint-llama-cpp was unloaded first", loaded_on_8080(stack) == {"m-raon": "raon_llama_cpp"},
+          loaded_on_8080(stack))
+    a = Call(stack, time.time(), 8080, "m-a", 0.1, bot=False)
+    a.start(); a.join()
+    check("back to llama-cpp unloads raon-llama-cpp", a.status == 200
+          and loaded_on_8080(stack) == {"m-a": "llama_cpp"}, (a.status, loaded_on_8080(stack)))
+    settle(stack)
+
+
 def scenario_mixed_routers_concurrently(stack):
     print("concurrent requests across all :8080 routers all complete, nothing left counted")
     t0 = time.time()
     calls = [Call(stack, t0, 8080, m, 0.3, bot=False, timeout=20)
-             for m in ("m-a", "m-prism", "m-flint", "m-b", "m-prism2", "m-flint2", "m-prism")]
+             for m in ("m-a", "m-prism", "m-flint", "m-raon", "m-b", "m-prism2", "m-flint2", "m-prism")]
     for c in calls:
         c.start()
     for c in calls:
@@ -428,6 +449,7 @@ def main():
                    scenario_concurrent_switches_do_not_deadlock,
                    scenario_prism_routes_by_model_and_switches,
                    scenario_flint_routes_by_model_and_switches,
+                   scenario_raon_routes_and_switches_from_another_extra_router,
                    scenario_mixed_routers_concurrently,
                    scenario_fresh_state_unloads_what_is_resident):
             try:

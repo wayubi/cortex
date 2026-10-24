@@ -141,6 +141,56 @@ services:
       - "--host"
       - "0.0.0.0"
 
+  raon-llama-build:
+    # docker compose --profile build build raon-llama-build
+    # The llama.cpp build for KRAFTON Raon-1 mini: KRAFTON's fork, branch
+    # raon-1-mini-preview (upstream ~b11729 + the `raon1` arch; upstream
+    # support is pending). The branch has no release tags, so it is pinned by
+    # commit (LLAMA_COMMIT). Bump the SHA and its tag only to re-bench Raon.
+    profiles: ["build"]
+    build:
+      context: ./llama-cpp
+      dockerfile: Dockerfile
+      args:
+        BUILD_JOBS: "20"
+        LLAMA_REPO: "https://github.com/krafton-ai/llama.cpp.git"
+        LLAMA_REF: "raon-1-mini-preview"
+        LLAMA_COMMIT: "fb895662d25868756a19253ca5e0688f99b18994"
+      tags:
+        - "raon-llama-cpp:fb89566"
+    image: raon-llama-cpp:latest
+
+  raon-llama-cpp:
+    # Served on openresty :8080 like flint-llama-cpp: a request whose model is
+    # a section of raon-llama-cpp/models.ini is routed here (cortex.lua).
+    # The Raon repo is gated: HF_TOKEN comes from compose.override.yml.
+    runtime: nvidia
+    restart: unless-stopped
+    image: raon-llama-cpp:latest
+    pull_policy: never
+    networks:
+      - cortex_network
+    volumes:
+      - llama-cpp_data:/root/.cache/huggingface
+      - ./raon-llama-cpp/models.ini:/models.ini
+      - /opt/cortex-models:/opt/cortex-models:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      core:
+        soft: 0
+        hard: 0
+    command:
+      - "--models-preset"
+      - "/models.ini"
+      - "--port"
+      - "8080"
+      - "--host"
+      - "0.0.0.0"
+
   ollama:
     image: ollama/ollama
     restart: unless-stopped
@@ -190,9 +240,10 @@ services:
       - ./openresty/log.lua:/etc/nginx/lua/log.lua
       # GET /v1/models on :8080 — every llama.cpp router's list merged
       - ./openresty/models_list.lua:/etc/nginx/lua/models_list.lua
-      # which :8080 models go to prism-llama-cpp / flint-llama-cpp (their section names)
+      # which :8080 models go to prism- / flint- / raon-llama-cpp (their section names)
       - ./prism-llama-cpp/models.ini:/etc/nginx/prism-models.ini:ro
       - ./flint-llama-cpp/models.ini:/etc/nginx/flint-models.ini:ro
+      - ./raon-llama-cpp/models.ini:/etc/nginx/raon-models.ini:ro
     networks:
       - cortex_network
       - enhasa_network

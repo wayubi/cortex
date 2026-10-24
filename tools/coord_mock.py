@@ -4,7 +4,7 @@
 One process listens on 8080, 11434 and 5002; the test gives its container
 the network aliases llama-cpp, ollama and nllb, so coordinator.lua's own
 unload and status calls reach it exactly as they reach the real backends.
-More containers (MOCK_8080=prism_llama_cpp / flint_llama_cpp, aliased by host) stand
+More containers (MOCK_8080=prism_llama_cpp / flint_llama_cpp / raon_llama_cpp, aliased by host) stand
 in for the other :8080 routers; replies name the backend that answered.
 An inference sleeps for the `delay` its body names, so a test controls how
 long a request stays in flight. No GPU, no model.
