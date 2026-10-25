@@ -1934,15 +1934,20 @@ for b, p in pts[:$SHORTLIST_SIZE]:
 # so a multi-quant repo (e.g. bartowski/Mellum…:Q6_K_L cached) would otherwise
 # report every sibling quant as cached, skip the download-monitor, and let the
 # router cold-start a download that fire_request then aborts by restarting the
-# container. gguf_present() checks the specific quant's file in the snapshot.
+# container. gguf_present() checks the specific quant's file in the snapshot,
+# or the exact file when the section names one with `hf-file` (a repo whose
+# quant tag matches two files, e.g. swift-1.5's IQ2_XS and IQ2_XS-mtp).
 gguf_present() {
-  # $1 = HUB_DIR, $2 = quant tag (may be empty)
-  local HUB=$1 QUANT=$2 REF SNAP MATCH
+  # $1 = HUB_DIR, $2 = quant tag (may be empty), $3 = hf-file (may be empty)
+  local HUB=$1 QUANT=$2 FILE=${3:-} REF SNAP MATCH
   [ -f "$HUB/refs/main" ] || return 1
   REF=$(cat "$HUB/refs/main" 2>/dev/null) || return 1
   [ -n "$REF" ] || return 1
   SNAP="$HUB/snapshots/$REF"
   [ -d "$SNAP" ] || return 1
+  if [ -n "$FILE" ]; then
+    [ -e "$SNAP/$FILE" ]; return
+  fi
   if [ -n "$QUANT" ]; then
     # Single-file: <name>-<quant>.gguf ; split: <name>-<quant>-00001-of-000NN.gguf
     MATCH=$(find "$SNAP" -maxdepth 1 \
@@ -2022,6 +2027,8 @@ hf = re.search(r'^\s*hf\s*=\s*(\S+)', sec, re.MULTILINE)
 print(hf.group(1) if hf else '')
 " 2>/dev/null || echo "")
   [ -z "$HF" ] && return 0
+  local HF_FILE
+  HF_FILE=$(MODEL=$M read_ini_val hf-file)
   local REPO="${HF%%:*}"
   local QUANT=""
   [ "$HF" != "$REPO" ] && QUANT="${HF##*:}"
@@ -2041,7 +2048,7 @@ print(hf.group(1) if hf else '')
   PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
 
   # Complete: no partial file AND the specific quant's gguf is present.
-  if [ -z "$PART" ] && gguf_present "$HUB_DIR" "$QUANT"; then
+  if [ -z "$PART" ] && gguf_present "$HUB_DIR" "$QUANT" "$HF_FILE"; then
     local SIZE
     SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
     log "  weights cached ($SIZE)"
@@ -2074,7 +2081,7 @@ with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
     PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
     if [ -n "$PART" ]; then MARKER_FOUND=1; break; fi
     # If the model's file is already present, it loaded from cache.
-    if gguf_present "$HUB_DIR" "$QUANT"; then
+    if gguf_present "$HUB_DIR" "$QUANT" "$HF_FILE"; then
       kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
       local SIZE
       SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
@@ -2107,7 +2114,7 @@ with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
     PART=$(find "$HUB_DIR" -name '*.downloadInProgress' -print -quit 2>/dev/null || true)
 
     # Download complete: marker gone AND the quant's file is present.
-    if [ -z "$PART" ] && gguf_present "$HUB_DIR" "$QUANT"; then
+    if [ -z "$PART" ] && gguf_present "$HUB_DIR" "$QUANT" "$HF_FILE"; then
       local SIZE
       SIZE=$(du -sh "$HUB_DIR" 2>/dev/null | cut -f1)
       log "  download complete ($SIZE, ${ELAPSED}s)"
