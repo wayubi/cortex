@@ -1,0 +1,174 @@
+{
+  "model": "swift-1.5-qwen3.8-27b-gsq-iq2xs-114k",
+  "ctx": 116736,
+  "batch": 512,
+  "ubatch": 512,
+  "placement": "GPU",
+  "bench_date": "2026-10-25T15:40:00.532868",
+  "bench_method": "bench_model.sh v2",
+  "backend": "llama-cpp",
+  "config": {
+    "temp": "0.7",
+    "top_k": "20",
+    "top_p": "0.80",
+    "min_p": "0.00",
+    "repeat_penalty": "1.0",
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "ukisai/Swift-1.5-Qwen3.8-27B-GSQ-RCO-GGUF",
+    "quant": null,
+    "reasoning": "off",
+    "ctx": "116736",
+    "batch": "512"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 87552,
+    "decode_prompt_tokens": 108,
+    "model_file_size_gb": 7.84,
+    "build_info": "llama-cpp 0.3.0-dev (build 1, commit 3737e41)",
+    "wall_time_s": 168
+  },
+  "speed": {
+    "prefill_t_s": 351.88,
+    "prefill_ms": 243435.03,
+    "prefill_ms_per_tok": 2.8419,
+    "decode_t_s": 21.13,
+    "decode_ms": 163950.33,
+    "decode_ms_per_tok": 47.3161
+  },
+  "request": {
+    "prefill_prompt_tokens": 85660,
+    "decode_prompt_tokens": 108,
+    "max_tokens": 4000,
+    "completion_tokens": 3466,
+    "total_tokens": 3574,
+    "cached_tokens": 0,
+    "cache_n": 0,
+    "predicted_n": 3466,
+    "finish_reason": "stop",
+    "truncated": false,
+    "degeneracy": 0.0512
+  },
+  "mtp": {
+    "acceptance": null,
+    "draft_accepted": null,
+    "draft_generated": null,
+    "draft_mean_len": null,
+    "n_max_loaded": null,
+    "p_min_loaded": null,
+    "tuning_status": "not_mtp",
+    "tuning_reason": null,
+    "tuned_n_max": null,
+    "tuned_p_min": null,
+    "placement_baseline": null,
+    "tuning_samples": [],
+    "tuning_written_at": "2026-10-25T15:07:36.218461",
+    "ab": null,
+    "configured_n_max": null,
+    "configured_p_min": null,
+    "drafter": "none"
+  },
+  "discover": {
+    "mode": "GPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "PASS",
+        "prefill": 447.79
+      },
+      {
+        "batch": 512,
+        "status": "PASS",
+        "prefill": 459.55
+      },
+      {
+        "batch": 1024,
+        "status": "PASS",
+        "prefill": 447.13
+      },
+      {
+        "batch": 2048,
+        "status": "PASS",
+        "prefill": 451.43
+      },
+      {
+        "batch": 704,
+        "status": "REFINE",
+        "prefill": 424.7
+      },
+      {
+        "batch": 384,
+        "status": "REFINE",
+        "prefill": 453.86
+      },
+      {
+        "batch": 448,
+        "status": "REFINE",
+        "prefill": 446.79
+      },
+      {
+        "batch": 576,
+        "status": "REFINE",
+        "prefill": 415.8
+      }
+    ],
+    "best_prefill": 459.55,
+    "pick": 512,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [
+      384,
+      448,
+      576,
+      704
+    ],
+    "ceiling_coarse": "2048 PASS (not probed higher)",
+    "ladder_break": "2",
+    "written_at": "2026-10-25T15:32:55.858499"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 97.9,
+      "avg_gpu_util_pct": 95.8,
+      "avg_gpu_mem_util_pct": 65.1,
+      "cpu_stddev_pct": 1.7,
+      "peak_vram_mib": 10979,
+      "peak_power_w": 169.8,
+      "peak_temp_c": 67,
+      "peak_clocks_sm_mhz": 1950,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 10979,
+      "final_temp_c": 61,
+      "final_power_w": 48.47,
+      "ram_used_mib": 21231,
+      "rss_mib": 3625,
+      "sample_count": 53
+    }
+  }
+}
