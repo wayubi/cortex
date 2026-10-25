@@ -1140,7 +1140,7 @@ with open('/tmp/perf_decode_payload.json','w') as f: json.dump(payload, f)
   local CPU_SAMPLES=()
   for i in $(seq 1 40); do
     local TOP CPU
-    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
+    TOP=$(llama_top)
     CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
     [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
     if ! kill -0 $DEC_PID 2>/dev/null; then break; fi
@@ -1188,6 +1188,11 @@ GPU_ACTIVE_PCT=25
 GPU_CPU_MAX=150           # cpu < this + GPU active => GPU-resident (plan §30.2 Change B)
 RESID_MIN_FLOOR_SAMPLES=10   # 20s @2s before early-kill verdicts are allowed (belt-and-suspenders)
 
+# The busiest llama-server line of one `top` frame (several routers and the model
+# child all match). Sort, width and locale are fixed so the %CPU column read as
+# field 9 does not depend on a toprc, COLUMNS or LC_NUMERIC.
+llama_top() { LC_ALL=C top -bn1 -w 512 -o %CPU 2>/dev/null | grep llama-s | head -n1 || true; }
+
 # ── Binary placement classifier (plan §37 Change F) ─────────
 # One classifier shared by residency_probe, decode_sample and cmd_bench so the
 # published record never says AMBIGUOUS. A GPU-resident llama.cpp keeps exactly
@@ -1214,8 +1219,27 @@ classify_placement() {
   return 0
 }
 
+# A probe that ends without a single CPU or GPU reading measured nothing, and
+# must not be classified: 0%/0% reads as CPU, and a false CPU at rung 256 turns
+# residency off for a whole bisect (swift-1.5 2026-10-25: "avg cpu 0%, avg gpu
+# 0%" on a model decoding at GPU speed). Re-measure once, then report STALL, which
+# every caller already treats as "placement unknown" (abort, ini restored).
 residency_probe() {
-  # stdout is reserved for the single verdict (GPU|CPU|AMBIGUOUS); all progress
+  local V
+  V=$(residency_probe_once)
+  if [ "$V" = "NOSAMPLE" ]; then
+    log "  residency: no CPU or GPU reading — measuring again" >&2
+    V=$(residency_probe_once)
+    if [ "$V" = "NOSAMPLE" ]; then
+      log "  residency: still no reading — STALL (placement unknown, not CPU)" >&2
+      V="STALL"
+    fi
+  fi
+  echo "$V"
+}
+
+residency_probe_once() {
+  # stdout is reserved for the single verdict (GPU|CPU|STALL|NOSAMPLE); all progress
   # logs go to stderr so command-substitution captures stay clean.
   local CTX=$(read_ctx)
   local DECODE_MAX=$(python3 -c "print(max(256, min(4000, $CTX - 64)))")
@@ -1237,10 +1261,13 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
 
   local R_CPU_SUM=0 R_CPU_CNT=0 R_GPU_SUM=0 R_GPU_CNT=0 R_GPU_SEEN=0
   local R_CPU=0 R_GPU=0 R_TEMP=0 R_CPU_CONSEC=0 R_GPU_CONSEC=0
+  local R_POLLS=0 R_DIAG=0 R_SEEN_BEFORE
   local i
   for i in $(seq 1 40); do
+    R_POLLS=$i
     local TOP STATS
-    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
+    R_SEEN_BEFORE=$((R_CPU_CNT + R_GPU_CNT))
+    TOP=$(llama_top)
     R_CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
     STATS=$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits 2>/dev/null)
     R_GPU=$(echo "$STATS" | cut -d',' -f1 | tr -d ' ')
@@ -1249,6 +1276,12 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
     [ -n "$R_CPU" ] && [ "$R_CPU" != "0.0" ] && { R_CPU_SUM=$(echo "$R_CPU_SUM + $R_CPU" | bc 2>/dev/null || echo 0); R_CPU_CNT=$((R_CPU_CNT + 1)); }
     [ -n "$R_GPU" ] && [ "$R_GPU" != "0" ] && { R_GPU_SUM=$(echo "$R_GPU_SUM + $R_GPU" | bc 2>/dev/null || echo 0); R_GPU_CNT=$((R_GPU_CNT + 1)); }
     { [ -n "$R_GPU" ] && [ "$R_GPU" -gt "$GPU_ACTIVE_PCT" ] 2>/dev/null; } && R_GPU_SEEN=1
+    # Raw lines of polls that counted nothing (first 5), so a failing run shows
+    # which reading was empty and whether the request was still running.
+    if [ $((R_CPU_CNT + R_GPU_CNT)) -eq "$R_SEEN_BEFORE" ] && [ "$R_DIAG" -lt 5 ]; then
+      R_DIAG=$((R_DIAG + 1))
+      log "  residency: poll $i counted nothing — request $(kill -0 $R_PID 2>/dev/null && echo running || echo ended) | top: [${TOP:-none}] | nvidia-smi: [${STATS:-none}]" >&2
+    fi
 
     # CPU-spill: definitive regardless of GPU (only all-cores >200% proves it)
     if [ "$(echo "$R_CPU > 200" | bc -l)" = "1" ]; then
@@ -1279,6 +1312,11 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
     sleep 2
   done
   wait $R_PID 2>/dev/null || true
+
+  if [ "$R_CPU_CNT" -eq 0 ] && [ "$R_GPU_CNT" -eq 0 ]; then
+    log "  residency: no reading in $R_POLLS poll(s)" >&2
+    echo "NOSAMPLE"; return 0
+  fi
 
   # Fallback: classify from the full window averages via the shared binary
   # classifier (plan §37 Change F) — never AMBIGUOUS.
@@ -2328,7 +2366,7 @@ with open('/tmp/decode_payload.json','w') as f: json.dump(payload, f)
     local POLL_T0=$(date +%s)
     for i in $(seq 1 $POLL_MAX_SAMPLES); do
       local TOP CPU GPU
-      TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
+      TOP=$(llama_top)
       CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
       GPU=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | tr -d ' ')
       [ -n "$CPU" ] && [ "$CPU" != "0.0" ] && CPU_SAMPLES+=("$CPU")
@@ -5472,7 +5510,7 @@ print(f'  Decode payload: DECODE_PROMPT (natural stop, max_tokens=$DECODE_MAX_TO
   local i
   for i in $(seq 1 $POLL_MAX_SAMPLES); do
     local TOP CPU GPUSTATS GPU MEM TEMP POWER VRAM CLOCK_SM CLOCK_MEM
-    TOP=$(top -bn1 2>/dev/null | grep llama-s | head -n1) || true
+    TOP=$(llama_top)
     CPU=$(echo "$TOP" | awk '{print $9}' 2>/dev/null || echo "0")
     GPUSTATS=$(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,temperature.gpu,power.draw,memory.used,clocks.sm,clocks.mem --format=csv,noheader,nounits 2>/dev/null)
     GPU=$(echo "$GPUSTATS" | cut -d',' -f1 | tr -d ' ')
