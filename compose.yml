@@ -244,9 +244,10 @@ services:
       - ./prism-llama-cpp/models.ini:/etc/nginx/prism-models.ini:ro
       - ./flint-llama-cpp/models.ini:/etc/nginx/flint-models.ini:ro
       - ./raon-llama-cpp/models.ini:/etc/nginx/raon-models.ini:ro
+    # clients reach it on the published ports, or on a shared docker network
+    # added per machine in compose.override.yml
     networks:
       - cortex_network
-      - enhasa_network
 
   # Keeps an NVMe copy of the GGUFs loaded most and serves them from there by
   # repointing their HF snapshot links (tools/model_cache.py). The SSD copy is
@@ -276,5 +277,3 @@ volumes:
 
 networks:
   cortex_network:
-  enhasa_network:
-    external: true

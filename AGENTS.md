@@ -43,7 +43,7 @@ The compose services are `llama-cpp` / `prism-llama-cpp` / `flint-llama-cpp` / `
 - `docker compose --profile build build raon-llama-build` — rebuild KRAFTON's Raon fork (`raon-llama-cpp:latest` + `raon-llama-cpp:<short sha>`)
 - All builders share `llama-cpp/Dockerfile` (args `LLAMA_REPO`, `LLAMA_REF`, `LLAMA_COMMIT`, `CUDA_ARCH`, default 86 = RTX 3060) and are **pinned** in compose.yml, to release tags where the repo has them: upstream `b10622` (the build serving cortex when pinning began, 2026-08-25), the fork `prism-b10777-e3de715`, flint `b11820` (2026-10-22; Flint landed in b11803). KRAFTON's `raon-1-mini-preview` branch has no tags, so `LLAMA_COMMIT` pins it to `fb895662d` (2026-10-20, upstream ~b11729 + Raon); the clone fetches that exact commit. Build the fork from its `prism` branch's release tags — the fork's `master` is a stale upstream mirror. Bump a tag deliberately, then `docker compose up -d <service>` and re-bench; the previous image stays tagged for rollback.
 - `docker compose up -d prism-llama-cpp` (or `flint-llama-cpp`, `raon-llama-cpp`) — (re)create only that backend; the router reads its models.ini at start, so a models.ini edit needs `docker compose restart <service>`
-- The internal network is `cortex_network` (compose-managed bridge). External `enhasa_network` must exist before `up`.
+- The internal network is `cortex_network` (compose-managed bridge). Any shared network that clients use to reach openresty is machine-specific: it goes in `compose.override.yml` (service `networks:` plus a top-level `external: true` entry) and must exist before `up`.
 
 ## File layout
 
