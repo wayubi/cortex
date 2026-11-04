@@ -227,6 +227,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
+      - "80:80"
       - "11434:11434"
       - "8080:8080"
       - "5002:5002"
@@ -244,6 +245,9 @@ services:
       - ./prism-llama-cpp/models.ini:/etc/nginx/prism-models.ini:ro
       - ./flint-llama-cpp/models.ini:/etc/nginx/flint-models.ini:ro
       - ./raon-llama-cpp/models.ini:/etc/nginx/raon-models.ini:ro
+      # raw client tooling for `curl URL | sh` install workflows (mounted from pi scripts)
+      - ./pi/scripts/install-pi.sh:/etc/nginx/scripts/install-pi.sh:ro
+      - ./pi/scripts/generate-models.sh:/etc/nginx/scripts/generate-models.sh:ro
     # clients reach it on the published ports, or on a shared docker network
     # added per machine in compose.override.yml
     networks:
