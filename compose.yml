@@ -270,10 +270,28 @@ services:
       - CORTEX_NVME_CACHE_DAYS=7          # ... within this many days
       - CORTEX_NVME_CACHE_DIR=/opt/cortex-models
 
+  pi:
+    build:
+      context: ./pi
+      dockerfile: Dockerfile
+    image: pi:latest
+    init: true
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    working_dir: /opt
+    environment:
+      - TERM=xterm-256color
+    volumes:
+      - pi_data:/root/.pi/agent
+    networks:
+      - cortex_network
+
 volumes:
   ollama_data:
   llama-cpp_data:
   nllb_data:
+  pi_data:
 
 networks:
   cortex_network:

@@ -19,3 +19,6 @@ tools/bonsai/
 .claude/
 .opencode/
 openresty/local.d/
+
+# Local SSH credentials for agent containers
+.ssh/
