@@ -4,11 +4,11 @@ An OpenResty-based VRAM coordinator that lets you hot-swap between **Ollama**, *
 
 ## Architecture
 
-Cortex runs four services in a shared Docker network. An `openresty` reverse proxy sits in front of all backends and routes each incoming request to the correct one. If a request targets a different backend than the one currently active, `coordinator.lua` tells the active backend to unload its model from VRAM before letting the request through.
+Cortex runs its services in a shared Docker network. An `openresty` reverse proxy sits in front of all backends and routes each incoming request to the correct one. If a request targets a different backend than the one currently active, `coordinator.lua` tells the active backend to unload its model from VRAM before letting the request through.
 
 | Service | Port | Role |
 |---------|------|------|
-| **openresty** | 11434 (ollama), 8080 (llama.cpp, prism, flint, raon), 5002 (nllb) | Reverse proxy + VRAM coordinator |
+| **openresty** | 80 (client scripts, `/availability`, `/v1/models`), 11434 (ollama), 8080 (llama.cpp, prism, flint, raon), 5002 (nllb) | Reverse proxy + VRAM coordinator |
 | **ollama** | 11434 | Ollama inference backend |
 | **llama-cpp** | 8080 | upstream llama.cpp, router mode (`llama-cpp/models.ini`) |
 | **prism-llama-cpp** | 8080 | PrismML's llama.cpp fork, router mode, for the ternary Bonsai models (`prism-llama-cpp/models.ini`) |
@@ -16,6 +16,8 @@ Cortex runs four services in a shared Docker network. An `openresty` reverse pro
 | **raon-llama-cpp** | 8080 | KRAFTON's llama.cpp fork for Raon-1 mini, router mode (`raon-llama-cpp/models.ini`) |
 | **nllb** | 5002 | Hugging Face NLLB translation (FastAPI) |
 | **model-cache** | — | Keeps NVMe copies of the models loaded most (not in the request path) |
+| **pi** | — | Pi coding agent; auto-syncs its model list from Cortex |
+| **opencode** | — | OpenCode v2; auto-syncs its provider config from Cortex |
 
 `:8080` serves all four llama.cpp routers: a request for a model named in `prism-llama-cpp/models.ini`, `flint-llama-cpp/models.ini` or `raon-llama-cpp/models.ini` goes to that router, everything else to llama-cpp, and `GET /v1/models` lists them all. Model names are unique across the files. A model that needs a build the others lack gets its own router, named for the model, so llama-cpp's benched build never moves for it.
 
@@ -53,13 +55,49 @@ The `model-cache` service keeps an NVMe copy (in `/opt/cortex-models`) of each m
 git clone <url> && cd cortex
 docker compose up -d
 
-# Verify the three endpoints
+# Verify the endpoints
 curl http://localhost:8080/v1/models           # llama.cpp models
 curl http://localhost:11434/api/tags           # Ollama models
 curl http://localhost:5002/v1/models           # NLLB models
 ```
 
-All three model pickers populate without triggering a backend switch. Inference requests automatically switch as needed.
+All model pickers populate without triggering a backend switch. Inference requests automatically switch as needed.
+
+## Client agents
+
+`pi` and `opencode` are containers on the same network, and either can be installed on any
+Debian/Ubuntu or Alpine client from Cortex itself:
+
+```bash
+# Inside a container on cortex_network (the scripts are served on :80, and on
+# every other openresty port too):
+curl -fsSL http://openresty/install-pi.sh | sh
+curl -fsSL http://openresty/install-pi.sh | sh -s -- --all
+curl -fsSL http://openresty/install-opencode.sh | sh
+
+# From the host or another machine, point both URLs at the Cortex host; the
+# defaults (openresty:8080 and openresty:11434) only resolve on cortex_network:
+curl -fsSL http://<cortex-host>/install-pi.sh \
+  | CORTEX_URL=http://<cortex-host>:8080 OLLAMA_URL=http://<cortex-host>:11434 sh
+```
+
+Ollama models are listed at the context Ollama serves them with: the model's own
+`num_ctx` if set, else `CORTEX_OLLAMA_CTX` (default 4096, Ollama's automatic default on
+a GPU under 23 GiB). If the Ollama server sets `OLLAMA_CONTEXT_LENGTH` or runs on a
+larger GPU, pass the same value, e.g. `CORTEX_OLLAMA_CTX=32768 sh`.
+
+With no flags each installer adds the agent and regenerates its model list from
+`GET /v1/models` on `:8080` and `/api/tags` on `:11434`. `--all` adds every language
+toolkit; `--models-only` only refreshes the list; `--help` lists the rest. The
+installers are best-effort by default and `--strict` aborts on the first failure.
+
+The `pi` container writes `models.json`; the `opencode` container writes
+`opencode.json` under `~/.config/opencode/`, in OpenCode v2's format (`providers`,
+`package` + `settings.baseURL`), which is what the image and `install-opencode.sh`
+install. OpenCode v1 (the `opencode-ai` package) ignores that block. Both
+containers retry the model sync at start (`PI_SYNC_MODELS`, `OPENCODE_SYNC_MODELS`).
+Updating an existing deployment? Recreate openresty once so the scripts directory
+mount appears: `docker compose up -d openresty` (later edits need no restart).
 
 ## Rebuilding
 
@@ -78,6 +116,14 @@ docker compose up -d llama-cpp prism-llama-cpp flint-llama-cpp raon-llama-cpp
 ```bash
 docker compose build openresty
 docker compose up -d
+```
+
+**Client agents** (`pi`, `opencode`). Neither is pinned; a new `CACHEBUST` value
+re-runs only the agent install, so the build fetches the latest release:
+
+```bash
+CACHEBUST=$(date +%s) docker compose build pi opencode
+docker compose up -d pi opencode
 ```
 
 ## Benchmarking
@@ -178,7 +224,7 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 ├── AGENTS.md                 # developer instructions / benchmarking methodology
 ├── README.md
 ├── LICENSE
-├── compose.yml               # Docker Compose — openresty, ollama, llama-cpp, prism-llama-cpp, flint-llama-cpp, raon-llama-cpp, nllb
+├── compose.yml               # Docker Compose — openresty, ollama, llama.cpp routers, nllb, pi, opencode
 ├── compose.override.yml      # local volume mounts (model caches, models.ini)
 ├── CPU_POLLING.md            # CPU/GPU placement verification methodology
 ├── full-metrics.md           # benchmark table for all models (regenerate via tools/gen_metrics.sh)
@@ -206,14 +252,27 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 │   ├── Dockerfile
 │   ├── entrypoint.sh
 │   └── server.py             # HF translation (NLLB) FastAPI service
+├── pi/
+│   ├── Dockerfile
+│   └── entrypoint.sh         # auto-sync Pi models.json at start
+├── opencode/
+│   ├── Dockerfile
+│   └── entrypoint.sh         # auto-sync OpenCode opencode.json at start
 ├── openresty/
 │   ├── Dockerfile
-│   ├── nginx.conf            # 3 server blocks + lua_shared_dict
+│   ├── nginx.conf            # 4 server blocks + lua_shared_dict
 │   ├── coordinator.lua       # VRAM coordinator — API-based model unload, :8080 routing
 │   ├── cortex.lua            # human/bot policy and constants
 │   ├── availability.lua      # GET /availability on every port
 │   ├── log.lua               # log phase: releases in-flight counts, stamps idle times
-│   └── models_list.lua       # GET /v1/models on :8080 — every llama.cpp router merged
+│   ├── models_list.lua       # GET /v1/models on :8080 — every llama.cpp router merged
+│   └── scripts/              # raw client tooling (`curl URL | sh`)
+│       ├── agent-common.sh
+│       ├── models-common.sh
+│       ├── install-pi.sh
+│       ├── install-opencode.sh
+│       ├── generate-models-pi.sh
+│       └── generate-models-opencode.sh
 └── md/                       # planning and design docs (each states its status at the top)
     ├── plan-bench-discover-mode.md   # current benchmarking pipeline: design, reviews, decisions
     ├── plan-mtp-ab-decision.md       # MTP on/off A/B

@@ -10,20 +10,22 @@ RUN apk add --no-cache \
       ncurses-terminfo-base \
       openssh-client \
       ripgrep \
-      python3 \
- && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.5.0 \
+      python3
+
+# Pi is not pinned: a build with a new CACHEBUST value re-runs only this
+# layer and installs the latest release (CACHEBUST=$(date +%s) docker compose
+# build pi). The system packages above stay cached.
+ARG CACHEBUST=0
+RUN echo "cachebust=$CACHEBUST" \
+ && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest \
  && npm cache clean --force
 
-COPY --chmod=755 generate-models.sh /usr/local/bin/generate-models.sh
-
-# Pre-trusted hosts for SSH; avoids interactive host-key confirmation in a container
-RUN mkdir -p /root/.ssh \
- && ssh-keyscan -t ed25519 github.com > /root/.ssh/known_hosts \
- && chmod 755 /root/.ssh
+COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV TERM=xterm-256color \
     LANG=C.UTF-8 \
     PI_SKIP_VERSION_CHECK=1
 
 WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["sleep", "infinity"]

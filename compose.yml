@@ -234,9 +234,9 @@ services:
     volumes:
       - ./openresty/nginx.conf:/etc/nginx/conf.d/default.conf
       - ./openresty/coordinator.lua:/etc/nginx/lua/coordinator.lua
-      # GET /availability, served on all three ports (see nginx.conf)
+      # GET /availability, served on every port (see nginx.conf)
       - ./openresty/availability.lua:/etc/nginx/lua/availability.lua
-      # human/bot policy (required by the other three) and the log phase
+      # human/bot policy (required by the other servers) and the log phase
       - ./openresty/cortex.lua:/etc/nginx/lua/cortex.lua
       - ./openresty/log.lua:/etc/nginx/lua/log.lua
       # GET /v1/models on :8080 — every llama.cpp router's list merged
@@ -245,9 +245,8 @@ services:
       - ./prism-llama-cpp/models.ini:/etc/nginx/prism-models.ini:ro
       - ./flint-llama-cpp/models.ini:/etc/nginx/flint-models.ini:ro
       - ./raon-llama-cpp/models.ini:/etc/nginx/raon-models.ini:ro
-      # raw client tooling for `curl URL | sh` install workflows (mounted from pi scripts)
-      - ./pi/scripts/install-pi.sh:/etc/nginx/scripts/install-pi.sh:ro
-      - ./pi/scripts/generate-models.sh:/etc/nginx/scripts/generate-models.sh:ro
+      # raw client tooling for `curl URL | sh` install workflows
+      - ./openresty/scripts:/etc/nginx/scripts:ro
     # clients reach it on the published ports, or on a shared docker network
     # added per machine in compose.override.yml
     networks:
@@ -278,16 +277,59 @@ services:
     build:
       context: ./pi
       dockerfile: Dockerfile
+      args:
+        # a new value reinstalls the latest agent: CACHEBUST=$(date +%s) docker compose build
+        - CACHEBUST=${CACHEBUST:-0}
     image: pi:latest
     init: true
     restart: unless-stopped
     tty: true
     stdin_open: true
-    working_dir: /opt
+    working_dir: /workspace
     environment:
       - TERM=xterm-256color
+      - CORTEX_URL=http://openresty:8080
+      - OLLAMA_URL=http://openresty:11434
+      - PI_MODELS_FILE=/root/.pi/agent/models.json
+      # context Ollama serves a model without its own num_ctx (see models-common.sh)
+      - CORTEX_OLLAMA_CTX=4096
+      - PI_SYNC_MODELS=1
+      - PI_SYNC_RETRIES=10
+      - PI_SYNC_DELAY=3
+      - CORTEX_GENERATE_MODELS=/opt/cortex-scripts/generate-models-pi.sh
     volumes:
       - pi_data:/root/.pi/agent
+      - ./openresty/scripts:/opt/cortex-scripts:ro
+    networks:
+      - cortex_network
+
+  opencode:
+    build:
+      context: ./opencode
+      dockerfile: Dockerfile
+      args:
+        # a new value reinstalls the latest agent: CACHEBUST=$(date +%s) docker compose build
+        - CACHEBUST=${CACHEBUST:-0}
+    image: opencode:latest
+    init: true
+    restart: unless-stopped
+    tty: true
+    stdin_open: true
+    working_dir: /workspace
+    environment:
+      - TERM=xterm-256color
+      - CORTEX_URL=http://openresty:8080
+      - OLLAMA_URL=http://openresty:11434
+      - OPENCODE_CONFIG=/root/.config/opencode/opencode.json
+      # context Ollama serves a model without its own num_ctx (see models-common.sh)
+      - CORTEX_OLLAMA_CTX=4096
+      - OPENCODE_SYNC_MODELS=1
+      - OPENCODE_SYNC_RETRIES=10
+      - OPENCODE_SYNC_DELAY=3
+      - CORTEX_GENERATE_MODELS=/opt/cortex-scripts/generate-models-opencode.sh
+    volumes:
+      - opencode_data:/root/.config/opencode
+      - ./openresty/scripts:/opt/cortex-scripts:ro
     networks:
       - cortex_network
 
@@ -296,6 +338,7 @@ volumes:
   llama-cpp_data:
   nllb_data:
   pi_data:
+  opencode_data:
 
 networks:
   cortex_network:

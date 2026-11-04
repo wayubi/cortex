@@ -2,7 +2,7 @@
 
 ## Architecture
 
-- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp, **prism-llama-cpp, flint-llama-cpp or raon-llama-cpp**, `:5002` → nllb (HF translation). All six backends run alongside openresty (no profiles).
+- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp, **prism-llama-cpp, flint-llama-cpp or raon-llama-cpp**, `:5002` → nllb (HF translation). `:80` serves `/availability`, `/v1/models` and the raw client scripts in `openresty/scripts/`. All six backends run alongside openresty (no profiles).
 - **model-cache** keeps an NVMe copy of the GGUFs loaded most and serves them from there (see "NVMe model cache" below). It is not in the request path.
 - **`:8080` fronts several llama.cpp routers, chosen by model name** (`cortex.ROUTERS`, in order). `llama-cpp` (upstream at the benched pin) is the default. `prism-llama-cpp` is PrismML's llama.cpp fork (ternary `PQ2_0`/`PTQ1_0` types and the Hadamard runtime Bonsai needs; upstream cannot load those files). `flint-llama-cpp` is the upstream build for RecursiveSI Flint (arch `flint`, needs b11803+, which llama-cpp's pin predates). `raon-llama-cpp` is KRAFTON's fork for Raon-1 mini (arch `raon1`, not upstream yet; its repo is gated, so the router gets `HF_TOKEN` from `compose.override.yml`). **A model that needs a build the others cannot provide gets its own router, named for that model**, rather than moving llama-cpp's pin: the benched catalogue keeps the build it was benched on, and bumping a model's router tag re-benches only that router's `models.ini`. A request whose `model` is a section of a non-default router's `models.ini` goes to that router, every other model to llama-cpp (`cortex.router_for`, re-reading each ini — bind-mounted into openresty at `/etc/nginx/<prism|flint|raon>-models.ini` — at most every 5 s, so new entries route without a reload). Model names must therefore be **unique across all models.ini files**. To the coordinator each router is a separate backend (`llama_cpp`, `prism_llama_cpp`, `flint_llama_cpp`, `raon_llama_cpp`): moving between them drains, unloads and switches like any other backend change. GETs are not coordinated but follow `?model=` (`/props?model=…`); a GET naming no model reaches llama-cpp. `GET /v1/models` (and `/models`) on :8080 is answered by `openresty/models_list.lua`: every router's list merged, each id once from the router that serves it (each also lists the GGUFs it finds in the shared HF cache, so the raw lists overlap); a router that is down only drops its models.
 - `coordinator.lua` runs in the access phase. It tracks both the active backend AND the last requested model name. On every POST request (inference), it extracts the `model` field from the request body. If either the backend OR the model differs from the current state, the coordinator unloads all models from the current backend via its API, then updates state. This prevents llama.cpp's leaky self-unload (which leaves residual VRAM) because all unloads are triggered externally by the coordinator.
@@ -12,7 +12,7 @@
 - **One switch at a time; only proxied requests are counted.** A request is counted in flight (`request_counts`) only once it is admitted, i.e. about to be proxied to a resident model. A request that needs a different model takes the switch key (`backend_state` `switching`, holding its request id, TTL ≈ 710s, released by `log.lua` on every exit including aborts), drains the requests actually running on the current backend to **0** (up to `DRAIN_TIMEOUT` = **600s**, then 503), unloads, and sets state. Others wait while a switch is in progress; afterwards a waiter for the new model goes straight through and one for another model becomes the next switcher. This replaced counting a request before its drain and waiting for the count to fall to itself, which deadlocked concurrent switches: opencode sends requests for two or three models at once, and each waited on the others until the client gave up (2026-10-01, `drain llama_cpp (3 active, target 1)`).
 - Active requests are counted at access phase and released in the log phase (`openresty/log.lua`, `log_by_lua_file` in every server block) — the only place counts are released. A client that hangs up while held or draining is finalised via `ngx.on_abort` → `ngx.exit(499)`, which runs the log phase at once.
 - **Humans first, bots never interrupted** (`openresty/cortex.lua` holds the policy and constants). A request carrying `X-Cortex-Client: bot` (afghanica, the mastodon x_bridge) is a bot; anything else is a human (Open WebUI, opencode), so an unmodified client gets priority. A human waits only for the bot calls already in flight: while one is waiting (`human_waiting`), every new bot request is held, including one for the resident model, which would otherwise skip the drain and keep the human out. Once a human request has run (`human_running`, then `human_last`), a bot request that would **evict** the resident model is held until no human request has finished for `HUMAN_HOLD` (**120s**); a bot sharing the resident model goes straight through. A held bot is not counted in flight (so the human's drain never waits for it) and does not stamp `idle_for`; after `BOT_HOLD_CAP` (**600s**) it gets `503` with `X-Cortex-Held: human` and `Retry-After`, which bots treat as "stand aside", not an error. A bot that finishes draining after a human arrived goes back to the hold before unloading anything. Offline test: `python3 tools/test_coordinator.py` (throwaway openresty + `tools/coord_mock.py` on a private docker network; `--ref HEAD` runs it against a commit).
-- **`GET /availability`**, on **every** openresty port (`:11434`, `:5002`, `:8080`) so a client asks the port it already uses, reports `{busy, idle_for, human_pending, human_idle_for, in_flight, slots, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. The logic is one file, `openresty/availability.lua` (`content_by_lua_file`); each server block has an exact-match `location = /availability`, so it never reaches `coordinator.lua` or a backend, plus its own internal `/__slots/<host>` (a subrequest stays within its server; one regex location admits every router hostname). `busy` is in-flight POSTs on any backend OR any llama.cpp slot reporting `processing` (via `/__slots/<host>` for each router in `cortex.ROUTERS`, summed, handling both the bare-array and `{"slots":[...]}` shapes; `slots: null` when no router's endpoint answers — absent, disabled (`--no-slots`) or slow). `idle_for` is seconds since the last inference POST finished on any backend (`log.lua` stamps `backend_state` key `last_done`), `0` while one is in flight, `null` when none has finished since openresty started — so a scheduler can tell a client merely between requests of a longer run from a GPU that is really free, and wait out the gap if it chooses. `human_pending` is a human request waiting or running; `human_idle_for` is seconds since the last human request finished (`0` while pending, `null` before the first) — bots stand aside at their own boundaries while it is recent. Bind-mounted config; adding `availability.lua` added a volume, so the first deploy needs `docker compose up -d openresty` (recreate), later edits only `docker compose restart openresty`.
+- **`GET /availability`**, on **every** openresty port (`:80`, `:11434`, `:5002`, `:8080`) so a client asks the port it already uses, reports `{busy, idle_for, human_pending, human_idle_for, in_flight, slots, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. The logic is one file, `openresty/availability.lua` (`content_by_lua_file`); each server block has an exact-match `location = /availability`, so it never reaches `coordinator.lua` or a backend, plus its own internal `/__slots/<host>` (a subrequest stays within its server; one regex location admits every router hostname). `busy` is in-flight POSTs on any backend OR any llama.cpp slot reporting `processing` (via `/__slots/<host>` for each router in `cortex.ROUTERS`, summed, handling both the bare-array and `{"slots":[...]}` shapes; `slots: null` when no router's endpoint answers — absent, disabled (`--no-slots`) or slow). `idle_for` is seconds since the last inference POST finished on any backend (`log.lua` stamps `backend_state` key `last_done`), `0` while one is in flight, `null` when none has finished since openresty started — so a scheduler can tell a client merely between requests of a longer run from a GPU that is really free, and wait out the gap if it chooses. `human_pending` is a human request waiting or running; `human_idle_for` is seconds since the last human request finished (`0` while pending, `null` before the first) — bots stand aside at their own boundaries while it is recent. Bind-mounted config; adding `availability.lua` added a volume, so the first deploy needs `docker compose up -d openresty` (recreate), later edits only `docker compose restart openresty`.
 
 ## Critical naming
 
@@ -32,11 +32,68 @@ The compose services are `llama-cpp` / `prism-llama-cpp` / `flint-llama-cpp` / `
 - Unload function (API call to free VRAM on that backend), plus the no-state sweep in `switch_to`
 - `tools/coord_mock.py` / `tools/test_coordinator.py` (a mock for it, and a scenario)
 
+## Client agents (`pi` / `opencode`)
+
+Both client services live on `cortex_network` and have their model lists generated at
+container start; their config volumes are `pi_data:/root/.pi/agent` and
+`opencode_data:/root/.config/opencode`.
+
+- **Shared scripts** are in `openresty/scripts/`, bind-mounted read-only at
+  `/etc/nginx/scripts` (served on every port for `curl URL | sh`) and
+  `/opt/cortex-scripts` (used by the entrypoints). `agent-common.sh` holds package /
+  toolkit / release-install helpers; `models-common.sh` holds model discovery and the
+  Pi/OpenCode writers. The four entry scripts are thin wrappers.
+- **Installers** (`install-pi.sh`, `install-opencode.sh`): no flags installs the agent
+  and regenerates its model list; `--all` adds every toolkit; `--models-only` only
+  refreshes the list; `--no-pi` / `--no-opencode` / `--no-tools` / `--no-models` skip
+  parts; `--strict` aborts on the first failure. They support apt (Debian/Ubuntu) and
+  apk (Alpine), and the official OpenCode v2 installer is Bash-only, so `bash` is
+  installed first.
+- **Model discovery** queries `CORTEX_URL/v1/models` (default
+  `http://openresty:8080`) and `OLLAMA_URL/api/tags` + `/api/show` (default
+  `http://openresty:11434`). It filters llama.cpp IDs containing `/` or `#`, reads
+  context from `model-meta.json` / `meta.n_ctx` / `--ctx-size`; for Ollama, what it
+  serves: the model's Modelfile `num_ctx` if set, else `CORTEX_OLLAMA_CTX` (Ollama's
+  default, 4096 here: its automatic VRAM-tier value below 23 GiB, read from its log
+  line `vram-based default context`), capped at the trained `*.context_length`. Not
+  `OLLAMA_CONTEXT_LENGTH` on the ollama service: setting it disables Ollama's automatic
+  context shrink when a load runs out of memory. Pi/OpenCode use `/v1`, which cannot
+  pass `num_ctx` per request. It detects image input and tool support: for Ollama from
+  `/api/show` `capabilities` (Ollama derives `tools` from the template or parser and
+  refuses tool requests without it; `gemma3:12b` has none), for llama.cpp assumed `true`,
+  because only a loaded model reports it (`/props` `chat_template_caps`). `model-meta.json`
+  `tool_call` overrides both. It writes atomically; if both sources
+  return nothing it leaves the existing config unchanged, and if one returns nothing it
+  keeps that provider's existing block (a backend still starting does not empty the list). Both writers merge into an
+  existing file and drop the IDs earlier versions wrote (`cortex`, `ollama`, `llama`)
+  when they point at the same cortex URLs and their replacement is written on that sync;
+  other providers are kept.
+- **OpenCode** writes `~/.config/opencode/opencode.json` (or `OPENCODE_CONFIG`: the
+  generator honours it, but OpenCode v2's docs do not list it, so a custom path may not
+  be read; the containers set it to the default path) using
+  the v2 `providers` block with `package:
+  "@opencode/ai/providers/openai-compatible"`, `settings.baseURL`, and model
+  `limit` / `capabilities`. Provider IDs are `cortex-llama-cpp` and `cortex-ollama`, as in Pi (not `llama`: that is OpenCode's built-in Meta Llama provider and would merge its hosted models into cortex's).
+- **Pi** writes `~/.pi/agent/models.json` (or `PI_MODELS_FILE`) with providers
+  `cortex-llama-cpp` and `cortex-ollama`. Pi's schema has no tool-support field, so Pi sends
+  tools to every model and Ollama refuses them for a model without tool support
+  (`gemma3:12b`); such models stay listed by choice. The output limit (Pi `maxTokens`, OpenCode
+  `limit.output`) is `min(context/4, 16384)` unless `model-meta.json` sets `output`:
+  chosen 2026-11-04 from one day of logs (212 Pi replies on four 72K-160K thinking models,
+  all under 5K but one at 16,321), not measured as best; re-check with more data.
+- **Entrypoints** retry the model sync (`PI_SYNC_MODELS=1`,
+  `OPENCODE_SYNC_MODELS=1`, 10 tries, 3s apart) before `exec`ing the container
+  command.
+- The openresty scripts are a directory mount, so the first deploy needs
+  `docker compose up -d openresty` (recreate); later edits are seen without a
+  restart. Create the new clients with `docker compose up -d pi opencode`.
+
 ## Docker compose commands
 
 - `docker compose up -d` — start the entire stack
 - `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
 - `docker compose build nllb` — rebuild nllb translation service after changes
+- `CACHEBUST=$(date +%s) docker compose build pi opencode` — rebuild the client-agent images with the latest agents. Neither is pinned: Pi installs npm `@latest`, OpenCode runs the official v2 installer. A new `CACHEBUST` value (build arg in compose.yml) re-runs only the agent-install layer, so the system packages stay cached; a plain `docker compose build pi opencode` reuses the cached install and only picks up Dockerfile/entrypoint changes. `--no-cache` also works but reinstalls everything
 - `docker compose --profile build build llama-build` — rebuild the upstream llama.cpp image (`llama-cpp:latest` + `llama-cpp:<tag>`)
 - `docker compose --profile build build prism-llama-build` — rebuild the PrismML fork image (`prism-llama-cpp:latest` + `prism-llama-cpp:<tag>`)
 - `docker compose --profile build build flint-llama-build` — rebuild Flint's upstream image (`flint-llama-cpp:latest` + `flint-llama-cpp:<tag>`)
@@ -54,7 +111,7 @@ The compose services are `llama-cpp` / `prism-llama-cpp` / `flint-llama-cpp` / `
 ├── LICENSE
 ├── full-metrics.md        # full table of all models.ini entries (regenerate via tools/gen_metrics.sh)
 ├── CPU_POLLING.md         # why the measurement constants are what they are (empirical rationale)
-├── tools/                 # ALL scripts go here (bench, metrics)
+├── tools/                 # benchmark/metrics scripts
 │   ├── bench.sh               # unified pipeline: mtpcheck → bisect → mtp → bench (canonical)
 │   ├── gen_metrics.sh         # regenerate full-metrics.md from llama-cpp/models/*.json
 │   ├── model_cache.py         # the model-cache service (NVMe copies of the models loaded most)
@@ -76,19 +133,33 @@ The compose services are `llama-cpp` / `prism-llama-cpp` / `flint-llama-cpp` / `
 ├── nllb/
 │   ├── Dockerfile
 │   ├── entrypoint.sh
-│   └── server.py           # HF translation (NLLB) FastAPI service
+│   └── server.py          # HF translation (NLLB) FastAPI service
+├── pi/
+│   ├── Dockerfile
+│   └── entrypoint.sh      # auto-sync Pi models.json at start
+├── opencode/
+│   ├── Dockerfile
+│   └── entrypoint.sh      # auto-sync OpenCode opencode.json at start
 ├── md/                     # internal planning docs
 └── openresty/
     ├── Dockerfile           # FROM openresty/openresty:bookworm-fat, sed patches error_log
-    ├── nginx.conf           # lua_shared_dict directives, 3 server blocks (11434/5002/8080)
+    ├── nginx.conf           # lua_shared_dict directives, 4 server blocks (80/11434/5002/8080)
     ├── coordinator.lua      # VRAM coordinator — API-based model unload
     ├── availability.lua     # GET /availability on every port (busy, idle_for, human_*, ...)
     ├── models_list.lua      # GET /v1/models on :8080 — every llama.cpp router merged
     ├── cortex.lua           # human/bot policy and constants (HUMAN_HOLD, BOT_HOLD_CAP)
-    └── log.lua              # log phase: releases counts, stamps last_done / human_last
+    ├── log.lua              # log phase: releases counts, stamps last_done / human_last
+    └── scripts/             # raw client tooling, served on every port as text/plain
+        ├── agent-common.sh
+        ├── models-common.sh
+        ├── install-pi.sh
+        ├── install-opencode.sh
+        ├── generate-models-pi.sh
+        └── generate-models-opencode.sh
 ```
 
-**Rule: All scripts, tools, and utility files go in the `tools/` folder.**
+**Rule: All scripts, tools, and utility files go in the `tools/` folder, except the
+client-facing scripts in `openresty/scripts/` (served to remote clients).**
 
 ## NVMe model cache (`model-cache` service)
 
