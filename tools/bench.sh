@@ -936,7 +936,7 @@ else:
 
   # ---- Phase 2: real saturation (max_tokens=50% ctx) — ~99% prefill + ~1% decode ----
   # Decode-rate floor: if decode stays below 2 t/s for 3 consecutive 2s samples (~6s),
-  # reject the batch. Catches pathological full-context decode collapse (e.g. REAP 198k).
+  # reject the batch. Catches pathological full-context decode collapse (seen on a 198k-ctx MoE).
   local DECODE_FLOOR=2  # t/s absolute minimum for usable decode
   local DECODE_FLOOR_SAMPLES=3  # consecutive samples below floor to trigger rejection
   # Stall detector: llama.cpp only logs its first n_gen at n_gen=100. A decode that is
@@ -1930,8 +1930,8 @@ for b, p in pts[:$SHORTLIST_SIZE]:
 # when cached/downloaded, 2 on a genuine stall (3 min of no progress).
 #
 # File-scoped cache test: a repo's refs/main only proves SOME file was fetched,
-# so a multi-quant repo (e.g. bartowski/Mellum…:Q6_K_L cached) would otherwise
-# report every sibling quant as cached, skip the download-monitor, and let the
+# so a multi-quant repo (e.g. its Q6_K_L cached, its Q5_K_M requested) would
+# otherwise report every sibling quant as cached, skip the download-monitor, and let the
 # router cold-start a download that fire_request then aborts by restarting the
 # container. gguf_present() checks the specific quant's file in the snapshot,
 # or the exact file when the section names one with `hf-file` (a repo whose
@@ -6189,7 +6189,7 @@ lshow "  Backend: $BACKEND ($INI)"
 # Two runs fight even on different routers: each restarts its router and edits
 # its models.ini (fetch's temporary `offline = false`), and openresty unloads
 # one run's model to load the other's on the one GPU. 2026-10-22: a background
-# fetch and an interactive suite on flint-llama-cpp restarted the router under
+# fetch and an interactive suite on the same router restarted it under
 # each other and both downloads died. The lock is held on fd 9 until this
 # process exits; the file records the holder for the refusal message.
 BENCH_LOCK="/tmp/cortex-bench.lock"
