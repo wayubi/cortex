@@ -18,8 +18,7 @@
 #                                               # bench and re-inherit the family
 #
 # Backends: llama-cpp (llama-cpp/models.ini), prism-llama-cpp
-# (prism-llama-cpp/models.ini, the PrismML fork), flint-llama-cpp
-# (flint-llama-cpp/models.ini, the upstream build for Flint) and raon-llama-cpp
+# (prism-llama-cpp/models.ini, the PrismML fork) and raon-llama-cpp
 # (raon-llama-cpp/models.ini, KRAFTON's fork for Raon) are benchable; ollama and nllb
 # are stubs (no benchmark support yet). The subcommands pick the backend from the
 # model names given; the interactive menu asks; --backend=<name> (or env
@@ -55,7 +54,7 @@ LOG_FILE="$LOG_DIR/bench_$(date +%Y%m%d-%H%M).log"
 # <name>/models/ (bench JSONs), compose service <name>, container cortex-<name>-1.
 # Every engine below reads INI / MODELS_DIR / SERVICE / DOCKER_LOG, so selecting
 # a backend is only setting these four.
-BENCH_BACKENDS="llama-cpp prism-llama-cpp flint-llama-cpp raon-llama-cpp"
+BENCH_BACKENDS="llama-cpp prism-llama-cpp raon-llama-cpp"
 STUB_BACKENDS="ollama nllb"     # in cortex, but bench.sh has no engine for them yet
 BACKEND="" INI="" MODELS_DIR="" SERVICE="" DOCKER_LOG=""
 use_backend() {
@@ -6491,7 +6490,7 @@ case "$CMD" in
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning, then MTP on/off A/B"
     echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
-    echo "       global flags: --backend=llama-cpp|prism-llama-cpp|flint-llama-cpp|raon-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
+    echo "       global flags: --backend=llama-cpp|prism-llama-cpp|raon-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
     echo "       env: BENCH_REFINE=64|coarse|off sets the discover refinement depth (default 64)"
     exit 1

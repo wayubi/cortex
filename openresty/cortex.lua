@@ -33,8 +33,6 @@ M.ROUTERS = {
     { key = "llama_cpp",       host = "llama-cpp" },
     -- PrismML's fork: ternary Bonsai types upstream cannot load
     { key = "prism_llama_cpp", host = "prism-llama-cpp", ini = "/etc/nginx/prism-models.ini" },
-    -- the upstream build for Flint (arch `flint`, b11803+; llama-cpp's pin predates it)
-    { key = "flint_llama_cpp",  host = "flint-llama-cpp",  ini = "/etc/nginx/flint-models.ini" },
     -- KRAFTON's fork for Raon-1 mini (arch `raon1`; upstream support pending)
     { key = "raon_llama_cpp",   host = "raon-llama-cpp",   ini = "/etc/nginx/raon-models.ini" },
 }

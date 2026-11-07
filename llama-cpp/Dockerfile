@@ -1,7 +1,6 @@
 # Shared by every llama.cpp router (compose.yml):
 #   llama-build        upstream ggml-org/llama.cpp @ a b* tag        → llama-cpp:latest
 #   prism-llama-build  PrismML-Eng/llama.cpp @ a prism-b* tag        → prism-llama-cpp:latest
-#   flint-llama-build  upstream ggml-org/llama.cpp @ a b* tag        → flint-llama-cpp:latest
 #   raon-llama-build   krafton-ai/llama.cpp raon-1-mini-preview @ SHA → raon-llama-cpp:latest
 # The PrismML fork (ternary PQ2_0 / PTQ1_0 types, Hadamard runtime) is built from
 # its `prism` branch at a pinned release tag; its `master` is a stale upstream mirror.

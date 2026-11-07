@@ -1,5 +1,5 @@
 -- GET /v1/models (and /models) on :8080: the llama.cpp routers behind this
--- port (cortex.ROUTERS: llama-cpp, prism-llama-cpp, flint-llama-cpp) listed as
+-- port (cortex.ROUTERS: llama-cpp, prism-llama-cpp, raon-llama-cpp) listed as
 -- one, so a client sees every model it can request here and coordinator.lua
 -- routes each by name.
 --
