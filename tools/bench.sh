@@ -1964,7 +1964,80 @@ gguf_present() {
 # wrapper below takes the override out again. The next restart (every probe
 # restarts; sync_router_ini at exit) puts the router back offline.
 ONLINE_FOR=""
+# Fetching online moves the repo's refs/main to the upstream head commit, and an
+# offline router looks only in snapshots/<refs/main>/. Files fetched at an older
+# commit stay on disk but under the old snapshot, so every other entry using
+# them stops loading (2026-11-08: fetching Raon Q6_K stranded the Q4_K_M and
+# Q5_K_M entries after KRAFTON pushed new commits). strand_guard runs before
+# any fetch goes online: when upstream main differs from the cached refs/main
+# it lists the entries (any backend) that would stop loading and asks first.
+# Without a terminal it refuses unless BENCH_ALLOW_STRAND=1.
+strand_guard() {
+  local M=$1 HF HF_FILE REPO HUB REF HEAD TOKEN INIS="" B
+  HF=$(MODEL=$M read_ini_val hf)
+  [ -n "$HF" ] || return 0
+  HF_FILE=$(MODEL=$M read_ini_val hf-file)
+  REPO=${HF%%:*}
+  HUB="$ROOT/.local/llama-cpp_data/hub/models--${REPO/\//--}"
+  [ -f "$HUB/refs/main" ] || return 0
+  REF=$(cat "$HUB/refs/main" 2>/dev/null)
+  # Gated repos (Raon) need the token; read it from the router's environment
+  # so it never appears on a command line or in the log.
+  TOKEN=${HF_TOKEN:-$(docker exec "$DOCKER_LOG" printenv HF_TOKEN 2>/dev/null || true)}
+  HEAD=$(curl -s --max-time 15 ${TOKEN:+-H "Authorization: Bearer $TOKEN"} \
+    "https://huggingface.co/api/models/$REPO/revision/main" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('sha',''))" 2>/dev/null || true)
+  if [ -z "$HEAD" ]; then
+    log "  strand check: could not read $REPO's upstream commit — not checked"
+    return 0
+  fi
+  [ "$HEAD" = "$REF" ] && return 0
+  for B in $BENCH_BACKENDS; do INIS="$INIS $ROOT/$B/models.ini"; done
+  local STRANDED
+  STRANDED=$(python3 - "$M" "$HF" "$HF_FILE" "$HUB/snapshots/$REF" $INIS <<'EOF'
+import fnmatch, os, re, sys
+target, thf, tfile, snap, inis = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
+repo = thf.split(':')[0]
+files = os.listdir(snap) if os.path.isdir(snap) else []
+def present(hf, hf_file):
+    if hf_file:
+        return hf_file in files
+    q = hf.split(':', 1)[1] if ':' in hf else ''
+    pats = [f'*-{q}.gguf', f'*-{q}-0*-of-*.gguf'] if q else ['*.gguf']
+    return any(fnmatch.fnmatch(f.lower(), p.lower()) for f in files for p in pats)
+for ini in inis:
+    try: text = open(ini).read()
+    except OSError: continue
+    for name, body in re.findall(r'^\[([^\]]+)\]\n(.*?)(?=^\[|\Z)', text, re.M | re.S):
+        hf = re.search(r'^\s*hf\s*=\s*(\S+)', body, re.M)
+        hff = re.search(r'^\s*hf-file\s*=\s*(\S+)', body, re.M)
+        hf, hff = (hf.group(1) if hf else ''), (hff.group(1) if hff else '')
+        if name == target or hf.split(':')[0] != repo:
+            continue
+        if (hf, hff) == (thf, tfile):
+            continue   # same file: this fetch downloads it into the new snapshot
+        if present(hf, hff):
+            print(f'{name} ({hf.split(":", 1)[1] if ":" in hf else hff or "default"})')
+EOF
+  )
+  [ -n "$STRANDED" ] || return 0
+  log ""
+  log "  WARNING: $REPO has new upstream commits (cached ${REF:0:9}, upstream ${HEAD:0:9})."
+  log "  Fetching $M moves the cache to ${HEAD:0:9}; these entries' files stay at"
+  log "  ${REF:0:9} and will NOT load until they are fetched again:"
+  while IFS= read -r l; do log "    - $l"; done <<< "$STRANDED"
+  if [ "${BENCH_ALLOW_STRAND:-0}" = 1 ]; then
+    log "  BENCH_ALLOW_STRAND=1 — continuing"; return 0
+  fi
+  if [ ! -t 0 ]; then
+    log "  no terminal to ask — refusing (set BENCH_ALLOW_STRAND=1 to allow)"; return 1
+  fi
+  confirm "  Fetch $M anyway?" && return 0
+  log "  $M: fetch cancelled"
+  return 1
+}
 go_online() {
+  strand_guard "$1" || return 1
   set_key_for "$1" offline false >/dev/null
   ONLINE_FOR=$1
   restart
@@ -1984,7 +2057,7 @@ ensure_model_cached() {
 fetch_model() {
   local M=$1 RC=0
   MODEL=$M
-  go_online "$M"
+  go_online "$M" || return 1
   python3 -c "
 import json
 payload = {'model':'$M','messages':[{'role':'user','content':'Say hello'}],'max_tokens':8}
@@ -2055,7 +2128,7 @@ print(hf.group(1) if hf else '')
   fi
 
   log "  preparing weights (hf=$HF)"
-  go_online "$M"
+  go_online "$M" || return 1
 
   # Start or resume a download. Fire one request to trigger llama.cpp's -hf loader
   # (which fetches the model), but do NOT wait_served — the download may take
