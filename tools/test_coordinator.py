@@ -5,7 +5,7 @@
     python3 tools/test_coordinator.py --ref HEAD # a commit, to show what fails
 
 Starts a private docker network with tools/coord_mock.py standing in for all
-the backends (more mocks play prism- and raon-llama-cpp, the
+the backends (more mocks play prism-, raon- and inkling-llama-cpp, the
 routers that share :8080 with llama-cpp) and a throwaway openresty running the
 real nginx.conf and Lua from openresty/. Nothing touches the live stack or the GPU. cortex.lua's
 HUMAN_HOLD and BOT_HOLD_CAP are shortened to HOLD and CAP below so a run takes
@@ -30,13 +30,15 @@ MOCK_IMAGE = "python:3.11-slim"
 HOLD = 3
 CAP = 6
 LUA = ("coordinator.lua", "availability.lua", "cortex.lua", "log.lua", "models_list.lua")
-# :8080 models that route to prism- / raon-llama-cpp (their
+# :8080 models that route to prism- / raon- / inkling-llama-cpp (their
 # models.ini section names); every other :8080 model goes to llama-cpp
 PRISM_MODELS = ("m-prism", "m-prism2")
 RAON_MODELS = ("m-raon", "m-raon2")
+INKLING_MODELS = ("m-inkling", "m-inkling2")
 # the extra :8080 routers: (suffix, host, backend key, its models)
 EXTRA = (("pmock", "prism-llama-cpp", "prism_llama_cpp", PRISM_MODELS),
-         ("rmock", "raon-llama-cpp", "raon_llama_cpp", RAON_MODELS))
+         ("rmock", "raon-llama-cpp", "raon_llama_cpp", RAON_MODELS),
+         ("imock", "inkling-llama-cpp", "inkling_llama_cpp", INKLING_MODELS))
 
 
 def router_of(model):
@@ -373,11 +375,37 @@ def scenario_raon_routes_and_switches_from_another_extra_router(stack):
     settle(stack)
 
 
+def scenario_inkling_routes_and_switches(stack):
+    """A fourth router, inkling-llama-cpp (built from a source tarball, but
+    to the coordinator just another router): it takes its own models, and
+    leaving raon-llama-cpp for it unloads raon."""
+    print("an Inkling model goes to inkling-llama-cpp; leaving raon-llama-cpp for it unloads raon")
+    r = Call(stack, time.time(), 8080, "m-raon", 0.1, bot=False)
+    r.start(); r.join()
+    i = Call(stack, time.time(), 8080, "m-inkling", 0.1, bot=False)
+    i.start(); i.join()
+    check("an Inkling model is served by inkling-llama-cpp", i.status == 200
+          and (i.body or {}).get("backend") == "inkling_llama_cpp", (i.status, i.body))
+    check("and raon-llama-cpp was unloaded first",
+          loaded_on_8080(stack) == {"m-inkling": "inkling_llama_cpp"}, loaded_on_8080(stack))
+    props = stack.get(8080, "/props?model=m-inkling2")
+    check("a GET naming an Inkling model reaches inkling-llama-cpp",
+          props.get("backend") == "inkling_llama_cpp", props)
+    av = stack.get(8080, "/availability")
+    check("availability counts the inkling backend", "inkling_llama_cpp" in av.get("in_flight", {}), av)
+    a = Call(stack, time.time(), 8080, "m-a", 0.1, bot=False)
+    a.start(); a.join()
+    check("back to llama-cpp unloads inkling-llama-cpp", a.status == 200
+          and loaded_on_8080(stack) == {"m-a": "llama_cpp"}, (a.status, loaded_on_8080(stack)))
+    settle(stack)
+
+
 def scenario_mixed_routers_concurrently(stack):
     print("concurrent requests across all :8080 routers all complete, nothing left counted")
     t0 = time.time()
     calls = [Call(stack, t0, 8080, m, 0.3, bot=False, timeout=20)
-             for m in ("m-a", "m-prism", "m-raon", "m-b", "m-prism2", "m-raon2", "m-prism")]
+             for m in ("m-a", "m-prism", "m-raon", "m-inkling", "m-b", "m-prism2",
+                       "m-raon2", "m-inkling2", "m-prism")]
     for c in calls:
         c.start()
     for c in calls:
@@ -423,6 +451,7 @@ def main():
                    scenario_concurrent_switches_do_not_deadlock,
                    scenario_prism_routes_by_model_and_switches,
                    scenario_raon_routes_and_switches_from_another_extra_router,
+                   scenario_inkling_routes_and_switches,
                    scenario_mixed_routers_concurrently,
                    scenario_fresh_state_unloads_what_is_resident):
             try:

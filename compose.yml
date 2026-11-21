@@ -143,6 +143,61 @@ services:
       - "--host"
       - "0.0.0.0"
 
+  inkling-llama-build:
+    # docker compose --profile build build inkling-llama-build
+    # The llama.cpp build for Thinking Machines' Inkling 2 Mini: Unsloth's
+    # prebuilt release b12588-mix-c0c3de8 (upstream b12588 + 31 merged PRs:
+    # the looped `inkling2` arch in Unsloth's GGUF layout, DSpark #32218,
+    # Inkling 2 attention fixes). That source exists only as the release's
+    # tarball (its commit 8832860 is in no git repo; the git tag of the same
+    # name is Unsloth's PR-list state, without the inkling2 arch), so it is
+    # pinned by the tarball's sha256, from the release's
+    # llama-prebuilt-sha256.json. Bump both together, then re-bench.
+    # The embedded web UI is off: its prebuilt download is not covered by
+    # the checksum, and cortex never serves it.
+    profiles: ["build"]
+    build:
+      context: ./llama-cpp
+      dockerfile: Dockerfile
+      args:
+        BUILD_JOBS: "20"
+        LLAMA_TARBALL: "https://github.com/unslothai/llama.cpp/releases/download/b12588-mix-c0c3de8/llama.cpp-source-b12588-mix-c0c3de8.tar.gz"
+        LLAMA_TARBALL_SHA256: "92ee8439f9ae51a40f15c168ac64e1d657bf8b08d301c96f8fb2d58625573607"
+        LLAMA_CMAKE_ARGS: "-DLLAMA_USE_PREBUILT_UI=OFF"
+      tags:
+        - "inkling-llama-cpp:b12588-mix-c0c3de8"
+    image: inkling-llama-cpp:latest
+
+  inkling-llama-cpp:
+    # Served on openresty :8080 like raon-llama-cpp: a request whose model is
+    # a section of inkling-llama-cpp/models.ini is routed here (cortex.lua).
+    runtime: nvidia
+    restart: unless-stopped
+    image: inkling-llama-cpp:latest
+    pull_policy: never
+    networks:
+      - cortex_network
+    volumes:
+      - llama-cpp_data:/root/.cache/huggingface
+      - ./inkling-llama-cpp/models.ini:/models.ini
+      - /opt/cortex-models:/opt/cortex-models:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      core:
+        soft: 0
+        hard: 0
+    command:
+      - "--models-preset"
+      - "/models.ini"
+      - "--port"
+      - "8080"
+      - "--host"
+      - "0.0.0.0"
+
   ollama:
     image: ollama/ollama
     restart: unless-stopped
@@ -193,9 +248,10 @@ services:
       - ./openresty/log.lua:/etc/nginx/lua/log.lua
       # GET /v1/models on :8080 — every llama.cpp router's list merged
       - ./openresty/models_list.lua:/etc/nginx/lua/models_list.lua
-      # which :8080 models go to prism- / raon-llama-cpp (their section names)
+      # which :8080 models go to prism- / raon- / inkling-llama-cpp (their section names)
       - ./prism-llama-cpp/models.ini:/etc/nginx/prism-models.ini:ro
       - ./raon-llama-cpp/models.ini:/etc/nginx/raon-models.ini:ro
+      - ./inkling-llama-cpp/models.ini:/etc/nginx/inkling-models.ini:ro
       # raw client tooling for `curl URL | sh` install workflows
       - ./openresty/scripts:/etc/nginx/scripts:ro
     # clients reach it on the published ports, or on a shared docker network

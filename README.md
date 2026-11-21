@@ -8,19 +8,20 @@ Cortex runs its services in a shared Docker network. An `openresty` reverse prox
 
 | Service | Port | Role |
 |---------|------|------|
-| **openresty** | 80 (client scripts, `/availability`, `/v1/models`), 11434 (ollama), 8080 (llama.cpp, prism, raon), 5002 (nllb) | Reverse proxy + VRAM coordinator |
+| **openresty** | 80 (client scripts, `/availability`, `/v1/models`), 11434 (ollama), 8080 (llama.cpp, prism, raon, inkling), 5002 (nllb) | Reverse proxy + VRAM coordinator |
 | **ollama** | 11434 | Ollama inference backend |
 | **llama-cpp** | 8080 | upstream llama.cpp, router mode (`llama-cpp/models.ini`) |
 | **prism-llama-cpp** | 8080 | PrismML's llama.cpp fork, router mode, for the ternary Bonsai models (`prism-llama-cpp/models.ini`) |
 | **raon-llama-cpp** | 8080 | KRAFTON's llama.cpp fork for Raon-1 mini, router mode (`raon-llama-cpp/models.ini`) |
+| **inkling-llama-cpp** | 8080 | Unsloth's llama.cpp build for Inkling 2 Mini (from their release's source tarball), router mode (`inkling-llama-cpp/models.ini`) |
 | **nllb** | 5002 | Hugging Face NLLB translation (FastAPI) |
 | **model-cache** | — | Keeps NVMe copies of the models loaded most (not in the request path) |
 | **pi** | — | Pi coding agent; auto-syncs its model list from Cortex |
 | **opencode** | — | OpenCode v2; auto-syncs its provider config from Cortex |
 
-`:8080` serves all three llama.cpp routers: a request for a model named in `prism-llama-cpp/models.ini` or `raon-llama-cpp/models.ini` goes to that router, everything else to llama-cpp, and `GET /v1/models` lists them all. Model names are unique across the files. A model that needs a build the others lack gets its own router, named for the model, so llama-cpp's benched build never moves for it.
+`:8080` serves all four llama.cpp routers: a request for a model named in `prism-llama-cpp/models.ini`, `raon-llama-cpp/models.ini` or `inkling-llama-cpp/models.ini` goes to that router, everything else to llama-cpp, and `GET /v1/models` lists them all. Model names are unique across the files. A model that needs a build the others lack gets its own router, named for the model, so llama-cpp's benched build never moves for it.
 
-`llama-build`, `prism-llama-build` and `raon-llama-build` profiles build the three images (build-only, not normally running).
+`llama-build`, `prism-llama-build`, `raon-llama-build` and `inkling-llama-build` profiles build the four images (build-only, not normally running).
 
 ### Coordinator behaviour
 
@@ -30,7 +31,7 @@ When a switch is needed:
 1. The coordinator drains active requests on the current backend (polls the `request_counts` dict, up to `DRAIN_TIMEOUT` = 600s). If the backend is still busy when that expires, the incoming request gets a 503 rather than an unload under load.
 2. It calls the active backend's unload API. All three backends are full participants:
    - ollama — `POST /api/generate` with `keep_alive=0`
-   - llama.cpp, prism-llama-cpp and raon-llama-cpp — `POST /models/unload`
+   - llama.cpp, prism-llama-cpp, raon-llama-cpp and inkling-llama-cpp — `POST /models/unload`
    - nllb — `GET /v1/models` to find loaded models, then `POST /v1/models/unload` for each
 3. It updates `backend_state` to the new target.
 
@@ -100,13 +101,14 @@ mount appears: `docker compose up -d openresty` (later edits need no restart).
 
 ## Rebuilding
 
-**llama.cpp from source** (with CUDA + flash attention). All builders share `llama-cpp/Dockerfile` and are pinned to release tags in `compose.yml` (`LLAMA_REF`); bump a tag deliberately and re-bench:
+**llama.cpp from source** (with CUDA + flash attention). All builders share `llama-cpp/Dockerfile` and are pinned in `compose.yml`: to a release tag (`LLAMA_REF`), a commit (`LLAMA_COMMIT`), or a source archive and its sha256 (`LLAMA_TARBALL`, `LLAMA_TARBALL_SHA256`) when a distributor publishes the build only as a tarball. Bump a pin deliberately and re-bench:
 
 ```bash
 docker compose --profile build build llama-build          # upstream → llama-cpp:latest
 docker compose --profile build build prism-llama-build    # PrismML fork → prism-llama-cpp:latest
 docker compose --profile build build raon-llama-build     # KRAFTON's Raon fork → raon-llama-cpp:latest
-docker compose up -d llama-cpp prism-llama-cpp raon-llama-cpp
+docker compose --profile build build inkling-llama-build  # Unsloth's Inkling build (tarball) → inkling-llama-cpp:latest
+docker compose up -d llama-cpp prism-llama-cpp raon-llama-cpp inkling-llama-cpp
 ```
 
 **After Lua or nginx changes** (rebuilds the openresty image):
@@ -145,7 +147,7 @@ The benchmarking pipeline is a single script: `tools/bench.sh`. It finds and val
 ./tools/bench.sh fetch <models...>        # download an entry's files (the routers run offline)
 ```
 
-The routers run with `offline = true`, so a load never waits on Hugging Face; `fetch` (and the suite, when weights are missing) downloads through a one-off online load. The model names choose the backend (`llama-cpp`, `prism-llama-cpp` or `raon-llama-cpp`); `--backend=<name>` forces one.
+The routers run with `offline = true`, so a load never waits on Hugging Face; `fetch` (and the suite, when weights are missing) downloads through a one-off online load. The model names choose the backend (`llama-cpp`, `prism-llama-cpp`, `raon-llama-cpp` or `inkling-llama-cpp`); `--backend=<name>` forces one.
 
 Global flags go before the subcommand:
 
@@ -196,7 +198,7 @@ Rough per-head times on an RTX 3060: 5 to 10 minutes for a small GPU-resident mo
 
 ### Results
 
-Results are written to `<backend>/models/<model>.json` (`llama-cpp/models/`, `prism-llama-cpp/models/` or `raon-llama-cpp/models/`), one file per model, with these top-level keys:
+Results are written to `<backend>/models/<model>.json` (`llama-cpp/models/`, `prism-llama-cpp/models/`, `raon-llama-cpp/models/` or `inkling-llama-cpp/models/`), one file per model, with these top-level keys:
 
 | Key | Contents |
 |-----|----------|
@@ -242,6 +244,9 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 │   └── models/               # its benchmark JSONs
 ├── raon-llama-cpp/
 │   ├── models.ini            # Raon-1 mini presets (KRAFTON's fork)
+│   └── models/               # its benchmark JSONs
+├── inkling-llama-cpp/
+│   ├── models.ini            # Inkling 2 Mini presets (Unsloth's build)
 │   └── models/               # its benchmark JSONs
 ├── nllb/
 │   ├── Dockerfile
