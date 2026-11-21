@@ -10,7 +10,10 @@ RUN apk add --no-cache \
       ncurses-terminfo-base \
       openssh-client \
       ripgrep \
-      python3
+      python3 \
+      py3-beautifulsoup4 \
+      py3-lxml \
+      py3-pytest
 
 # Pi is not pinned: a build with a new CACHEBUST value re-runs only this
 # layer and installs the latest release (CACHEBUST=$(date +%s) docker compose
