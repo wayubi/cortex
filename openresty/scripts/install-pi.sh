@@ -13,7 +13,7 @@
 #                  (default 65536)
 #
 # Toolkits:
-#   --python  Python LSP, lint and format tools
+#   --python  Python LSP, lint and format tools, pytest, beautifulsoup4, lxml
 #   --node    TypeScript/JavaScript/CSS/HTML tooling and pyright
 #   --php     PHP CLI and Composer
 #   --media   Image/audio processing (Pillow, ffmpeg, ...)
@@ -70,7 +70,7 @@ Usage:
                  (default 65536)
 
 Toolkits:
-  --python  Python LSP, lint and format tools
+  --python  Python LSP, lint and format tools, pytest, beautifulsoup4, lxml
   --node    TypeScript/JavaScript/CSS/HTML tooling and pyright
   --php     PHP CLI and Composer
   --media   Image/audio processing (Pillow, ffmpeg, ...)

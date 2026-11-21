@@ -11,10 +11,6 @@ RUN apt-get update \
       less \
       libstdc++6 \
       openssh-client \
-      python3 \
-      python3-bs4 \
-      python3-lxml \
-      python3-pytest \
       ripgrep \
       unzip \
       xz-utils \

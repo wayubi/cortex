@@ -372,9 +372,11 @@ agent_install_build_toolchain() {
 agent_install_python() {
     agent_step "Python tooling"
     if ${IS_ALPINE}; then
-        agent_install_pkgs python3 py3-pip python3-dev py3-pytest
+        agent_install_pkgs python3 py3-pip python3-dev py3-pytest \
+            py3-beautifulsoup4 py3-lxml
     else
-        agent_install_pkgs python3 python3-pip python3-venv python3-dev python3-pytest
+        agent_install_pkgs python3 python3-pip python3-venv python3-dev python3-pytest \
+            python3-bs4 python3-lxml
     fi
     agent_pip_install \
         python-lsp-server pylsp-mypy python-lsp-black pyls-isort \
