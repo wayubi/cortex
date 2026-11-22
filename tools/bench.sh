@@ -130,6 +130,7 @@ MTP_AB_CLEAR=0.05         # MTP A/B: a first-round on/off gap beyond this (above
 MTP_AB_TIE=0.02           # MTP A/B: MTP kept only if its mean beats MTP-off by MORE than this fraction;
                           # a tie goes to MTP off (no draft buffer, simpler config)
 THOROUGH=0
+EARLY_AB=${BENCH_EARLY_AB:-1}  # early MTP A/B before the bisect (--no-early-ab / BENCH_EARLY_AB=0 to skip)
 STRICT=0                  # --strict: skip bench when mtp tuning failed (plan §6.4 part 3 / §7)
 REFINE_MODE=64            # discover refinement depth (plan §42 Change H): 64 (default, Change G
                           # golden-section to 64) | coarse (Change E: stop when no step beats the
@@ -4111,6 +4112,50 @@ for ln in open(sys.argv[1]):
   mtp_write_status ok "${MTP_STATUS_NOTE:-}" "$MTP_TUNED_NMAX" "$MTP_TUNED_PMIN"
 }
 
+# ── Early MTP A/B (before the bisect) ──
+# Tuning n_max/p_min costs ~6-8 decode samples (15-25 min on a CPU-resident
+# MoE) and is wasted when MTP loses anyway. Right after mtpcheck, decode once
+# with MTP at the section's mtpcheck defaults (n_max 2, p_min 0.7) and once with
+# MTP off. Only a clear loss (on < off by more than MTP_AB_CLEAR, 5%: mtp_ab_eval's
+# first-round "off") drops MTP now; a close result or an MTP win goes on to the
+# tuner and its final A/B as before. An untuned n_max=2 is the cheapest draft, so
+# tuning is unlikely to turn a clear loss into a win (reasoning, unmeasured).
+# Dropping MTP here also lets the bisect run in the model's real state.
+# Batch: the section's own, else 256 for the A/B only (decode does not depend on
+# batch unless something spills). Run in a subshell; rc 0 = MTP dropped
+# (spec-* removed, status written), 1 = keep MTP and tune.
+mtp_early_ab() {
+  [ "$EARLY_AB" -eq 1 ] || return 1
+  grep -q "spec-type.*draft-mtp" <(read_section) || return 1
+  local ORIG=/tmp/mtp_early_orig_${MODEL}.snap
+  read_section > "$ORIG"
+  [ -n "$(read_batch)" ] || set_batch 256 >/dev/null
+  MTP_AB_SNAP=/tmp/mtp_ab_on_${MODEL}.snap
+  read_section > "$MTP_AB_SNAP"
+  : > "$(mtp_ab_tsv)"
+  : > "$(mtp_sample_file)"
+  trap 'RC=$?; restore_section "'"$ORIG"'" >/dev/null 2>&1 || true; rm -f "'"$ORIG"'" "$MTP_AB_SNAP"; exit $RC' EXIT
+  log ""; log "=== EARLY MTP A/B: n_max=$(read_ini_val spec-draft-n-max) p_min=$(read_ini_val spec-draft-p-min) (untuned) vs MTP off, batch $(read_batch) ==="
+  local STALL=0 DEC ON OFF SPD NON NOFF
+  mtp_ab_measure on "early on" || STALL=1
+  [ "$STALL" -eq 0 ] && { mtp_ab_measure off "early off" || STALL=1; }
+  read -r DEC ON OFF SPD NON NOFF <<< "$(mtp_ab_eval 0 "$STALL")"
+  restore_section "$ORIG" >/dev/null
+  if [ "$DEC" != "off" ]; then
+    log "  early A/B: on=${ON} off=${OFF} ×${SPD} → not a clear loss — tuning MTP"
+    rm -f "$ORIG" "$MTP_AB_SNAP"; MTP_AB_SNAP=""; trap - EXIT
+    return 1
+  fi
+  del_key spec-type >/dev/null
+  del_key spec-draft-n-max >/dev/null
+  del_key spec-draft-p-min >/dev/null
+  MTP_AB_DECISION=off MTP_AB_ON=$ON MTP_AB_OFF=$OFF MTP_AB_SPEEDUP=$SPD MTP_AB_ROUNDS=1 MTP_AB_ON_SOURCE=early
+  mtp_write_status skipped "early A/B: MTP off clearly faster (on ${ON} vs off ${OFF} t/s) — tuning skipped" null null
+  log "  early A/B: on=${ON} off=${OFF} t/s ×${SPD} → MTP OFF (spec-* removed, tuning skipped)"
+  rm -f "$ORIG" "$MTP_AB_SNAP"; MTP_AB_SNAP=""; trap - EXIT
+  return 0
+}
+
 # ── MTP A/B follow-ups: verdict text, re-bisect check ──
 # The A/B decision recorded for a model this run ('' if none).
 mtp_ab_decision_of() {
@@ -6046,6 +6091,10 @@ reset_parent_full() {
   if ( cmd_mtpcheck ); then
     IS_MTP=1
     log "  $(date +%H:%M:%S) mtpcheck OK for $P (MTP-capable)"
+    if ( mtp_early_ab ); then
+      IS_MTP=0
+      log "  $(date +%H:%M:%S) early MTP A/B: MTP off for $P — skipping MTP tuning"
+    fi
   else
     # Change N (§55.3): check if mtpcheck wrote a stall status.
     local MTP_SF; MTP_SF=$(mtp_status_file)   # §58.3: MODEL=$P here
@@ -6119,7 +6168,7 @@ run_full_suite() {
     MODEL=$NAME
     lshow ""
     lshow "=============== MODEL: $NAME ==============="
-    local IS_MTP=0 BISECT_FAILED=0
+    local IS_MTP=0 BISECT_FAILED=0 EARLY_OFF=0
 
     # ── Inheritance gate ──
     if maybe_inherit "$NAME"; then
@@ -6162,6 +6211,11 @@ run_full_suite() {
     if ( cmd_mtpcheck ); then
       IS_MTP=1
       VERDICTS["$NAME|mtpcheck"]="OK"
+      EARLY_OFF=0
+      if ( mtp_early_ab ); then
+        IS_MTP=0 EARLY_OFF=1
+        lshow "  $(date +%H:%M:%S) early MTP A/B: MTP off for $NAME — skipping MTP tuning"
+      fi
     else
       IS_MTP=0
       # Change N (§55.3): detect_mtp writes a stall status file when it aborts
@@ -6195,6 +6249,8 @@ run_full_suite() {
     local MTP_FAILED=0
     if [ "$BISECT_FAILED" -eq 1 ]; then
       VERDICTS["$NAME|mtp"]="SKIPPED (bisect failed)"
+    elif [ "${EARLY_OFF:-0}" -eq 1 ]; then
+      VERDICTS["$NAME|mtp"]="OK (MTP off, early A/B)"
     elif [ "$IS_MTP" -eq 0 ]; then
       VERDICTS["$NAME|mtp"]="SKIPPED (not MTP)"
     else
@@ -6276,6 +6332,7 @@ for arg in "$@"; do
     --reset-parent) RESET_PARENT=1 ;;
     --thorough)    THOROUGH=1 ;;
     --strict)      STRICT=1 ;;
+    --no-early-ab) EARLY_AB=0 ;;
     --refine=*)    REFINE_MODE="${arg#--refine=}" ;;
     *)             MAIN_ARGS+=("$arg") ;;
   esac
@@ -6639,7 +6696,7 @@ case "$CMD" in
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning, then MTP on/off A/B"
     echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
-    echo "       global flags: --backend=llama-cpp|prism-llama-cpp|raon-llama-cpp|inkling-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
+    echo "       global flags: --no-early-ab --backend=llama-cpp|prism-llama-cpp|raon-llama-cpp|inkling-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
     echo "       env: BENCH_REFINE=64|coarse|off sets the discover refinement depth (default 64)"
     exit 1
