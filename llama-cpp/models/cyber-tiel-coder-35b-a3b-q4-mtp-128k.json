@@ -1,10 +1,10 @@
 {
   "model": "cyber-tiel-coder-35b-a3b-q4-mtp-128k",
   "ctx": 131072,
-  "batch": 5632,
-  "ubatch": 5632,
+  "batch": 6208,
+  "ubatch": 6208,
   "placement": "CPU",
-  "bench_date": "2026-10-20T11:03:41.925223",
+  "bench_date": "2026-11-21T18:46:05.150097",
   "bench_method": "bench_model.sh v2",
   "backend": "llama-cpp",
   "config": {
@@ -22,7 +22,7 @@
     "quant": "UD-Q4_K_XL",
     "reasoning": "off",
     "ctx": "131072",
-    "batch": "5632"
+    "batch": "6208"
   },
   "bench": {
     "max_tokens": 4000,
@@ -30,15 +30,15 @@
     "decode_prompt_tokens": 287,
     "model_file_size_gb": 21.19,
     "build_info": "llama-cpp 0.3.0-dev (build 1, commit 3737e41)",
-    "wall_time_s": 138
+    "wall_time_s": 111
   },
   "speed": {
-    "prefill_t_s": 1265.65,
-    "prefill_ms": 51676.86,
-    "prefill_ms_per_tok": 0.7901,
-    "decode_t_s": 29.57,
-    "decode_ms": 135246.6,
-    "decode_ms_per_tok": 33.8201
+    "prefill_t_s": 1161.37,
+    "prefill_ms": 56317.31,
+    "prefill_ms_per_tok": 0.8611,
+    "decode_t_s": 37.39,
+    "decode_ms": 106948.43,
+    "decode_ms_per_tok": 26.7438
   },
   "request": {
     "prefill_prompt_tokens": 65584,
@@ -51,7 +51,7 @@
     "predicted_n": 4000,
     "finish_reason": "length",
     "truncated": true,
-    "degeneracy": 0.0007
+    "degeneracy": 0.0
   },
   "mtp": {
     "acceptance": null,
@@ -61,34 +61,121 @@
     "n_max_loaded": null,
     "p_min_loaded": null,
     "tuning_status": "ok",
-    "tuning_reason": "A/B only: n_max/p_min from the existing tune",
+    "tuning_reason": null,
     "tuned_n_max": 2,
     "tuned_p_min": 0.7,
     "placement_baseline": "CPU",
-    "tuning_samples": [],
-    "tuning_written_at": "2026-10-20T10:59:59.721434",
+    "tuning_samples": [
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 32.5,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.82221,
+        "degeneracy": 0.0013,
+        "oom": 0,
+        "mean_draft_len": 2.18
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 32.2,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.79341,
+        "degeneracy": 0.0007,
+        "oom": 0,
+        "mean_draft_len": 2.32
+      },
+      {
+        "n_max": 3,
+        "p_min": 0.7,
+        "tps": 31.7,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.80842,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.29
+      },
+      {
+        "n_max": 4,
+        "p_min": 0.7,
+        "tps": 33.2,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.80285,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.36
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.7,
+        "tps": 32.6,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.82175,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.18
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.5,
+        "tps": 32.2,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.66417,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.08
+      },
+      {
+        "n_max": 2,
+        "p_min": 0.9,
+        "tps": 32.5,
+        "tokens": 4000,
+        "placement": "CPU",
+        "accept": 0.94324,
+        "degeneracy": 0.0,
+        "oom": 0,
+        "mean_draft_len": 2.23
+      }
+    ],
+    "tuning_written_at": "2026-11-21T18:42:56.946947",
     "ab": {
       "decision": "off",
-      "on_tps": 29.5,
-      "off_tps": 34.4,
-      "speedup": 0.8576,
+      "on_tps": 32.55,
+      "off_tps": 37.8,
+      "speedup": 0.8611,
       "tie": 0.02,
       "clear": 0.05,
       "rounds": 1,
-      "on_source": "measured",
+      "on_source": "tuner",
       "samples": [
         {
           "side": "on",
-          "tps": 29.5,
+          "tps": 32.5,
           "tokens": 4000,
           "placement": "CPU",
           "oom": 0,
-          "accept": 0.82775,
-          "source": "ab"
+          "accept": 0.82221,
+          "source": "tuner"
+        },
+        {
+          "side": "on",
+          "tps": 32.6,
+          "tokens": 4000,
+          "placement": "CPU",
+          "oom": 0,
+          "accept": 0.82175,
+          "source": "tuner"
         },
         {
           "side": "off",
-          "tps": 34.4,
+          "tps": 37.8,
           "tokens": 4000,
           "placement": "CPU",
           "oom": 0,
@@ -108,32 +195,32 @@
       {
         "batch": 256,
         "status": "PASS",
-        "prefill": 358.32
+        "prefill": 232.81
       },
       {
         "batch": 512,
         "status": "PASS",
-        "prefill": 538.84
+        "prefill": 377.61
       },
       {
         "batch": 1024,
         "status": "PASS",
-        "prefill": 781.23
+        "prefill": 565.87
       },
       {
         "batch": 2048,
         "status": "PASS",
-        "prefill": 980.3
+        "prefill": 766.91
       },
       {
         "batch": 4096,
         "status": "PASS",
-        "prefill": 1124.11
+        "prefill": 951.93
       },
       {
         "batch": 8192,
         "status": "PASS",
-        "prefill": 1151.2
+        "prefill": 981.06
       },
       {
         "batch": 16384,
@@ -143,80 +230,87 @@
       {
         "batch": 8768,
         "status": "REFINE",
-        "prefill": 1085.38
+        "prefill": 950.19
       },
       {
         "batch": 11648,
         "status": "REFINE",
-        "prefill": 905.4
+        "prefill": 796.11
       },
       {
         "batch": 6976,
         "status": "REFINE",
-        "prefill": 1179.13
+        "prefill": 996.11
       },
       {
         "batch": 8704,
         "status": "REFINE",
-        "prefill": 1132.92
+        "prefill": 967.93
       },
       {
         "batch": 5824,
         "status": "REFINE",
-        "prefill": 1187.8
+        "prefill": 1016.33
       },
       {
         "batch": 6912,
         "status": "REFINE",
-        "prefill": 1139.46
+        "prefill": 983.16
       },
       {
         "batch": 5120,
         "status": "REFINE",
-        "prefill": 1121.18
+        "prefill": 922.37
       },
       {
         "batch": 5760,
         "status": "REFINE",
-        "prefill": 1168.55
+        "prefill": 990.43
       },
       {
         "batch": 6208,
         "status": "REFINE",
-        "prefill": 1094.98
+        "prefill": 1016.52
       },
       {
-        "batch": 5504,
+        "batch": 6144,
         "status": "REFINE",
-        "prefill": 1134.61
+        "prefill": 1004.15
       },
       {
-        "batch": 5888,
+        "batch": 6464,
         "status": "REFINE",
-        "prefill": 1109.74
+        "prefill": 991.31
       },
       {
-        "batch": 5632,
+        "batch": 6016,
         "status": "REFINE",
-        "prefill": 1209.64
+        "prefill": 989.28
       },
       {
-        "batch": 5696,
-        "status": "FAIL",
-        "prefill": null
+        "batch": 6272,
+        "status": "REFINE",
+        "prefill": 1007.44
+      },
+      {
+        "batch": 6336,
+        "status": "REFINE",
+        "prefill": 1002.2
       }
     ],
-    "best_prefill": 1151.2,
-    "pick": 5632,
+    "best_prefill": 981.06,
+    "pick": 6208,
     "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
     "refine_points": [
       5120,
-      5504,
-      5632,
       5760,
       5824,
-      5888,
+      6016,
+      6144,
       6208,
+      6272,
+      6336,
+      6464,
       6912,
       6976,
       8704,
@@ -225,7 +319,7 @@
     ],
     "ceiling_coarse": "8192 PASS / 16384 OOM",
     "ladder_break": "1",
-    "written_at": "2026-10-18T22:51:56.048779"
+    "written_at": "2026-11-21T18:23:40.233225"
   },
   "hardware": {
     "gpu": {
@@ -251,21 +345,21 @@
     "hostname": "W-SRV1",
     "arch": "x86_64",
     "run": {
-      "avg_cpu_pct": 1730.4,
-      "avg_gpu_util_pct": 30.7,
-      "avg_gpu_mem_util_pct": 26.2,
-      "cpu_stddev_pct": 247.1,
-      "peak_vram_mib": 10883,
-      "peak_power_w": 90.62,
+      "avg_cpu_pct": 1711.4,
+      "avg_gpu_util_pct": 39.3,
+      "avg_gpu_mem_util_pct": 34.0,
+      "cpu_stddev_pct": 285.6,
+      "peak_vram_mib": 10930,
+      "peak_power_w": 136.75,
       "peak_temp_c": 58,
       "peak_clocks_sm_mhz": 1972,
       "peak_clocks_mem_mhz": 7301,
-      "final_vram_mib": 10883,
-      "final_temp_c": 51,
-      "final_power_w": 54.3,
-      "ram_used_mib": 48461,
-      "rss_mib": 17330,
-      "sample_count": 35
+      "final_vram_mib": 10930,
+      "final_temp_c": 52,
+      "final_power_w": 45.26,
+      "ram_used_mib": 55102,
+      "rss_mib": 24492,
+      "sample_count": 46
     }
   }
 }
