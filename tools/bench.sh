@@ -2055,9 +2055,84 @@ ensure_model_cached() {
 # `fetch`: load the entry online even when its weights are cached, and wait for
 # the load to finish, so whatever llama.cpp's -hf loader adds -- the MTP drafter,
 # the mmproj of an entry that loads one, a file updated upstream -- is downloaded too.
+# Fast path (tools/hf_fetch.sh): resolve the entry's files from the repo's file
+# list -- the weights (`hf-file`, else the quant tag; split parts included), an
+# `mtp-*.gguf` drafter if the repo ships one, and the mmproj when the section
+# loads one (`no-mmproj = false`) -- and download them with the `hf` client,
+# pinned to the commit already cached. Ctrl+C is safe (no ini edit, no restart,
+# no load) and a rerun resumes. Returns 2 when the files cannot be resolved
+# (no tag, HF unreachable), so fetch_model falls back to the online load.
+hf_fetch_entry() {
+  local M=$1 HF REPO QUANT HF_FILE NOMMPROJ REF_FILE REV TOKEN FILES
+  MODEL=$M
+  HF=$(read_ini_val hf); [ -n "$HF" ] || return 2
+  REPO=${HF%%:*}; QUANT=""; [ "$HF" != "$REPO" ] && QUANT=${HF##*:}
+  HF_FILE=$(read_ini_val hf-file)
+  NOMMPROJ=$(read_ini_val no-mmproj)
+  REF_FILE="$ROOT/.local/llama-cpp_data/hub/models--${REPO/\//--}/refs/main"
+  REV=main; [ -f "$REF_FILE" ] && REV=$(cat "$REF_FILE")
+  TOKEN=${HF_TOKEN:-$(docker exec "$DOCKER_LOG" printenv HF_TOKEN 2>/dev/null || true)}
+  FILES=$(HF_TOKEN="$TOKEN" python3 - "$REPO" "$REV" "$QUANT" "$HF_FILE" "$NOMMPROJ" <<'EOF'
+import json, os, re, sys, urllib.request
+repo, rev, quant, hf_file, nommproj = sys.argv[1:6]
+req = urllib.request.Request(f"https://huggingface.co/api/models/{repo}/tree/{rev}?recursive=1")
+if os.environ.get("HF_TOKEN"):
+    req.add_header("Authorization", "Bearer " + os.environ["HF_TOKEN"])
+try:
+    tree = json.load(urllib.request.urlopen(req, timeout=20))
+except Exception:
+    sys.exit(2)
+size = {t["path"]: t.get("size", 0) for t in tree if t.get("type") == "file"}
+root = [p for p in size if "/" not in p and p.endswith(".gguf")]
+aux = lambda p: p.lower().startswith(("mmproj", "mtp-", "dspark"))
+if hf_file:
+    # A `.gguf` hf-file may be the local link to a `<name>.gguf_file` the repo
+    # ships under a non-.gguf name (Unsloth's Mainline_Support/): fetch that.
+    if hf_file not in size and hf_file + "_file" in size: hf_file += "_file"
+    if hf_file not in size: sys.exit(2)
+    want = [hf_file]
+elif quant:
+    q = quant.lower()
+    want = sorted(p for p in root if not aux(p) and (p.lower().endswith(f"-{q}.gguf")
+                  or re.search(rf"-{re.escape(q)}-\d{{5}}-of-\d{{5}}\.gguf$", p.lower())))
+    if not want: sys.exit(2)
+else:
+    sys.exit(2)
+mtp = sorted((p for p in root if p.lower().startswith("mtp-")), key=size.get)
+want += mtp[:1]
+if nommproj == "false":
+    mm = sorted((p for p in root if p.lower().startswith("mmproj")), key=size.get)
+    f16 = [p for p in mm if "f16" in p.lower() and "bf16" not in p.lower()]
+    want += (f16 or mm)[:1]
+print("\n".join(want))
+EOF
+) || return 2
+  [ -n "$FILES" ] || return 2
+  log "  files (pinned to ${REV:0:9}):"
+  while IFS= read -r f; do log "    - $f"; done <<< "$FILES"
+  # shellcheck disable=SC2086
+  HF_TOKEN="$TOKEN" "$ROOT/tools/hf_fetch.sh" "$REPO" $FILES || return $?
+  # llama.cpp's cache lookup lists only .gguf names: give each `.gguf_file`
+  # a `.gguf` link to the same blob, in the snapshot it was fetched into.
+  local SNAP f
+  SNAP="$ROOT/.local/llama-cpp_data/hub/models--${REPO/\//--}/snapshots/$(cat "$REF_FILE" 2>/dev/null)"
+  while IFS= read -r f; do
+    case $f in *.gguf_file)
+      [ -e "$SNAP/$f" ] && ln -sfn "$(readlink "$SNAP/$f")" "$SNAP/${f%_file}" \
+        && log "  linked ${f%_file} -> $(basename "$(readlink "$SNAP/$f")")" ;;
+    esac
+  done <<< "$FILES"
+}
 fetch_model() {
   local M=$1 RC=0
   MODEL=$M
+  hf_fetch_entry "$M" && { log "  $M: downloaded"; return 0; } || RC=$?
+  if [ "$RC" -ne 2 ]; then
+    log "  $M: download stopped or failed (rc $RC) — run [d]ownload again to resume"
+    return 1
+  fi
+  log "  $M: could not resolve its files — falling back to an online load"
+  RC=0
   go_online "$M" || return 1
   python3 -c "
 import json

@@ -147,8 +147,8 @@ services:
     # docker compose --profile build build inkling-llama-build
     # The llama.cpp build for Thinking Machines' Inkling 2 Mini: Unsloth's
     # prebuilt release b12588-mix-c0c3de8 (upstream b12588 + 31 merged PRs:
-    # the looped `inkling2` arch in Unsloth's GGUF layout, DSpark #32218,
-    # Inkling 2 attention fixes). That source exists only as the release's
+    # the looped `inkling2` arch in Unsloth's GGUF layout, Inkling 2
+    # attention fixes). That source exists only as the release's
     # tarball (its commit 8832860 is in no git repo; the git tag of the same
     # name is Unsloth's PR-list state, without the inkling2 arch), so it is
     # pinned by the tarball's sha256, from the release's
