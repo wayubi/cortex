@@ -8,6 +8,8 @@
 #   ./tools/bench.sh mtpcheck <models...>       # MTP capability check only (writes spec-type)
 #   ./tools/bench.sh mtpverify <models...>      # MTP-on vs off output check (premise test)
 #   ./tools/bench.sh bisect <model> [test-batch]
+#   ./tools/bench.sh batch <models...>          # batch/ubatch tune only: ladder + refinement,
+#                                               # apply the pick, skip the confirm gates
 #   ./tools/bench.sh residency <model>          # fast GPU/CPU pre-check (no bench)
 #   ./tools/bench.sh fetch <models...>          # download an entry's files (the routers run offline)
 #   ./tools/bench.sh vision <models...>         # add [<model>-vision] when the repo ships an
@@ -29,9 +31,11 @@
 # Global flags (before the subcommand): --backend=<name>, --no-inherit, --reset-parent,
 # --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
 # failed, §6.4 part 3), --refine=64|coarse|off (discover refinement depth, §42
-# Change H; env BENCH_REFINE). Default mode is discover; --thorough re-enables the
-# old exhaustive tuners/bisect. Env BENCH_THOROUGH=1 is honoured; BENCH_DISCOVER=1
-# is a deprecated no-op alias (discover is the default).
+# Change H; env BENCH_REFINE), --no-confirm/--batch-only (bisect/batch only: stop
+# after the pick; skip saturation, long-decode and the decode cliff). Default mode
+# is discover; --thorough re-enables the old exhaustive tuners/bisect. Env
+# BENCH_THOROUGH=1 is honoured; BENCH_DISCOVER=1 is a deprecated no-op alias
+# (discover is the default).
 #
 # Full suite order per model (fixed): mtpcheck -> bisect -> mtp -> bench.
 # mtpcheck empirically determines MTP capability and sets/clears spec-type in
@@ -132,6 +136,8 @@ MTP_AB_TIE=0.02           # MTP A/B: MTP kept only if its mean beats MTP-off by 
 THOROUGH=0
 EARLY_AB=${BENCH_EARLY_AB:-1}  # early MTP A/B before the bisect (--no-early-ab / BENCH_EARLY_AB=0 to skip)
 STRICT=0                  # --strict: skip bench when mtp tuning failed (plan §6.4 part 3 / §7)
+BATCH_ONLY=0              # --no-confirm / --batch-only / `batch`: discover ladder + refinement
+                          # only; apply the pick, skip saturation/long-decode/decode-cliff
 REFINE_MODE=64            # discover refinement depth (plan §42 Change H): 64 (default, Change G
                           # golden-section to 64) | coarse (Change E: stop when no step beats the
                           # pre-step best by PREFILL_NOISE, E resolution width) | off (ladder only).
@@ -4592,7 +4598,15 @@ cmd_bisect_thorough() {
 # Default is DISCOVER; --thorough / THOROUGH=1 selects the old exhaustive path.
 # BENCH_DISCOVER=1 is a deprecated alias for discover.
 cmd_bisect() {
+  if [ "$BATCH_ONLY" -eq 1 ] && [ "${THOROUGH:-0}" -eq 1 ]; then
+    log "ERROR: --no-confirm/batch is discover-only; drop --thorough"
+    exit 1
+  fi
   if [ $# -ge 2 ] && [[ "$2" =~ ^[0-9]+$ ]]; then
+    if [ "$BATCH_ONLY" -eq 1 ]; then
+      log "ERROR: batch-only cannot use a numeric test-batch; that form runs the gates by definition"
+      exit 1
+    fi
     cmd_bisect_test_batch "$2"
     return
   fi
@@ -4921,7 +4935,9 @@ cmd_bisect_discover() {
 
     # Decode baseline at the first GPU rung (256), after the prefill measurement.
     # Change A: skipped for simple non-MTP models (decode is batch-independent).
-    if [ "$B" -eq "$B0" ] && [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 0 ]; then
+    # Batch-only: skipped too — its only consumer is the confirm-phase cliff check.
+    if [ "$B" -eq "$B0" ] && [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 0 ] \
+       && [ "$BATCH_ONLY" -eq 0 ]; then
       if ! DEC_BASE=$(decode_sample "256-baseline"); then
         log "  STALL during 256 decode baseline — aborting discover"
         exit 1
@@ -5256,6 +5272,8 @@ print(' '.join(out))
 
   log "  after refinement: pick=$PICK (${PICK_PF} t/s)"
 
+  local CONFIRM_STATUS=passed
+
   # Change E rule 3: on a confirm failure, step down through the measured points
   # (refinement points first, largest below PICK, then ladder rungs). Echoes the
   # largest measured PASS point strictly below $1, or empty if none.
@@ -5303,6 +5321,13 @@ print(' '.join(out))
         continue
       fi
       log "  residency GPU at pick=$PICK"
+    fi
+
+    if [ "$BATCH_ONLY" -eq 1 ]; then
+      log "  batch-only: skipping saturation, long-decode and pick decode sample"
+      log "  WARNING: batch=$PICK is a prefill pick, not full-context validated"
+      CONFIRM_STATUS=skipped
+      break
     fi
 
     log ""; log "  === SATURATION at $PICK ==="
@@ -5434,11 +5459,19 @@ print(' '.join(out))
   else
     log "  ceiling(coarse) ≥ ${HIGHPASS} PASS (not probed higher)"
   fi
-  log "  confirm: saturation PASS, long-decode PASS"
+  if [ "$CONFIRM_STATUS" = "skipped" ]; then
+    log "  confirm: SKIPPED (batch-only pick; not full-context validated)"
+  else
+    log "  confirm: saturation PASS, long-decode PASS"
+  fi
   if [ "$MODE" = "GPU" ] && [ -n "$DEC_BASE" ]; then
     log "  decode $(echo "$DEC_PICK" | cut -d'|' -f1) t/s @pick vs $(echo "$DEC_BASE" | cut -d'|' -f1) t/s @256 (GPU)"
   fi
-  log ""; log "  Next: run bench.sh bench $MODEL"
+  if [ "$CONFIRM_STATUS" = "skipped" ]; then
+    log ""; log "  Next: validate with bench.sh bisect $MODEL, then bench.sh bench $MODEL"
+  else
+    log ""; log "  Next: run bench.sh bench $MODEL"
+  fi
   log "=== DONE ==="
 
   # Write the discover JSON for cmd_bench to merge (§4.5). §40.2#1: the refine
@@ -5465,6 +5498,7 @@ for t in points:
 discover={
   'mode':'$MODE_TXT',
   'refine_mode':'$REFINE_MODE',
+  'confirm':'$CONFIRM_STATUS',
   'ladder':ladder,
   'best_prefill':float('$BEST_PREFILL'),
   'pick':int('$PICK'),
@@ -6363,6 +6397,7 @@ for arg in "$@"; do
     --reset-parent) RESET_PARENT=1 ;;
     --thorough)    THOROUGH=1 ;;
     --strict)      STRICT=1 ;;
+    --no-confirm|--batch-only) BATCH_ONLY=1 ;;
     --no-early-ab) EARLY_AB=0 ;;
     --refine=*)    REFINE_MODE="${arg#--refine=}" ;;
     *)             MAIN_ARGS+=("$arg") ;;
@@ -6475,9 +6510,9 @@ if [ "$#" -eq 0 ]; then
   echo "Selected:"
   for i in $MODEL_IDXS; do echo "  $i) $(model_name "$i")"; done
 
-  # ── Action: full suite or a quick residency check ──
+  # ── Action: full suite, batch-only, or a quick check ──
   echo ""
-  read -r -p "Run? [f]ull suite / [r]esidency check / [c]tx max / MTP [a]/b / [v]ision / [d]ownload (default f): " RUN_INPUT
+  read -r -p "Run? [f]ull suite / [b]atch tune only / [r]esidency check / [c]tx max / MTP A/B [a] / [v]ision / [d]ownload (default f): " RUN_INPUT
   case "${RUN_INPUT:-f}" in
     [dD]*)
       echo ""
@@ -6530,6 +6565,25 @@ if [ "$#" -eq 0 ]; then
         lshow "=== RESIDENCY: $MODEL ==="
         ensure_model_cached "$MODEL" || { lshow "  $MODEL: STALL (download failed — skipping)"; continue; }
         ( cmd_residency )
+      done
+      exit 0
+      ;;
+    [bB]*)
+      echo ""
+      echo "=== BATCH-ONLY PLAN ==="
+      if [ "${THOROUGH:-0}" -eq 1 ]; then
+        echo "ERROR: batch-only is discover-only; relaunch without --thorough (and unset BENCH_THOROUGH)"
+        exit 1
+      fi
+      for i in $MODEL_IDXS; do echo "  $(model_name "$i"): discover ladder + refinement (refine=$REFINE_MODE); apply batch/ubatch; skip saturation/long-decode"; done
+      echo ""
+      confirm "Proceed with this plan?" || { echo "Aborted."; exit 1; }
+      for i in $MODEL_IDXS; do
+        MODEL=$(model_name "$i")
+        lshow ""
+        lshow "=== BATCH: $MODEL ==="
+        ensure_model_cached "$MODEL" || { lshow "  $MODEL: STALL (download failed — skipping)"; continue; }
+        ( BATCH_ONLY=1; cmd_bisect "$MODEL" ) || lshow "  $MODEL: batch tuning did not complete (see log)"
       done
       exit 0
       ;;
@@ -6587,6 +6641,10 @@ fi
 
 # ── Subcommand dispatch ─────────────────────────────────────
 CMD=$1; shift
+if [ "$BATCH_ONLY" -eq 1 ] && [ "$CMD" != "bisect" ] && [ "$CMD" != "batch" ]; then
+  echo "ERROR: --no-confirm/--batch-only applies only to bisect and batch"
+  exit 1
+fi
 case "$CMD" in
   all)
     MODEL_IDXS=$(resolve_models "$@")
@@ -6620,6 +6678,23 @@ case "$CMD" in
     ensure_model_cached "$MODEL" || { echo "  $MODEL: STALL (download failed — skipping)"; exit 2; }
     # Subshell: its EXIT trap must not replace the main shell's sync_router_ini.
     ( cmd_bisect "$MODEL" "$@" ) || exit $?
+    ;;
+  batch)
+    # Batch/ubatch tune only: discover ladder + refinement, then apply the pick
+    # WITHOUT the confirm gates (saturation, long-decode, pick decode sample).
+    if [ $# -eq 0 ]; then
+      echo "Usage: bench.sh batch <models...>"
+      exit 1
+    fi
+    BATCH_ONLY=1
+    FAILED=0
+    for m in "$@"; do
+      MODEL=$m
+      ensure_model_cached "$m" || { echo "  $m: STALL (download failed — skipping)"; FAILED=$((FAILED + 1)); continue; }
+      # Subshell: its EXIT trap must not replace the main shell's sync_router_ini.
+      ( cmd_bisect "$m" ) || { echo "  $m: batch tuning did not complete (see log)"; FAILED=$((FAILED + 1)); }
+    done
+    [ "$FAILED" -eq 0 ] || exit 1
     ;;
   residency)
     MODEL=${1:-}
@@ -6714,12 +6789,13 @@ case "$CMD" in
     done
     ;;
   *)
-    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|residency|ctxmax|vision|fetch|mtp|mtpab|bench] <models...>"
+    echo "Usage: bench.sh [all|mtpcheck|mtpverify|bisect|batch|residency|ctxmax|vision|fetch|mtp|mtpab|bench] <models...>"
     echo "       bench.sh                                    # interactive full suite"
     echo "       bench.sh all <models...>                    # non-interactive full suite"
     echo "       bench.sh mtpcheck <models...>               # MTP capability check"
     echo "       bench.sh mtpverify <models...>              # MTP-on vs off output check (premise test)"
-    echo "       bench.sh bisect <model> [test-batch]"
+    echo "       bench.sh bisect <model> [test-batch] [--no-confirm]"
+    echo "       bench.sh batch <models...>                  # tune batch/ubatch only (skip the confirm gates)"
     echo "       bench.sh residency <model>                  # fast GPU/CPU pre-check (no bench)"
     echo "       bench.sh ctxmax <models...>                 # largest GPU-resident ctx → new entry"
     echo "       bench.sh vision <models...>                 # add [<model>-vision] if the repo ships an mmproj (image test)"
@@ -6727,7 +6803,7 @@ case "$CMD" in
     echo "       bench.sh mtp <models...>                    # n_max/p_min tuning, then MTP on/off A/B"
     echo "       bench.sh mtpab <heads...>                   # A/B only on a tuned entry → bench → family"
     echo "       bench.sh bench <models...>                  # benchmark JSON record"
-    echo "       global flags: --no-early-ab --backend=llama-cpp|prism-llama-cpp|raon-llama-cpp|inkling-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off"
+    echo "       global flags: --no-early-ab --backend=llama-cpp|prism-llama-cpp|raon-llama-cpp|inkling-llama-cpp (default: from the model names) --no-inherit --reset-parent --thorough --strict --refine=64|coarse|off --no-confirm|--batch-only"
     echo "       env: BENCH_THOROUGH=1 selects the thorough (legacy) tuners; discover is the default"
     echo "       env: BENCH_REFINE=64|coarse|off sets the discover refinement depth (default 64)"
     exit 1

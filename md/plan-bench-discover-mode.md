@@ -2037,3 +2037,21 @@ The ten status files currently in `/tmp` were left alone — none contains `"sta
 **The triggering model is being re-benched correctly**, but by luck rather than by the fix. `bench_20260910-0622.log` shows `✓ MTP-SUPPORTED` and `mtpcheck OK` for `tiel-coder-35b-a3b-q4-mtp-128k-think` at 06:25; it is in MTP tuning now. That run started at 06:22, before the pre-flight was committed, and it succeeds only because the weights finished downloading during the failed 22:34 run. Its wrong record from 09-09 23:26 (`tuning_status: not_mtp`, `drafter: none`) will be replaced when the bench step completes.
 
 **Open:** run the §56.3 acceptance set once the GPU is free.
+
+## 59. Change P — batch-only mode (2026-11-22)
+
+**Problem.** `bisect` is already a separate subcommand, but it always runs the confirm phase (pick residency → saturation → long-decode → decode cliff). There was no way to ask only for the batch/ubatch pick, so a quick tune still paid for a ~99%-ctx saturation run and a 4,000-token decode.
+
+**Change.** `bench.sh batch <models…>` and `bisect <model> --no-confirm` (alias `--batch-only`) run the discover ladder and refinement exactly as `bisect` does, then stop before the confirm phase. They keep the ladder's tiny probe, residency and sized-prefill measurements, plus the cheap pick-residency check for a simple non-MTP GPU model; they skip the batch-256 decode baseline (its only consumer is the skipped cliff), `saturation_test`, `long_decode_check` and the pick `decode_sample`. The pick is applied to `batch-size`/`ubatch-size`, and the discover JSON now carries `confirm: passed|skipped`.
+
+**Scope.** Discover only: `--thorough` and the numeric `bisect <model> <batch>` form reject the flag. `all` is unchanged and still runs the full suite. The ini snapshot/restore, OOM grep, `flock` and router resync are unchanged.
+
+**Why it is safe enough to offer.** The ladder already rejects OOM/spill rungs and probes residency at every rung for non-simple models; the batch is a prefill knob. The skipped gates are the full-context validation, not the batch search, so the result is explicitly marked unconfirmed (`confirm: skipped`) and the log tells the operator to validate with `bisect` before trusting it.
+
+**Acceptance.**
+- `bash -n tools/bench.sh` clean.
+- `batch` with no model prints usage and exits 1.
+- `--thorough --no-confirm bisect <model>` and `--no-confirm bisect <model> <batch>` fail before loading.
+- A real `batch <model>` run stops after “after refinement”, applies the pick, writes `confirm: skipped`, and the log contains the batch-only skip lines with no saturation/long-decode request.
+- A normal `bisect <model>` still runs the gates and writes `confirm: passed`.
+- Ctrl-C before the pick restores the original batch; after the pick it leaves the pick.
