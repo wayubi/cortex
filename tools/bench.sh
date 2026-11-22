@@ -731,6 +731,12 @@ served_grace() { echo $((180 + $1 / 65536 * 40)); }
 # log before proxy_reques, kill curl and return 0 so the caller catches the OOM via
 # oom_count_since_mark (rather than treating it as a retryable network stall).
 # All logs → stderr (caller may capture stdout via $()).
+# Served = the router logged forwarding this model's request (older builds:
+# "proxy_reques: proxying request to model <name>") or the model's child started
+# a task ("launch_slot_: ... processing task"; newer builds, e.g. Unsloth's
+# b12588-mix, log no proxy line, which made every probe wait until its request
+# had finished and sample an idle machine). After LOG_MARK only this request is
+# in flight, so a child's task line is this request's.
 wait_served() {
   local PID=$1
   local i
@@ -743,7 +749,7 @@ wait_served() {
       return 0
     fi
     if docker logs $DOCKER_LOG 2>&1 | tail -n +$((LOG_MARK + 1)) \
-         | grep -q "proxy_reques: proxying request to model $MODEL"; then
+         | grep -qE "proxy_reques: proxying request to model $MODEL|launch_slot_: id +[0-9]+ \| task [0-9]+ \| processing task"; then
       return 0
     fi
     sleep 2
@@ -4819,7 +4825,9 @@ cmd_bisect_discover() {
   log ""; log "=== DISCOVER LADDER (cap=$CAP, prefill probe ~${PROBE_TOKENS} tokens) ==="
   local POINTS=/tmp/discover_points.txt
   : > "$POINTS"
-  local B=256
+  # B0: the first rung. 256, halved down to 64 when 256 already fails at load
+  # (an entry whose fixed weights leave little VRAM, e.g. Inkling's loop-GPU).
+  local B0=256 B=256
   local MODE=""                 # "", GPU, or CPU (CPU skips residency + decode-cliff)
   local BEST_PREFILL=0
   local PREV_BELOW=0
@@ -4844,6 +4852,11 @@ cmd_bisect_discover() {
       log "  OOM at $B (tiny probe / load)"
       echo "$B OOM" >> "$POINTS"
       CEIL_FAIL_B=$B; CEIL_FAIL_R="OOM"; CEIL_BREAK=1
+      if [ "$B" -eq "$B0" ] && [ "${#PASS_B[@]}" -eq 0 ] && [ "$B0" -gt 64 ]; then
+        B0=$((B0 / 2)); B=$B0; CEIL_BREAK=""
+        log "  first rung failed — starting the ladder lower, at $B0"
+        continue
+      fi
       break
     fi
     log "  Tiny PASS @ $B"
@@ -4851,7 +4864,7 @@ cmd_bisect_discover() {
     # Residency (skipped entirely once MODE=CPU). Change A: a simple non-MTP
     # model runs residency once at rung 256 to set MODE; later rungs skip it
     # (no draft to spill, so the verdict cannot change).
-    if [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$B" -eq 256 ]; }; then
+    if [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$B" -eq "$B0" ]; }; then
       local R_V
       R_V=$(residency_probe)
       if [ "$R_V" = "STALL" ]; then
@@ -4859,8 +4872,8 @@ cmd_bisect_discover() {
         exit 1
       fi
       if [ "$R_V" = "CPU" ]; then
-        if [ "$B" -eq 256 ]; then
-          log "  CPU-compute detected at batch 256 → MODE=CPU (no residency probes after this rung)"
+        if [ "$B" -eq "$B0" ]; then
+          log "  CPU-compute detected at batch $B0 → MODE=CPU (no residency probes after this rung)"
           MODE="CPU"
         else
           log "  CPU-spillover at $B — not GPU-resident, stopping ladder"
@@ -4908,7 +4921,7 @@ cmd_bisect_discover() {
 
     # Decode baseline at the first GPU rung (256), after the prefill measurement.
     # Change A: skipped for simple non-MTP models (decode is batch-independent).
-    if [ "$B" -eq 256 ] && [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 0 ]; then
+    if [ "$B" -eq "$B0" ] && [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 0 ]; then
       if ! DEC_BASE=$(decode_sample "256-baseline"); then
         log "  STALL during 256 decode baseline — aborting discover"
         exit 1
@@ -4958,7 +4971,7 @@ print(' '.join(out))
     log "  mode=$MODE_TXT  ceiling(coarse) ≥ ${HIGHPASS} PASS (not probed higher)"
   fi
   if [ "${#PASS_B[@]}" -eq 0 ]; then
-    log "  ERROR: no batch passed at any rung down to 256. Lower ctx or free VRAM (override-tensor=exps=CPU)."
+    log "  ERROR: no batch passed at any rung down to $B0. Lower ctx or free VRAM (fewer weights on the GPU)."
     exit 1
   fi
 
@@ -4994,7 +5007,7 @@ print(' '.join(out))
     tiny_probe >&2 || TR=$?
     if [ "$TR" -eq 2 ]; then log "  STALL measuring candidate $CB — aborting" >&2; return 2; fi
     if [ "$TR" -ne 0 ]; then echo "0"; return 0; fi
-    if [ "$SKIP_RES" -ne 1 ] && [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$CB" -eq 256 ]; }; then
+    if [ "$SKIP_RES" -ne 1 ] && [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$CB" -eq "$B0" ]; }; then
       local RV
       RV=$(residency_probe)
       if [ "$RV" = "CPU" ]; then echo "0"; return 0; fi
@@ -5099,7 +5112,7 @@ print(' '.join(out))
     log "  refinement off (mode=off) — pick stays the best ladder rung $PICK (${PICK_PF} t/s)"
   else
   # ── Bracket determination ──
-  # BLO = nearest measured PASS strictly below PICK (256 if none); BHI = nearest
+  # BLO = nearest measured PASS strictly below PICK (the first rung B0 if none); BHI = nearest
   # measured PASS strictly above PICK if one exists; else, at a ceiling edge
   # (PICK==HIGHPASS with an OOM/SPILL rung above), BHI = that failed rung; else
   # PICK is the top measured rung with nothing above (ladder ended at/below cap
@@ -5114,7 +5127,7 @@ print(' '.join(out))
     if [ "$PB" -lt "$PICK" ] && [ "$PB" -gt "$BLO" ]; then BLO=$PB; fi
     if [ "$PB" -gt "$PICK" ] && { [ "$BHI" -eq 0 ] || [ "$PB" -lt "$BHI" ]; }; then BHI=$PB; fi
   done
-  [ "$BLO" -eq 0 ] && BLO=256
+  [ "$BLO" -eq 0 ] && BLO=$B0
   if [ "$BHI" -eq 0 ]; then
     if [ "$PICK" -eq "$HIGHPASS" ] && [ -n "$CEIL_FAIL_B" ] \
        && { [ "$CEIL_FAIL_R" = "OOM" ] || [ "$CEIL_FAIL_R" = "SPILL" ]; } \

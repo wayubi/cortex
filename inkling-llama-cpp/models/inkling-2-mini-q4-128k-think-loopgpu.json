@@ -1,0 +1,144 @@
+{
+  "model": "inkling-2-mini-q4-128k-think-loopgpu",
+  "ctx": 131072,
+  "batch": 128,
+  "ubatch": 128,
+  "placement": "CPU",
+  "bench_date": "2026-11-21T20:36:54.360946",
+  "bench_method": "bench_model.sh v2",
+  "backend": "inkling-llama-cpp",
+  "config": {
+    "temp": "1.0",
+    "top_k": "0",
+    "top_p": "1.0",
+    "min_p": "0.00",
+    "repeat_penalty": null,
+    "threads": "20",
+    "threads_batch": "20",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "ngl": "-1",
+    "hf": "unsloth/Inkling-2-Mini-GGUF:UD-Q4_K_XL",
+    "quant": "UD-Q4_K_XL",
+    "reasoning": "off",
+    "ctx": "131072",
+    "batch": "128"
+  },
+  "bench": {
+    "max_tokens": 4000,
+    "prefill_prompt_tokens": 98304,
+    "decode_prompt_tokens": 109,
+    "model_file_size_gb": 16.42,
+    "build_info": "inkling-llama-cpp 1.0.0-dev (build 12588, commit 883286076)",
+    "wall_time_s": 205
+  },
+  "speed": {
+    "prefill_t_s": 64.95,
+    "prefill_ms": 1445149.81,
+    "prefill_ms_per_tok": 15.3975,
+    "decode_t_s": 19.71,
+    "decode_ms": 202878.26,
+    "decode_ms_per_tok": 50.7322
+  },
+  "request": {
+    "prefill_prompt_tokens": 94259,
+    "decode_prompt_tokens": 109,
+    "max_tokens": 4000,
+    "completion_tokens": 4000,
+    "total_tokens": 4109,
+    "cached_tokens": 12,
+    "cache_n": 12,
+    "predicted_n": 4000,
+    "finish_reason": "length",
+    "truncated": true,
+    "degeneracy": 0.0
+  },
+  "mtp": {
+    "acceptance": null,
+    "draft_accepted": null,
+    "draft_generated": null,
+    "draft_mean_len": null,
+    "n_max_loaded": null,
+    "p_min_loaded": null,
+    "tuning_status": "not_mtp",
+    "tuning_reason": null,
+    "tuned_n_max": null,
+    "tuned_p_min": null,
+    "placement_baseline": null,
+    "tuning_samples": [],
+    "tuning_written_at": "2026-11-21T19:18:50.422004",
+    "ab": null,
+    "configured_n_max": null,
+    "configured_p_min": null,
+    "drafter": "none"
+  },
+  "discover": {
+    "mode": "CPU",
+    "refine_mode": "64",
+    "ladder": [
+      {
+        "batch": 256,
+        "status": "OOM",
+        "prefill": null
+      },
+      {
+        "batch": 128,
+        "status": "PASS",
+        "prefill": 73.85
+      },
+      {
+        "batch": 256,
+        "status": "OOM",
+        "prefill": null
+      }
+    ],
+    "best_prefill": 73.85,
+    "pick": 128,
+    "pick_rule": "best measured PASS point (incl. 0.03-aware refinement); TOL=0",
+    "refine_points": [],
+    "ceiling_coarse": "128 PASS / 256 OOM",
+    "ladder_break": "1",
+    "written_at": "2026-11-21T20:09:07.795768"
+  },
+  "hardware": {
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3060",
+      "driver_version": "610.57.04",
+      "memory_total_mib": 12288,
+      "power_limit_w": 170.0,
+      "clocks_max_sm_mhz": 2130,
+      "clocks_max_mem_mhz": 7501,
+      "compute_cap": "8.6",
+      "count": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Xeon(R) CPU E5-2697 v3 @ 2.60GHz",
+      "sockets": 1,
+      "cores": 14,
+      "threads": 28,
+      "max_mhz": "3600.0000",
+      "min_mhz": "1200.0000"
+    },
+    "ram_total_mib": 128644,
+    "kernel": "7.1.8-arch1-3",
+    "hostname": "W-SRV1",
+    "arch": "x86_64",
+    "run": {
+      "avg_cpu_pct": 1360.5,
+      "avg_gpu_util_pct": 47.2,
+      "avg_gpu_mem_util_pct": 25.0,
+      "cpu_stddev_pct": 36.6,
+      "peak_vram_mib": 11486,
+      "peak_power_w": 87.47,
+      "peak_temp_c": 52,
+      "peak_clocks_sm_mhz": 1972,
+      "peak_clocks_mem_mhz": 7301,
+      "final_vram_mib": 11486,
+      "final_temp_c": 51,
+      "final_power_w": 56.25,
+      "ram_used_mib": 49242,
+      "rss_mib": 18529,
+      "sample_count": 80
+    }
+  }
+}
