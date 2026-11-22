@@ -5182,7 +5182,25 @@ print(' '.join(out))
       [ "$GA" -le "$GS_LO" ] && GA=$(( GS_LO + 64 ))
       [ "$GB" -ge "$GS_HI" ] && GB=$(( GS_HI - 64 ))
       if [ "$GB" -le "$GA" ]; then
-        log "  golden: bracket [$GS_LO, $GS_HI] can't admit a new interior pair — stop"
+        # Too narrow for a pair, but it may still hold one 64-grid point (e.g.
+        # [128, 256] holds only 192, when the ladder started below 256): probe
+        # it once, so a passing, faster point is not left untested.
+        local GM=$(( (GS_LO + GS_HI) / 2 / 64 * 64 ))
+        [ "$GM" -le "$GS_LO" ] && GM=$(( GS_LO + 64 ))
+        if [ "$GM" -lt "$GS_HI" ] && [ -z "$(find_measured "$GM")" ]; then
+          UPPER_MEAS=$(find_measured "$GS_HI")
+          SKRES=1
+          if [ "$SIMPLE_NONMTP" -eq 0 ] && [ "$MODE" != "CPU" ] && [ -z "$UPPER_MEAS" ]; then
+            SKRES=0
+          fi
+          log ""; log "  golden: bracket [$GS_LO, $GS_HI] holds one interior point — probing $GM (residency=${SKRES})"
+          golden_probe "$GM" "$SKRES"
+          if [ "$GOLD_RES" = "0" ] || [ -z "$GOLD_RES" ]; then
+            log "  golden $GM failed — pick stays $PICK"
+          fi
+        else
+          log "  golden: bracket [$GS_LO, $GS_HI] can't admit a new interior point — stop"
+        fi
         break
       fi
       # Residency policy for interior probes this step.
