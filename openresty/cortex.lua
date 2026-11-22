@@ -36,7 +36,8 @@ M.ROUTERS = {
     -- KRAFTON's fork for Raon-1 mini (arch `raon1`; upstream support pending)
     { key = "raon_llama_cpp",   host = "raon-llama-cpp",   ini = "/etc/nginx/raon-models.ini" },
     -- Unsloth's prebuilt for Inkling 2 Mini (looped `inkling2` arch)
-    { key = "inkling_llama_cpp", host = "inkling-llama-cpp", ini = "/etc/nginx/inkling-models.ini" },}
+    { key = "inkling_llama_cpp", host = "inkling-llama-cpp", ini = "/etc/nginx/inkling-models.ini" },
+}
 M.ROUTER = {}
 for _, r in ipairs(M.ROUTERS) do
     M.ROUTER[r.key] = r
