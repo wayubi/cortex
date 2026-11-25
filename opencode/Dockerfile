@@ -11,6 +11,7 @@ RUN apt-get update \
       less \
       libstdc++6 \
       openssh-client \
+      procps \
       ripgrep \
       unzip \
       xz-utils \

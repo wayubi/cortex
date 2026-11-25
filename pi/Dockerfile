@@ -9,6 +9,7 @@ RUN apk add --no-cache \
       jq \
       ncurses-terminfo-base \
       openssh-client \
+      procps \
       ripgrep
 
 # Pi is not pinned: a build with a new CACHEBUST value re-runs only this
