@@ -41,7 +41,7 @@ Only one switch runs at a time, and a request is counted in flight only once it 
 
 ### NVMe model cache
 
-The `model-cache` service keeps an NVMe copy (in `/opt/cortex-models`) of each model loaded three times within seven days, up to 64 GB, evicting the least recently loaded, and serves loads from it by repointing the model's Hugging Face snapshot link. The copy on the model disk is never touched. Settings and an on/off switch are in its `environment:` in `compose.yml`; `off` restores every link and deletes the copies. Details in `AGENTS.md`.
+The `model-cache` service keeps an NVMe copy (in `/opt/cortex-models`) of each model loaded three times within seven days, up to 128 GB, evicting the least recently loaded, and serves loads from it by repointing the model's Hugging Face snapshot link. The copy on the model disk is never touched. Settings and an on/off switch are in its `environment:` in `compose.yml`; `off` restores every link and deletes the copies. Details in `AGENTS.md`.
 
 ## Requirements
 
