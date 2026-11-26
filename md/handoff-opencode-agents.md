@@ -308,8 +308,10 @@ OpenCode.
 - **Swap cost: addressed by the slot cache** (implemented 2026-11-26,
   `md/plan-slot-cache-across-swaps.md`). A swapped-back model restores its last conversation:
   groot's follow-up processed 30 tokens instead of 51K (switch back ~9 s instead of ~27 s). It holds
-  one conversation per model (the last at unload), which is the orchestrator's for groot. Still open:
-  qwen-35B (advisor/reviewer) loads in ~38 s on b12785 even warm (see AGENTS.md Gotchas).
+  one conversation per model (the last at unload), which is the orchestrator's for groot. qwen-35B
+  (advisor/reviewer) loads in 8 s from its NVMe copy; a 38-64 s load seen once was an NVMe-cache
+  eviction (AGENTS.md Gotchas). Open: the NVMe cache's recency-based eviction can drop heavily used
+  models (cyber-tiel-coder-35B, 363 loads in 7 days, has no NVMe copy).
 - If the end check (advisor ≤ 3 rounds, then reviewer ≤ 2) is too slow, lower the caps or skip the
   reviewer when no code changed.
 - Coder/vision permissions are denylists; an allowlist (`*` deny, then read/edit) would be tighter,

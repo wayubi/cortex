@@ -421,11 +421,12 @@ conversation) → qwen-3.6-35B 128k-think-coder (~7K) → groot follow-up → qw
   `http_request` did not decode, so the logged token and byte counts were `?` and error bodies
   empty (save and restore themselves worked). `http_request` now decodes chunked bodies; the mock
   answers slot calls chunked.
-- **Not slot-cache, found along the way:** on b12785 qwen-3.6-35B 128k loads in ~38 s even warm
-  (b10622: ~12 s), right after a new warning `tensor overrides to CPU are used with mmap enabled -
-  consider using --load-mode none for better performance`. It applies to CPU-placed models with
-  `load-mode = mmap+mlock`; check in the benches whether `load-mode none` (or the warning's cause)
-  restores load speed without the RAM cost `mmap+mlock` was chosen to avoid (AGENTS.md Gotchas).
+- **Not slot-cache, found along the way:** qwen-3.6-35B 128k loaded in 38-64 s during this test.
+  Cause (investigated the same day): model-cache had evicted its NVMe copy at 22:47 (least recently
+  loaded, after the smoke test touched every model), so it loaded from the slow SSD; it was
+  re-promoted at 23:21 and loads in 8 s since. Not b12785 and not the slot cache: with the NVMe copy,
+  `mmap+mlock` loads in 8 s (also after a 51K-token groot run, with or without the slot cache);
+  `load-mode none` loads in 15 s, holds a ~15 GB private copy and gives +25% prefill.
 - **Caution for manual testing:** a direct `POST /slots/...` to a router that names a model not
   loaded makes the router load it (beside the resident one); the coordinator only saves loaded
   models and restores after its own load, so this only arises from hand-made calls.
