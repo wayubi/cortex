@@ -3,7 +3,8 @@
 **Started:** 2026-11-26
 **Last updated:** 2026-11-26
 **Status:** In testing. First finding (2026-11-26): calling advisor and reviewer together was
-slow; changed to advisor until `PASS`, then reviewer.
+slow; changed to advisor until `PASS`, then reviewer. The cortex side changed the same day (new
+llama.cpp builds, the slot cache, NVMe-cache eviction): see "Infrastructure the agents run on".
 
 This document is maintained across sessions. Update "Last updated", the status, the change log and
 the open items whenever any of these files change.
@@ -62,6 +63,27 @@ repository** (`.local/` is gitignored), mounted into the `opencode` container at
 Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(` and `--output`
 (`git diff --output=FILE` writes a file), so the allowed git commands stay read-only.
 
+## Infrastructure the agents run on (cortex, as of 2026-11-26)
+
+- **Builds:** the `llama-cpp` router (groot, mellum, qwen-35B, gemma) runs upstream **b12785**
+  (`md/llama-cpp-b12785-quick-ab.md`); prism `prism-b12232-f702476`; raon KRAFTON `fb895662d`;
+  inkling Unsloth b12651. The bench records in `full-metrics.md` are mostly from the old b10622;
+  the quick A/B on b12785 measured groot 2,782 pp / 61.5 tg, mellum 3,726 / 108, qwen-35B 64k
+  1,144 / 42 (one sample each, ~6K-token prompt).
+- **Slot cache** (`md/plan-slot-cache-across-swaps.md`, AGENTS.md): before a model is unloaded its
+  slot (KV cache + context checkpoints) is saved to RAM, and restored after its next load. A model
+  swapped back processes only its new tokens: groot's follow-up after a qwen swap processed 30
+  tokens instead of 51K; switching back to groot takes ~9 s in all (load ~4-7 s, save and restore
+  0.1-0.4 s each) instead of ~27 s. One conversation per model is kept (the last at unload): for
+  groot that is the orchestrator's; for mellum, whichever coder ran last. Files expire 2 h after
+  their save; caps 8 GB (llama-cpp) and 2 GB per other router, RAM only for files written.
+- **NVMe cache:** a model file on the NVMe loads fast (qwen-35B 8 s), one on the SSD slowly
+  (qwen-35B 38-64 s). Copies are evicted by a **use score** (each load in the last 7 days counts
+  `0.5 ** (age / 24 h)`), so a one-off load cannot push out a model in daily use and a model no
+  longer used fades out within days.
+- **Measured loads (warm):** groot ~4-7 s, mellum 2-3 s, qwen-35B 128k 8 s (NVMe), gemma vision
+  ~5 s.
+
 ## Design
 
 ### Flow
@@ -86,9 +108,11 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
 
 ### Why each choice
 
-- **Batches.** Each delegation unloads groot and loads mellum, then groot reloads and re-reads its
-  context (groot bench: ~1,450 t/s prefill, so ~40 s per 60K-token context, plus load time,
-  unmeasured). One batch per stage means one wake-up instead of one per task.
+- **Batches.** Each delegation unloads groot and loads mellum, then groot reloads. Before the slot
+  cache groot also re-read its whole context (~23 s per 51K tokens); now it restores it, so a
+  wake-up costs ~9 s. Batching still matters: every swap is still a load each way, the slot cache
+  keeps only one conversation per model, and subagents sharing a model in one batch still take
+  turns in a single slot. One batch per stage means one wake-up instead of one per task.
 - **One model per message.** Mixing models in one message swaps between requests. Groups that may
   share a message: coder + scout (mellum); vision alone (gemma). Advisor and reviewer share a model
   (qwen) but are called one at a time (below). Any two
@@ -163,10 +187,10 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
 
 | Model | Role | Runs | Bench (full-metrics.md) |
 |---|---|---|---|
-| groot-19b 128k | orchestrator | every orchestrator step | GPU, 1,453 pp / 61 tg t/s |
-| mellum-12b 128k | coder, scout | once per batch | GPU, 2,323 pp / 121 tg t/s |
+| groot-19b 128k | orchestrator | every orchestrator step | GPU, 1,453 pp / 61 tg t/s (b10622); quick A/B on b12785 2,782 / 61.5 |
+| mellum-12b 128k | coder, scout | once per batch | GPU, 2,323 pp / 121 tg t/s (b10622); b12785 3,726 / 108 |
 | gemma-4-12b 64k-vision | vision | only when images are involved | **unbenched**; 32k-vision GPU 1,088 pp / 54 tg |
-| qwen-3.6-35B 128k | advisor, then reviewer | only at the end of a task: advisor ≤ 3 rounds, then reviewer ≤ 2 | **unbenched**; 64k 1,329/39 and 256k 832/37, both CPU-placed |
+| qwen-3.6-35B 128k | advisor, then reviewer | only at the end of a task: advisor ≤ 3 rounds, then reviewer ≤ 2 | **unbenched**; 64k 1,329/39 and 256k 832/37 (b10622), 64k 1,144/42 on b12785; CPU-placed |
 
 ## Verified facts (from the v2.2.5 binary, 2026-11-26)
 
@@ -195,9 +219,9 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
   the agent's default; a subagent without one inherits the caller's model (so the subagents must
   keep theirs).
 - Coder/scout tasks on `parallel = 1` run one after the other and may evict each other's cached
-  prompt; `--cache-ram` (RAM prompt cache) is not set in `models.ini` and its default in the pinned
-  build is unchecked.
-- Load times of groot, mellum, gemma and qwen (the swap cost).
+  prompt. `--cache-ram` (in-process RAM prompt cache) defaults to 8192 MiB on b12785 (checked in
+  `--help`); whether it keeps several conversations of one model with `parallel = 1` is
+  unverified. The slot cache does not help here: it acts only on model swaps.
 - The OpenCode v2 shell tool's maximum timeout (the orchestrator's foreground-wait rule depends on
   it; each re-issued wait call is one short request to the orchestrator's model, i.e. a swap under a
   running cortex job).
@@ -305,13 +329,13 @@ OpenCode.
 
 ### Other
 
-- **Swap cost: addressed by the slot cache** (implemented 2026-11-26,
-  `md/plan-slot-cache-across-swaps.md`). A swapped-back model restores its last conversation:
-  groot's follow-up processed 30 tokens instead of 51K (switch back ~9 s instead of ~27 s). It holds
-  one conversation per model (the last at unload), which is the orchestrator's for groot. qwen-35B
-  (advisor/reviewer) loads in 8 s from its NVMe copy; a 38-64 s load seen once was an NVMe-cache
-  eviction (AGENTS.md Gotchas). Open: the NVMe cache's recency-based eviction can drop heavily used
-  models (cyber-tiel-coder-35B, 363 loads in 7 days, has no NVMe copy).
+- **Swap cost: done** (see "Infrastructure the agents run on"). Remaining: the slot cache keeps
+  one conversation per model, so several coders on mellum still re-read their own prompts when
+  they alternate within a batch.
+- **raon on b12785** (for the hard-coder plan): loads on upstream b12785 with the same answers as
+  KRAFTON's build, but prefill was 21-30% slower there (one sample); raon stays on its own router
+  until benched (`md/llama-cpp-b12785-quick-ab.md`).
+- **gpt-oss-20b's reply-parsing crash** was on b10622; not re-tested on b12785.
 - If the end check (advisor ≤ 3 rounds, then reviewer ≤ 2) is too slow, lower the caps or skip the
   reviewer when no code changed.
 - Coder/vision permissions are denylists; an allowlist (`*` deny, then read/edit) would be tighter,
@@ -377,3 +401,8 @@ OpenCode.
 - **2026-11-26** — the `llama-cpp` router moved to upstream b12785 (`md/llama-cpp-b12785-quick-ab.md`):
   groot and mellum tool-call round trips verified; the slot-cache plan's Phase 0 passes on it.
 - **2026-11-26** — slot cache live on all four llama.cpp routers; swap-cost item updated.
+- **2026-11-26** — prism-llama-cpp moved to `prism-b12232-f702476` (slot-cache support).
+- **2026-11-26** — a 38-64 s qwen-35B load traced to an NVMe-cache eviction (not b12785); model-cache
+  now evicts by a recency-weighted use score (half-life 24 h) instead of least recently loaded.
+- **2026-11-26** — handoff: new section "Infrastructure the agents run on" (builds, slot cache, NVMe
+  cache, measured loads); batches rationale, model table, unverified and open items updated.
