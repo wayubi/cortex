@@ -60,7 +60,7 @@ Before changing anything, record a baseline so each option's gain is measured ra
 4. Record for each load: wall time, `fincore` before/after, and the child's `VmRSS`, `VmLck`, `VmSwap`
    from `/proc/<pid>/status`.
 5. Test models: `gemma-4-12b-q4-qat-mtp-32k` (GPU-resident, 6.7 GB) and
-   `tiel-coder-35b-a3b-q4-mtp-128k-think-coder` (CPU-resident MoE, 22 GB, afghanica's production model).
+   `tiel-coder-35b-a3b-q4-mtp-128k-think-coder` (CPU-resident MoE, 22 GB, a bot client's production model).
 6. Only run this while cortex is idle. Check `curl -s localhost:8080/availability` first: `busy` false and
    `human_pending` false. A load you trigger evicts whatever is resident.
 
@@ -164,12 +164,12 @@ generator from `bench.sh` whenever it edits a models.ini, and document running i
    today's behaviour.
 
 **Side effects to accept or handle:**
-- The response's `model` field will say the head's name. Check opencode and afghanica do not compare it.
+- The response's `model` field will say the head's name. Check the clients (opencode, the bot clients) do not compare it.
   If one does, rewrite it back in a body filter.
 - `/v1/models` still lists every preset. No change needed.
 - `availability.lua` reports the head as the resident model. Bots that compare the resident model with
-  their own (afghanica's gate) need to resolve their model through the same map, or they will see a
-  "different model" and wait. Check `afghanica` for that comparison before deploying.
+  their own (e.g. a bot's availability gate) need to resolve their model through the same map, or they will see a
+  "different model" and wait. Check each bot client for that comparison before deploying.
 
 **Tests:** extend `tools/test_coordinator.py` and `tools/coord_mock.py` with a scenario: request a sibling
 after its head, and assert no unload, a rewritten `model`, and the merged parameters.

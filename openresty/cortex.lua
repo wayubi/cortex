@@ -1,7 +1,7 @@
 -- Policy and helpers shared by coordinator.lua, log.lua and availability.lua.
 --
 -- Clients are humans or bots. A bot marks itself with `X-Cortex-Client: bot`
--- (afghanica, the mastodon x_bridge); anything without the header is a human
+-- (automated clients: batch pipelines, social-media bridges); anything without the header is a human
 -- (Open WebUI, opencode), so a client that knows nothing about cortex gets the
 -- priority by default.
 --
@@ -18,7 +18,7 @@ local M = {}
 -- Reading a reply and typing the next prompt.
 M.HUMAN_HOLD = 120
 -- The same as DRAIN_TIMEOUT. Bots set their per-call client timeouts to this
--- plus their generation budget (afghanica llm_timeout 900, x_bridge 900).
+-- plus their generation budget (e.g. a 900 s per-call timeout).
 M.BOT_HOLD_CAP = 600
 M.HOLD_POLL = 0.5
 
