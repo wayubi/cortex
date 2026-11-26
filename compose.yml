@@ -58,9 +58,12 @@ services:
       args:
         BUILD_JOBS: "20"
         LLAMA_REPO: "https://github.com/PrismML-Eng/llama.cpp.git"
-        LLAMA_REF: "prism-b10777-e3de715"
+        LLAMA_REF: "prism-b12232-f702476"
+        # The embedded web UI is off: its prebuilt download fails for fork tags
+        # (it looks for an upstream release), and cortex never serves the UI.
+        LLAMA_CMAKE_ARGS: "-DLLAMA_USE_PREBUILT_UI=OFF"
       tags:
-        - "prism-llama-cpp:prism-b10777-e3de715"
+        - "prism-llama-cpp:prism-b12232-f702476"
     image: prism-llama-cpp:latest
 
   prism-llama-cpp:
