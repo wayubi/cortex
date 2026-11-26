@@ -1,7 +1,7 @@
 # Plan: Keep each model's processed prompt across model swaps
 
 **Date:** 2026-11-26
-**Status:** Phases 1-3 implemented 2026-11-26 (offline tests pass; see Implementation notes). Plan revised 2026-11-26 after review (prism excluded, bench opt-out, explicit `command:`,
+**Status:** Phases 1-5 done 2026-11-26 (AGENTS.md: Architecture bullet, router checklist, layout, Gotchas). Phases 1-4 done 2026-11-26 (live: groot re-processes 30 tokens instead of 51K after a swap back). Phases 1-3 implemented 2026-11-26 (offline tests pass; see Implementation notes). Plan revised 2026-11-26 after review (prism excluded, bench opt-out, explicit `command:`,
 no restore bookkeeping, caps from Phase 0). Phase 0 **passed** 2026-11-26 on upstream b12785 (the `llama-cpp` router's new pin) for
 groot and mellum, and on raon's build. It failed on the old pin b10622 (no context checkpoints in
 slot files). Phases 1-5 are ready to implement for `llama-cpp`, `raon-llama-cpp` and
@@ -396,6 +396,39 @@ Run a real orchestrated session (or replay the groot ↔ qwen pattern) and compa
 - A bench run (any short `bench.sh` step) logs no `slot-cache:` lines for its requests.
 
 Record the numbers here and in AGENTS.md.
+
+### Phase 4 results (2026-11-26, live stack)
+
+Replay of the orchestrator ↔ advisor pattern through openresty `:8080`: groot (~51K-token
+conversation) → qwen-3.6-35B 128k-think-coder (~7K) → groot follow-up → qwen follow-up.
+
+| Step | Coordinator / router | Effect |
+|---|---|---|
+| groot → qwen | groot saved in 247 ms (2 checkpoints) | — |
+| qwen → groot | qwen saved (111 ms); groot loaded; **restored in 276 ms** | groot follow-up: **30 tokens processed, 51,052 cached** (0.3 s instead of ~23 s) |
+| groot → qwen | groot saved (406 ms, 4 checkpoints, 627 MB) | qwen **restored in 123 ms**; follow-up **30 tokens processed, 6,985 cached** |
+
+- **Switch back to groot: ~9 s** from the `switch:` line to the restore (save 0.1 s, unload ~1 s,
+  load ~7 s, restore 0.3 s), against ~4 s load + ~23 s re-processing before.
+- **Vision:** gemma-4-12B 64k-vision with an image in the conversation: saved (106 tokens, 20 MB,
+  25 ms) and restored (15 ms, checkpoints and the MTP draft state restored); the follow-up processed
+  28 tokens with 100 cached and answered correctly. Images do not break save/restore.
+- **Skip header:** a request with `X-Cortex-No-Slot-Cache` switching models logged no save and no
+  restore.
+- **RAM:** llama-cpp tmpfs 974 MB for four saved models (groot 627 MB, qwen ~370 MB, gemma 20 MB,
+  mellum 1 MB); the other routers 0. Over a day of use: not yet observed.
+- **Fix found and made:** llama.cpp answers `/slots` with `Transfer-Encoding: chunked`, which
+  `http_request` did not decode, so the logged token and byte counts were `?` and error bodies
+  empty (save and restore themselves worked). `http_request` now decodes chunked bodies; the mock
+  answers slot calls chunked.
+- **Not slot-cache, found along the way:** on b12785 qwen-3.6-35B 128k loads in ~38 s even warm
+  (b10622: ~12 s), right after a new warning `tensor overrides to CPU are used with mmap enabled -
+  consider using --load-mode none for better performance`. It applies to CPU-placed models with
+  `load-mode = mmap+mlock`; check in the benches whether `load-mode none` (or the warning's cause)
+  restores load speed without the RAM cost `mmap+mlock` was chosen to avoid (AGENTS.md Gotchas).
+- **Caution for manual testing:** a direct `POST /slots/...` to a router that names a model not
+  loaded makes the router load it (beside the resident one); the coordinator only saves loaded
+  models and restores after its own load, so this only arises from hand-made calls.
 
 ## 7. Phase 5 — docs
 

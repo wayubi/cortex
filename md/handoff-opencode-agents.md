@@ -305,10 +305,11 @@ OpenCode.
 
 ### Other
 
-- **Swap cost:** each swap loses the model's processed prompt; groot re-processes 41-111K tokens
-  (23-84 s) after every reload, against a 3.5-3.8 s weight load. Plan to save and restore the KV
-  cache across swaps: `md/plan-slot-cache-across-swaps.md` (not implemented; its Phase 0 needs the
-  GPU).
+- **Swap cost: addressed by the slot cache** (implemented 2026-11-26,
+  `md/plan-slot-cache-across-swaps.md`). A swapped-back model restores its last conversation:
+  groot's follow-up processed 30 tokens instead of 51K (switch back ~9 s instead of ~27 s). It holds
+  one conversation per model (the last at unload), which is the orchestrator's for groot. Still open:
+  qwen-35B (advisor/reviewer) loads in ~38 s on b12785 even warm (see AGENTS.md Gotchas).
 - If the end check (advisor ≤ 3 rounds, then reviewer ≤ 2) is too slow, lower the caps or skip the
   reviewer when no code changed.
 - Coder/vision permissions are denylists; an allowlist (`*` deny, then read/edit) would be tighter,
@@ -373,3 +374,4 @@ OpenCode.
   point to the cortex-job rule. Handoff model table and caps item updated to the sequential check.
 - **2026-11-26** — the `llama-cpp` router moved to upstream b12785 (`md/llama-cpp-b12785-quick-ab.md`):
   groot and mellum tool-call round trips verified; the slot-cache plan's Phase 0 passes on it.
+- **2026-11-26** — slot cache live on all four llama.cpp routers; swap-cost item updated.
