@@ -186,8 +186,8 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
 - Whether OpenCode v2 runs several subagent calls from one message together and returns all results
   in one continuation. Check the openresty log: one `switch:` to mellum per batch, not per task:
   `docker logs cortex-openresty-1 2>&1 | grep "switch:" | tail`
-- Whether mellum's tool calls (read/edit) work. OpenCode marks every llama.cpp model tool-capable
-  by assumption.
+- Whether mellum's tool calls work **inside OpenCode** (a raw tool-call round trip through cortex
+  works on b12785, 2026-11-26: it called `read_file` correctly and answered from the result).
 - Whether the `read` tool passes image files to the vision model as images (`vision` depends on it).
 - Whether `/orchestrate` leaves the session on the orchestrator afterwards, or only runs that one
   message as it. Tab selection is the reliable route.
@@ -371,3 +371,5 @@ OpenCode.
 - **2026-11-26** — final pass: `orchestrator.md` model-group rule reworded (advisor/reviewer share
   a model but are called one at a time); its own test runs and the advisor's requested commands now
   point to the cortex-job rule. Handoff model table and caps item updated to the sequential check.
+- **2026-11-26** — the `llama-cpp` router moved to upstream b12785 (`md/llama-cpp-b12785-quick-ab.md`):
+  groot and mellum tool-call round trips verified; the slot-cache plan's Phase 0 passes on it.

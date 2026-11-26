@@ -1,7 +1,11 @@
 # Plan: Keep each model's processed prompt across model swaps
 
 **Date:** 2026-11-26
-**Status:** Planned, not implemented. Nothing in this document is applied yet.
+**Status:** Phase 0 **passed** 2026-11-26 on upstream b12785 (the `llama-cpp` router's new pin) for
+groot and mellum, and on raon's build. It failed on the old pin b10622 (no context checkpoints in
+slot files). Phases 1-5 are ready to implement for `llama-cpp`, `raon-llama-cpp` and
+`inkling-llama-cpp` (their builds carry PR #26004); `prism-llama-cpp` (b10777) does not, so its
+models keep today's behaviour.
 **Audience:** an implementing agent. Do the phases in order. Phase 0 needs a loaded model on the
 GPU: **ask the user before running it** (cortex is in live use).
 
@@ -90,7 +94,97 @@ follow-up request processes only the new tokens; file sizes known per model (the
 
 ### Phase 0 results
 
-(to be filled in)
+Run 2026-11-26 on `llama-cpp` (pinned upstream build), test settings reverted afterwards.
+Prompt: ~51-53K tokens of repo documents through openresty `:8080`, `max_tokens 400`,
+`temperature 0`; follow-up = the same messages plus the assistant's answer and one new user message.
+
+| Check | groot-19b IQ3_M 128k (arch `qwen35moe`, hybrid) | mellum-12b 128k (arch `mellum`, SWA) |
+|---|---|---|
+| Routing form | model in the **JSON body** works; `?model=` in the query answers 400 "model name is missing" | same |
+| Save | 51,387 tokens, 363 MB (~7.1 KB/token), **0.19 s** | 53,348 tokens, 228 MB (~4.3 KB/token), **0.13 s** |
+| Reload (weights) | ~3.6 s | 3 s |
+| Restore | 51,387 tokens, **0.16 s** | 53,348 tokens, **0.12 s** |
+| Follow-up after restore | slot picked by LCP (sim 1.000, keep 0.992), but **all 51,010 tokens re-processed** (29.3 s) | slot picked by LCP (keep 0.993), **all 52,972 tokens re-processed** (18.7 s) |
+| Follow-up without unload (control, groot) | 22 tokens processed, 51,006 cached (0.23 s) | — |
+
+**Why it fails.** The saved state ends after the generated tokens (prompt + 400). A chat follow-up
+re-renders the previous assistant turn differently from the raw generated tokens (thinking stripped,
+end-of-turn tokens), so the new prompt diverges ~400 tokens before the end of the saved state and the
+server must roll back. Hybrid/recurrent models (`qwen35moe`: groot, qwen-35B; `raon1`) cannot roll
+back recurrent state, and SWA models (mellum, gemma4) cannot roll back their window, without a
+**context checkpoint**. Inside a running server llama.cpp keeps checkpoints (`--ctx-checkpoints`,
+default 32, min spacing 8192), which is why the control re-processed only 22 tokens. The slot file
+does not carry them (`n_restored` = tokens only), so after a restore the server re-processes
+everything. Architectures checked from the GGUF headers: groot and qwen-3.6-35B `qwen35moe` (ssm),
+raon `raon1` (ssm), mellum `mellum` (SWA), gemma-4 `gemma4` (SWA): every model in the agent plan is
+affected. qwen-35B and the other routers were therefore not tested.
+
+**Options before Phases 1-5 make sense (each needs its own check):**
+
+1. **A llama.cpp build whose slot save/restore includes context checkpoints.** Check upstream for
+   such a change; if it exists, re-run Phase 0 on a test build. Bumping the pinned build re-benches
+   the router (AGENTS.md), so test on a separate image first.
+2. **Make the follow-up an exact extension of the saved tokens**, so no rollback is needed: the log
+   suggests `--reasoning-preserve` ("chat template supports preserving reasoning"), which keeps the
+   thinking in the re-rendered assistant turn. It only helps if the client sends the reasoning back
+   and the re-render then matches the generated tokens exactly. Testable with one request pair.
+3. **Do not end the child process on a swap.** Explore whether a child can free VRAM but keep its
+   KV/checkpoints in host RAM (e.g. `--sleep-idle-seconds` behaviour), instead of the router's
+   unload. Unknown; read the code before testing.
+
+**Option 1 checked, 2026-11-26: the fix exists upstream.** llama.cpp PR #26004, "server : preserve
+context checkpoints across slot save/restore" (merged 2026-10-08), appends the slot's context
+checkpoints to the slot file and restores them. #30137 (merged 2026-11-05) adapted it to
+reference-counted checkpoints without changing the file behaviour. First release tag containing it:
+not determined. Builds in use, from strings in each binary:
+
+| Router | Build | Checkpoints in slot files |
+|---|---|---|
+| llama-cpp | upstream b10622 (pinned 2026-08-25) | no |
+| prism-llama-cpp | fork at b10777 | no |
+| raon-llama-cpp | KRAFTON fork, upstream ~b11729 (`fb895662d`, 2026-10-20) | yes |
+| inkling-llama-cpp | Unsloth b12588 (the running container; compose pins b12651, not yet recreated) | yes |
+
+**Phase 0 on raon** (`raon-1-mini-q5-128k-think-coder`, arch `raon1`, hybrid; same procedure,
+~17K-token prompt; test settings reverted afterwards):
+
+| Check | Result |
+|---|---|
+| Routing form | model in the JSON body (as on llama-cpp) |
+| Save | 17,344 tokens, 191 MB including 2 context checkpoints (96 MiB), **0.10 s**; log: `appended 2 context checkpoint(s)` |
+| Reload (weights) | 18 s |
+| Restore | 17,344 tokens, **0.11 s**; log: `restored 2 context checkpoint(s)` |
+| Follow-up after restore | **72 tokens processed, 17,219 cached** (1.8 s), against 17,223 tokens / 18.5 s for the first request |
+
+So the mechanism works for a hybrid model once the build carries the checkpoints. Groot and
+qwen-35B (`qwen35moe`) are the same model class; mellum and gemma (SWA) rely on the same checkpoint
+mechanism but were not re-tested on a new build.
+
+**Next steps:**
+
+1. Build a **test image** of upstream llama.cpp from a release tag after 2026-10-08 (preferably after
+   #30137), tagged separately so `llama-cpp:latest` and the pinned b10622 stay untouched; run Phase 0
+   with groot and mellum on it (a temporary service or a temporary image swap, reverted after).
+2. Moving the `llama-cpp` router to that build is a separate decision: AGENTS.md requires a re-bench
+   of its catalogue, which was benched on b10622. prism-llama-cpp lacks the fix too.
+3. Phases 1-5 then apply to the routers whose builds carry the fix.
+
+**Phase 0 on b12785** (after the `llama-cpp` router moved to it; same procedure as above, test
+settings reverted afterwards):
+
+| | groot-19b IQ3_M 128k-think-coder | mellum-12b 128k-think |
+|---|---|---|
+| First request (no cache) | 50,988 tokens, 22.9 s | 52,949 tokens, 17.5 s |
+| Save (incl. 2 context checkpoints) | 495 MB (checkpoints 126 MiB), 0.24 s | 253 MB (checkpoints 24 MiB), 0.12 s |
+| Reload (weights) | 4 s | 2 s |
+| Restore | 0.20 s, `restored 2 context checkpoint(s)` | 0.13 s, `restored 2 context checkpoint(s)` |
+| **Follow-up after restore** | **30 tokens processed, 50,984 cached, 0.28 s** | **77 tokens processed, 52,944 cached, 0.26 s** |
+
+Sizes for sizing the tmpfs caps (Phase 1): ~9.7 KB/token for groot and ~4.7 KB/token for mellum
+including checkpoints; raon ~11 KB/token. At groot's longest observed context (~111K tokens) a file
+is ~1.1 GB.
+
+Test artefacts (request script, outputs) were in the session scratchpad, not in the repo.
 
 ## 3. Phase 1 — routers: a bounded RAM folder for slot files
 

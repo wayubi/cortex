@@ -1,7 +1,9 @@
 # llama.cpp: version gap and untried performance knobs
 
 **Date:** 2026-11-22
-**Status:** Research only. No configuration, build or pin was changed.
+**Status:** Research note (2026-11-22). Update 2026-11-26: the `llama-cpp` router was moved from
+`b10622` to `b12785`; see `md/llama-cpp-b12785-quick-ab.md` for the quick A/B, smoke test and
+which other routers the new build can replace. The rest of this note is as written on 2026-11-22.
 **Audience:** a future agent or maintainer picking this up.
 
 This note records what upstream llama.cpp has added since the pinned build, which
