@@ -786,8 +786,10 @@ fire_request() {
   local ATTEMPT PID
   for ATTEMPT in 1 2 3; do
     logmark
+    # X-Cortex-No-Slot-Cache: benches never save or restore a model's slot (a
+    # restored cache would make prefill read too fast); every POST here sends it.
     curl -s --max-time "$TIMEOUT" -X POST http://localhost:8080/v1/chat/completions \
-      -H 'Content-Type: application/json' -d @"$PAYLOAD" > "$OUT" 2>&1 &
+      -H 'Content-Type: application/json' -H 'X-Cortex-No-Slot-Cache: 1' -d @"$PAYLOAD" > "$OUT" 2>&1 &
     PID=$!
     if wait_served "$PID"; then
       FIRE_PID=$PID
@@ -2154,7 +2156,7 @@ with open('/tmp/fetch_probe.json','w') as f: json.dump(payload, f)
 "
   logmark
   curl -s --max-time 7200 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/fetch_probe.json \
+    -H 'Content-Type: application/json' -H 'X-Cortex-No-Slot-Cache: 1' -d @/tmp/fetch_probe.json \
     > /tmp/fetch_response.json 2>&1 &
   local PID=$! T=0 LAST=""
   while kill -0 "$PID" 2>/dev/null; do
@@ -2229,7 +2231,7 @@ with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
 " 2>/dev/null
   logmark
   curl -s --max-time 7200 -X POST http://localhost:8080/v1/chat/completions \
-    -H 'Content-Type: application/json' -d @/tmp/cache_probe.json \
+    -H 'Content-Type: application/json' -H 'X-Cortex-No-Slot-Cache: 1' -d @/tmp/cache_probe.json \
     > /dev/null 2>&1 &
   local CURL_PID=$!
 

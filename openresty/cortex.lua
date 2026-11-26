@@ -29,18 +29,50 @@ local TARGET = { ["11434"] = "ollama", ["8080"] = "llama_cpp", ["5002"] = "nllb"
 -- named by the sections of its models.ini (bind-mounted read-only at `ini`),
 -- so a name must be unique across all of them. Adding a router is one line
 -- here plus its compose service and ini mount (see AGENTS.md).
+--
+-- slot_cache: the router's build writes context checkpoints into slot files
+-- (upstream PR #26004) and the router has the /slot-cache tmpfs and
+-- `slot-save-path`, so the coordinator saves a model's slot before unloading
+-- it and restores it after the next load (md/plan-slot-cache-across-swaps.md).
+-- Without checkpoints a restored slot is not reused, so leave it false.
 M.ROUTERS = {
-    { key = "llama_cpp",       host = "llama-cpp" },
+    { key = "llama_cpp",       host = "llama-cpp", slot_cache = true },
     -- PrismML's fork: ternary Bonsai types upstream cannot load
-    { key = "prism_llama_cpp", host = "prism-llama-cpp", ini = "/etc/nginx/prism-models.ini" },
+    { key = "prism_llama_cpp", host = "prism-llama-cpp", ini = "/etc/nginx/prism-models.ini",
+      slot_cache = true },
     -- KRAFTON's fork for Raon-1 mini (arch `raon1`; upstream support pending)
-    { key = "raon_llama_cpp",   host = "raon-llama-cpp",   ini = "/etc/nginx/raon-models.ini" },
+    { key = "raon_llama_cpp",   host = "raon-llama-cpp",   ini = "/etc/nginx/raon-models.ini",
+      slot_cache = true },
     -- Unsloth's prebuilt for Inkling 2 Mini (looped `inkling2` arch)
-    { key = "inkling_llama_cpp", host = "inkling-llama-cpp", ini = "/etc/nginx/inkling-models.ini" },
+    { key = "inkling_llama_cpp", host = "inkling-llama-cpp", ini = "/etc/nginx/inkling-models.ini",
+      slot_cache = true },
 }
 M.ROUTER = {}
 for _, r in ipairs(M.ROUTERS) do
     M.ROUTER[r.key] = r
+end
+
+-- Slot cache: keep a model's processed prompt across model swaps. Before the
+-- coordinator unloads a llama.cpp model it saves slot 0 (KV cache + context
+-- checkpoints) to the router's /slot-cache tmpfs; after the model is loaded
+-- again it restores it, so the next request processes only its new tokens.
+-- Every failure only logs and falls back to a full prompt. false = off.
+M.SLOT_CACHE = true
+-- Seconds. Measured 2026-11-26: save 0.1-0.25 s, restore 0.1-0.2 s for
+-- 50K-token slots (250-500 MB); a load from the page cache 2-18 s, from the
+-- slow SSD up to ~3.5 min.
+M.SLOT_SAVE_TIMEOUT = 30
+M.SLOT_RESTORE_TIMEOUT = 30
+M.MODEL_LOAD_TIMEOUT = 300
+-- A request carrying this header (any value) neither saves the model it evicts
+-- nor restores the one it loads. bench.sh sends it, so a measurement never
+-- reads a restored cache.
+M.SLOT_CACHE_SKIP_HEADER = "X-Cortex-No-Slot-Cache"
+
+function M.slot_cache_for(key)
+    local r = M.ROUTER[key]
+    return M.SLOT_CACHE and r ~= nil and r.slot_cache == true
+        and ngx.var.http_x_cortex_no_slot_cache == nil
 end
 
 -- Every backend key, for the in-flight counts availability.lua reports.

@@ -70,9 +70,9 @@ local function get_model()
 end
 
 
-local function http_request(method, host, port, path, body)
+local function http_request(method, host, port, path, body, timeout_ms)
     local sock = ngx.socket.tcp()
-    sock:settimeout(5000)
+    sock:settimeout(timeout_ms or 5000)
     local ok, err = sock:connect(host, port)
     if not ok then
         return nil, "connect: " .. (err or "?")
@@ -159,6 +159,27 @@ local function unload_ollama()
 end
 
 
+-- Slot cache (cortex.SLOT_CACHE): save slot 0 of `model` to, or restore it
+-- from, <slot-save-path>/<model>.bin on router `key`. The router passes the
+-- call to the model's child by the "model" field of the JSON body (a ?model=
+-- query is refused). -> the decoded answer, or nil plus an error string.
+local function slot_call(key, action, model, timeout_s)
+    local body = cjson.encode({ model = model, filename = model .. ".bin" })
+    local t0 = ngx.now()
+    local res, err = http_request("POST", HOST[key], 8080, "/slots/0?action=" .. action,
+                                  body, timeout_s * 1000)
+    local ms = math.floor((ngx.now() - t0) * 1000)
+    if not res then
+        return nil, err, ms
+    end
+    if res.status ~= 200 then
+        return nil, "HTTP " .. res.status .. " " .. (res.body or ""):sub(1, 200), ms
+    end
+    local ok, data = pcall(cjson.decode, res.body)
+    return (ok and type(data) == "table") and data or {}, nil, ms
+end
+
+
 -- Every :8080 router (cortex.ROUTERS) is a llama.cpp router with the same API;
 -- `key` is its backend key (llama_cpp, prism_llama_cpp, ...), HOST[key] its host.
 local function unload_llamacpp(key)
@@ -177,6 +198,17 @@ local function unload_llamacpp(key)
     local count = 0
     for _, m in ipairs(data.data) do
         if m.status and m.status.value == "loaded" and m.id then
+            -- Keep its processed prompt for the next load (best effort: a
+            -- failed save never holds up the unload).
+            if cortex.slot_cache_for(key) then
+                local data, e, ms = slot_call(key, "save", m.id, cortex.SLOT_SAVE_TIMEOUT)
+                if data then
+                    ngx.log(ngx.INFO, "slot-cache: saved ", m.id, " (", (data.n_saved or "?"),
+                            " tokens, ", (data.n_written or "?"), " bytes, ", ms, " ms)")
+                else
+                    ngx.log(ngx.WARN, "slot-cache: save failed for ", m.id, ": ", (e or "?"))
+                end
+            end
             ngx.log(ngx.INFO, host, ": unloading ", m.id)
             local body = cjson.encode({ model = m.id })
             local r, e = http_request("POST", host, 8080, "/models/unload", body)
@@ -266,6 +298,66 @@ local function is_nllb_clear()
         end
     end
     return true
+end
+
+
+-- Poll router `key` until `model` reports loaded. -> true, or false after
+-- `timeout` seconds or when the load failed.
+local function wait_until_loaded(key, model, timeout)
+    local waited = 0
+    while waited < timeout do
+        local res = http_request("GET", HOST[key], 8080, "/v1/models")
+        if res and res.status == 200 then
+            local ok, data = pcall(cjson.decode, res.body)
+            if ok and type(data) == "table" and data.data then
+                for _, m in ipairs(data.data) do
+                    if m.id == model and m.status then
+                        if m.status.value == "loaded" then return true end
+                        -- a failed load: the router marks it, or the model
+                        -- falls back to "unloaded" once loading has begun
+                        if m.status.failed or m.status.exit_code
+                           or (m.status.value == "unloaded" and waited >= 5) then
+                            return false
+                        end
+                    end
+                end
+            end
+        end
+        ngx.sleep(0.5)
+        waited = waited + 0.5
+    end
+    return false
+end
+
+
+-- Slot cache: load `model` on router `key` and put its saved slot back before
+-- the first request is proxied, so that request processes only its new
+-- tokens. Runs while the switch key is held, so nothing reaches the model
+-- between the load and the restore. Every failure only logs; the request then
+-- loads the model (if needed) and processes its full prompt, as without it.
+local function restore_slot(key, model)
+    local r = http_request("POST", HOST[key], 8080, "/models/load",
+                           cjson.encode({ model = model }), 30000)
+    if not r then
+        ngx.log(ngx.WARN, "slot-cache: load request failed for ", model)
+        return
+    end
+    if not wait_until_loaded(key, model, cortex.MODEL_LOAD_TIMEOUT) then
+        ngx.log(ngx.WARN, "slot-cache: ", model, " not loaded after ", cortex.MODEL_LOAD_TIMEOUT,
+                "s (or failed); no restore")
+        return
+    end
+    local data, e, ms = slot_call(key, "restore", model, cortex.SLOT_RESTORE_TIMEOUT)
+    if data then
+        ngx.log(ngx.INFO, "slot-cache: restored ", model, " (", (data.n_restored or "?"),
+                " tokens, ", ms, " ms)")
+    elseif e and e:match("^HTTP 4") then
+        -- first load since the router started, a pruned file, or a model
+        -- that was never saved: expected
+        ngx.log(ngx.INFO, "slot-cache: nothing to restore for ", model, " (", e, ")")
+    else
+        ngx.log(ngx.WARN, "slot-cache: restore failed for ", model, ": ", (e or "?"))
+    end
 end
 
 
@@ -455,6 +547,7 @@ end
 -- a worker that dies mid-switch cannot wedge cortex. log.lua releases it on
 -- every exit, abort included.
 local SWITCH_TTL = DRAIN_TIMEOUT + UNLOAD_CONFIRM_TIMEOUT + NLLB_READY_TIMEOUT + 30
+    + cortex.SLOT_SAVE_TIMEOUT + cortex.MODEL_LOAD_TIMEOUT + cortex.SLOT_RESTORE_TIMEOUT
 local SWITCH_POLL = 0.25
 
 
@@ -529,6 +622,10 @@ local function switch_to(target, target_model, bot)
         state_dict:set("model", target_model)
     end
     ngx.log(ngx.INFO, "state: backend=", target, " model=", (target_model or "none"))
+
+    if target_model and cortex.slot_cache_for(target) then
+        restore_slot(target, target_model)
+    end
     return "ok"
 end
 

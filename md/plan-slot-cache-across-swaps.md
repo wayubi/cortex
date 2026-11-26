@@ -1,7 +1,8 @@
 # Plan: Keep each model's processed prompt across model swaps
 
 **Date:** 2026-11-26
-**Status:** Phase 0 **passed** 2026-11-26 on upstream b12785 (the `llama-cpp` router's new pin) for
+**Status:** Phases 1-3 implemented 2026-11-26 (offline tests pass; see Implementation notes). Plan revised 2026-11-26 after review (prism excluded, bench opt-out, explicit `command:`,
+no restore bookkeeping, caps from Phase 0). Phase 0 **passed** 2026-11-26 on upstream b12785 (the `llama-cpp` router's new pin) for
 groot and mellum, and on raon's build. It failed on the old pin b10622 (no context checkpoints in
 slot files). Phases 1-5 are ready to implement for `llama-cpp`, `raon-llama-cpp` and
 `inkling-llama-cpp` (their builds carry PR #26004); `prism-llama-cpp` (b10777) does not, so its
@@ -188,44 +189,71 @@ Test artefacts (request script, outputs) were in the session scratchpad, not in 
 
 ## 3. Phase 1 — routers: a bounded RAM folder for slot files
 
-For **every** router in `cortex.ROUTERS` (`llama-cpp`, `prism-llama-cpp`, `raon-llama-cpp`,
-`inkling-llama-cpp`):
+For the routers whose builds carry context checkpoints in slot files (upstream PR #26004):
+`llama-cpp` (b12785), `raon-llama-cpp` (`fb895662d`), `inkling-llama-cpp` (b12651) and
+`prism-llama-cpp`, which was moved from `prism-b10777-e3de715` (predates the fix) to the fork's
+latest release `prism-b12232-f702476` for this, with `-DLLAMA_USE_PREBUILT_UI=OFF` (the prebuilt UI
+download fails for fork tags). Mark the routers in `cortex.ROUTERS` with `slot_cache = true`
+(Phase 2). A router whose build lacks the fix must not get the flag: its restores are not reused.
 
 1. **A size-capped tmpfs.** `compose.yml`: add a tmpfs mount at `/slot-cache` to the service, with a
    `size=` cap. A tmpfs uses RAM only for the files actually written, and can never exceed its cap
-   (a save that would exceed it fails, and the coordinator treats that as a miss). Suggested caps,
-   to be revised from the Phase 0 sizes: `llama-cpp` 16g (it serves most models in rotation),
-   `raon-llama-cpp` 8g, `prism-llama-cpp` and `inkling-llama-cpp` 4g. The caps are host-specific:
-   put the real values in `compose.override.yml` and leave neutral defaults in `compose.yml`.
-   Worst case, the slot cache holds the sum of the caps; nothing else is kept.
+   (a save that would exceed it fails, and the coordinator treats that as a miss). Caps from the
+   Phase 0 sizes (including checkpoints): groot ~9.7 KB/token (~1.1 GB at its longest observed
+   context, ~111K tokens), mellum ~4.7 KB/token, raon ~11 KB/token (~1.4 GB at 128K). A file is
+   KV (grows per token) plus context checkpoints (one at least every 8,192 tokens, up to 32; ~63 MiB
+   each for groot, ~48 MiB raon, ~12 MiB mellum), so at full context: groot ~1.6 GB (111K),
+   raon ~1.4 GB (128K), mellum ~0.75 GB (128K). Caps, chosen conservative (2026-11-26):
+   `llama-cpp` **8g** (groot + qwen-35B + mellum at full context with margin), `raon-llama-cpp`
+   **2g** (one quant in use at a time), `prism-llama-cpp` **2g** and `inkling-llama-cpp` **2g**
+   (their sizes are **unmeasured**; re-size them from the first `slot-cache: saved` log lines).
+   Pruner targets (`SLOT_CACHE_KEEP_GB`): 6 / 2 / 2 / 2. On the 2g routers the target equals the
+   cap (size pruning effectively off; the 2-hour expiry still applies): a lower target would delete
+   a full-context slot (raon ~1.4 GB) minutes after saving it. The target must always be at least
+   the largest single slot the router can hold. A slot that does not fit fails to save:
+   one cache miss, nothing worse. The caps are in `compose.yml`: they are sized from model cache
+   sizes, not from anything host-specific. Worst case, the slot cache holds the sum of the caps
+   (14 GB); no RAM is reserved up front. Nothing else is kept.
 2. **One file per model.** Each save overwrites `/slot-cache/<entry>.bin`, so a router never holds
    more than one file per model it serves.
 3. **A pruner in each router container.** llama.cpp has no API to delete slot files, and a compose
    tmpfs is private to its container, so the pruner runs inside the router container. Override the
-   service's `entrypoint` (the image's is `["llama-server"]`; keep the existing `command:`) with a
-   small `sh -c` wrapper that starts a background loop and then `exec`s `llama-server "$@"`. Every
+   service's `entrypoint` (the image's is `["llama-server"]`) with a small `sh` wrapper that starts
+   a background loop and then `exec`s `llama-server "$@"`. The services already set `command:`
+   (`--models-preset /models.ini --port 8080 --host 0.0.0.0`) in `compose.yml`, so the arguments
+   survive the override (Docker drops only the *image's* arguments when `entrypoint` changes). Every
    `SLOT_CACHE_PRUNE_EVERY` (300 s) the loop:
    - deletes `*.bin` files not modified for `SLOT_CACHE_TTL_MIN` (120 min): a model not swapped
      back within two hours is not worth its RAM;
    - if the folder still holds more than `SLOT_CACHE_KEEP_GB` (default: 75% of the tmpfs cap),
-     deletes the oldest files until it is under.
+     deletes the oldest files until it is under. Keeping usage under the cap this way is what keeps
+     saves from failing for lack of space.
+   - A save that fails part-way (for example on a full tmpfs) can leave a truncated file. That is
+     harmless (llama.cpp rejects or ignores it on restore, and the request processes its full
+     prompt), and the next successful save of that model overwrites it; the age and size rules
+     remove it otherwise.
    Pass the three values as environment variables of the service, so they are tunable in
    `compose.override.yml` without editing the wrapper. Keep the wrapper in a tracked file
    (`llama-cpp/slot-cache-entrypoint.sh`, mounted read-only into each router) rather than inline
    YAML, so all routers share one copy.
 4. **`models.ini`:** each `[*]` gets `slot-save-path = /slot-cache`.
-5. **Stale files are impossible by construction:** a compose `tmpfs` is empty on every container
+5. **Which conversation is restored:** the model's last conversation at unload time (slot 0). For
+   the orchestrator's model that is the orchestrator's last turn, the case that matters. For a model
+   shared by several callers (e.g. coders on mellum) it is whichever ran last: of little value, but
+   harmless. Restoring per conversation would need `parallel > 1`; out of scope.
+6. **Stale files are impossible by construction:** a compose `tmpfs` is empty on every container
    start, and every `models.ini` change already needs a router restart (AGENTS.md). So a saved state
    can never be restored into a model whose settings or weights changed. Do not use a named volume
    or a host path for this, because those survive restarts.
-6. **A pruned or missing file is harmless:** the restore answers "not found", the coordinator clears
-   its dict entry, and the request processes its full prompt as it does today.
-7. Deploy: `docker compose up -d <router>` for each.
+7. **A pruned or missing file is harmless:** the restore answers "not found" and the request
+   processes its full prompt as it does today.
+8. Deploy: `docker compose up -d <router>` for each.
 
 Acceptance: `docker exec <router> df -h /slot-cache` shows the tmpfs with its cap; a router restart
 empties it; a file older than the TTL disappears within one prune interval; with the folder filled
-past `SLOT_CACHE_KEEP_GB` (test with small values), the oldest files are removed first; `llama-server`
-is still PID 1's child that receives signals (`docker compose stop` stops it cleanly).
+past `SLOT_CACHE_KEEP_GB` (test with small values), the oldest files are removed first; the router
+still lists all its presets (`GET /v1/models`), proving `command:` is right; `llama-server` receives
+signals (`docker compose stop` stops it cleanly); prism is unchanged.
 
 ## 4. Phase 2 — coordinator: save before unload, restore after load
 
@@ -234,6 +262,11 @@ All in `openresty/coordinator.lua` and `openresty/cortex.lua`. Anchors are funct
 ### Constants (`cortex.lua`)
 
 - `M.SLOT_CACHE = true`: master switch. `false` restores today's behaviour exactly.
+- Per router: `slot_cache = true` in the `M.ROUTERS` entries for `llama_cpp`, `raon_llama_cpp` and
+  `inkling_llama_cpp` (not `prism_llama_cpp`). Save and restore only for routers with the flag.
+- `M.SLOT_CACHE_SKIP_HEADER = "X-Cortex-No-Slot-Cache"`: a request carrying this header (any value)
+  neither triggers a save of the model it evicts nor a restore of the model it loads. `bench.sh`
+  sends it (Phase 2b).
 - `M.SLOT_SAVE_TIMEOUT = 60` (s), `M.SLOT_RESTORE_TIMEOUT = 60` (s), `M.MODEL_LOAD_TIMEOUT = 300`
   (s; a cold load from the slow SSD has taken up to ~3.5 min). Revise the two slot timeouts from the
   Phase 0 measurements (about 5× the slowest measured).
@@ -245,13 +278,13 @@ parameter `timeout_ms`, default 5000, so existing callers are unchanged.
 
 ### Save: in `unload_llamacpp(key)`
 
-For each model it is about to unload (`status.value == "loaded"`), when `cortex.SLOT_CACHE`:
+For each model it is about to unload (`status.value == "loaded"`), when `cortex.SLOT_CACHE`, the
+router has `slot_cache = true`, and the current request does not carry the skip header:
 
 1. `POST /slots/0?action=save` routed to that model (the form from Phase 0), body
    `{"filename": "<m.id>.bin"}`, timeout `SLOT_SAVE_TIMEOUT`.
 2. Log `slot-cache: saved <m.id> (<bytes>, <ms>)` or a WARN with the error.
-3. Record success in `backend_state` as key `slot:<m.id>` (value: the time saved).
-4. **A failed or timed-out save never blocks the unload.** Go on to `/models/unload` as now.
+3. **A failed or timed-out save never blocks the unload.** Go on to `/models/unload` as now.
 
 File names: one file per models.ini entry, overwritten on each save. Entry names are unique across
 all models.ini files (AGENTS.md), so files cannot collide.
@@ -259,7 +292,10 @@ all models.ini files (AGENTS.md), so files cannot collide.
 ### Restore: at the end of `switch_to`, for a llama.cpp router target
 
 After the state is set and before returning `"ok"`, when `cortex.SLOT_CACHE`, `cortex.ROUTER[target]`
-and `target_model`, and `backend_state` has `slot:<target_model>`:
+has `slot_cache = true`, `target_model` is set, and the request does not carry the skip header.
+**Always attempt the restore** in that case: no bookkeeping of which files exist. A shared-dict
+record would be lost whenever openresty restarts (skipping valid restores), and a missing file only
+costs a "not found" answer in milliseconds; the load has to happen before the first request anyway.
 
 1. `POST /models/load` `{"model": target_model}` on `HOST[target]`.
 2. Poll `GET /v1/models` every 0.5 s until that model's `status.value == "loaded"`, up to
@@ -267,13 +303,24 @@ and `target_model`, and `backend_state` has `slot:<target_model>`:
    `wait_until_clear`.
 3. `POST /slots/0?action=restore` routed to the model, body `{"filename": "<target_model>.bin"}`,
    timeout `SLOT_RESTORE_TIMEOUT`.
-4. Log `slot-cache: restored <model> (<ms>)`, or a WARN, and delete `slot:<model>` from the dict on
-   a "file not found" answer (the router restarted and its tmpfs is empty).
+4. Log `slot-cache: restored <model> (<n_restored>, <ms>)`; a "not found" answer at INFO (expected:
+   first load, pruned file, or router restarted); any other error at WARN.
 5. **Any failure (load timeout, restore error) only logs.** The request proceeds as today; it will
    load the model and process its full prompt.
 
 Why inside `switch_to`: it runs while the request holds the switch key, so no other request reaches
 the model between the load and the restore, and the waiters behave as for any switch.
+
+### Phase 2b — `bench.sh` opts out
+
+A restore puts a model's previous conversation back in its cache. `bench.sh` sends
+`cache_prompt: false` only in its sized prefill probe; any other measurement that repeats an earlier
+prompt after the coordinator swapped models could then read part of its prefill from the restored
+cache and report it too fast. Add the header `X-Cortex-No-Slot-Cache: 1` to **every** request
+`bench.sh` sends through openresty (find each `curl` / Python request it builds), so benches never
+save or restore. Check with `grep -n` that no request path is missed. (Implemented: bench.sh has
+three POSTs to `:8080/v1/chat/completions`, in `fire_request` and the two fetch/cache probes; all
+three send it. Its only other `:8080` call is an uncoordinated `GET /v1/models`.)
 
 ### Switch key lifetime
 
@@ -297,20 +344,43 @@ restarts.
 
 `tools/coord_mock.py` and `tools/test_coordinator.py` (offline, no GPU):
 
-1. Mock: implement `POST /slots/0?action=save|restore` (record calls; `restore` of an unknown file
-   answers with an error like llama.cpp's), `POST /models/load` (sets the model loaded after a short
-   delay), and a switch to make a save slow or fail.
+1. Mock: implement `POST /slots/0?action=save|restore` with the model in the JSON body, as Phase 0
+   found (record calls; `restore` of an unknown file answers with an error like llama.cpp's),
+   `POST /models/load` (sets the model loaded after a short delay; the mock has neither today), and
+   a switch to make a save slow or fail.
 2. Scenarios:
    - switch A → B saves A; switch B → A restores A, after the load and before the request is
      proxied;
    - a failing save still unloads and switches;
    - a slow save beyond `SLOT_SAVE_TIMEOUT` still unloads and switches;
-   - restore of a missing file: the request proceeds; `slot:<model>` is cleared;
+   - restore of a missing file: the request proceeds;
+   - a request with `X-Cortex-No-Slot-Cache` makes no slot calls on save or restore;
+   - a router without `slot_cache` (prism's mock) gets no slot calls;
    - `SLOT_CACHE = false`: no slot calls at all (today's call sequence exactly);
    - a request that arrives during the restore waits for the switch, like any waiter;
    - ollama/nllb switches make no slot calls.
 3. `python3 tools/test_coordinator.py` passes, and `--ref HEAD` still passes against the old commit
    for the unchanged scenarios.
+
+### Implementation notes (2026-11-26)
+
+- `openresty/cortex.lua`: `slot_cache = true` on all four routers; `SLOT_CACHE`, the three timeouts
+  (save 30 s, restore 30 s, load 300 s), `SLOT_CACHE_SKIP_HEADER` and `slot_cache_for(key)`.
+- `openresty/coordinator.lua`: `http_request(..., timeout_ms)`; `slot_call`, `wait_until_loaded`
+  (also stops on a failed load: `failed` / `exit_code` in the status, or `unloaded` after 5 s),
+  `restore_slot`; the save in `unload_llamacpp`; the restore at the end of `switch_to`; `SWITCH_TTL`
+  extended by the three timeouts.
+- `llama-cpp/slot-cache-entrypoint.sh`: the pruner wrapper, mounted into all four routers.
+- `compose.yml`: tmpfs, entrypoint, mount and pruner settings on the four routers; prism pinned to
+  `prism-b12232-f702476`.
+- Every `models.ini` `[*]`: `slot-save-path = /slot-cache` (comment on its own line: string values
+  take no inline comment).
+- `tools/bench.sh`: the skip header on its three POSTs.
+- `tools/coord_mock.py` / `tools/test_coordinator.py`: slot, load, log and control endpoints; five
+  scenarios (save then restore in order, across routers; failed / slow save and missing file;
+  skip header and ollama/nllb; a waiter during the load and restore; `SLOT_CACHE = false`). All 16
+  scenarios pass; against the previous commit the 11 old ones pass and only the slot-cache checks
+  fail.
 
 ## 6. Phase 4 — measure on the live stack (ask first)
 
@@ -321,6 +391,9 @@ Run a real orchestrated session (or replay the groot ↔ qwen pattern) and compa
 - Total switch time (openresty `switch:` line → first token), including save and restore.
 - RAM: tmpfs usage per router (`df -h /slot-cache` in each container) over a day of normal use;
   confirm it stays under the caps and that the pruner removes idle files.
+- A vision entry (gemma-4-12B `-vision`) with an image in its conversation: save and restore may not
+  support image tokens. Confirm it fails harmlessly (logged, full prompt processed) or works.
+- A bench run (any short `bench.sh` step) logs no `slot-cache:` lines for its requests.
 
 Record the numbers here and in AGENTS.md.
 

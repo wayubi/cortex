@@ -29,6 +29,7 @@ IMAGE = "openresty/openresty:bookworm-fat"
 MOCK_IMAGE = "python:3.11-slim"
 HOLD = 3
 CAP = 6
+SLOT_TIMEOUT = 2    # cortex.SLOT_SAVE_TIMEOUT / SLOT_RESTORE_TIMEOUT in the test
 LUA = ("coordinator.lua", "availability.lua", "cortex.lua", "log.lua", "models_list.lua")
 # :8080 models that route to prism- / raon- / inkling-llama-cpp (their
 # models.ini section names); every other :8080 model goes to llama-cpp
@@ -72,6 +73,9 @@ def stage(ref, out):
         s = open(pol).read()
         s = re.sub(r"M\.HUMAN_HOLD = \d+", f"M.HUMAN_HOLD = {HOLD}", s)
         s = re.sub(r"M\.BOT_HOLD_CAP = \d+", f"M.BOT_HOLD_CAP = {CAP}", s)
+        s = re.sub(r"M\.SLOT_SAVE_TIMEOUT = \d+", f"M.SLOT_SAVE_TIMEOUT = {SLOT_TIMEOUT}", s)
+        s = re.sub(r"M\.SLOT_RESTORE_TIMEOUT = \d+", f"M.SLOT_RESTORE_TIMEOUT = {SLOT_TIMEOUT}", s)
+        s = re.sub(r"M\.MODEL_LOAD_TIMEOUT = \d+", "M.MODEL_LOAD_TIMEOUT = 10", s)
         open(pol, "w").write(s)
     for _, host, _, models in EXTRA:
         with open(os.path.join(out, host.split("-")[0] + "-models.ini"), "w") as fh:
@@ -144,9 +148,10 @@ class Stack:
 class Call(threading.Thread):
     """One POST on its own thread, timed from the shared t0."""
 
-    def __init__(self, stack, t0, port, model, delay, bot, after=0.0, timeout=30):
+    def __init__(self, stack, t0, port, model, delay, bot, after=0.0, timeout=30, headers=None):
         super().__init__(daemon=True)
         self.args = (stack, t0, port, model, delay, bot, after, timeout)
+        self.extra = headers or {}
         self.status = self.held = self.end = self.body = None
 
     def run(self):
@@ -157,7 +162,7 @@ class Call(threading.Thread):
             stack.url(port, path), method="POST",
             data=json.dumps({"model": model, "delay": delay}).encode(),
             headers={"Content-Type": "application/json",
-                     **({"X-Cortex-Client": "bot"} if bot else {})})
+                     **({"X-Cortex-Client": "bot"} if bot else {}), **self.extra})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 self.status = r.status
@@ -435,6 +440,146 @@ def scenario_fresh_state_unloads_what_is_resident(stack):
     settle(stack)
 
 
+def mock(stack, suffix, path, body=None):
+    """GET (body None) or POST a mock's control endpoint, from inside its container."""
+    code = ("import json,urllib.request as u;"
+            f"r=u.Request('http://localhost:8080{path}',"
+            + ("None" if body is None else repr(json.dumps(body).encode())) +
+            ",{'Content-Type':'application/json'});print(u.urlopen(r).read().decode())")
+    return json.loads(sh("docker", "exec", stack.name + "-" + suffix, "python", "-c", code))
+
+
+def reset_mocks(stack):
+    for suffix in ("mock",) + tuple(e[0] for e in EXTRA):
+        mock(stack, suffix, "/__reset", {})
+
+
+def events(stack, suffix="mock", backend="llama_cpp"):
+    """[(event, model)] the mock logged for `backend`, in order."""
+    return [(e, m) for _, b, e, m in mock(stack, suffix, "/__log") if b == backend]
+
+
+def call(stack, model, port=8080, headers=None, timeout=20):
+    c = Call(stack, time.time(), port, model, 0.1, bot=False, timeout=timeout, headers=headers)
+    c.start(); c.join()
+    return c
+
+
+def scenario_slot_cache_saves_and_restores(stack):
+    print("slot cache: saved before the unload, restored after the load and before the request")
+    reset_mocks(stack)
+    call(stack, "m-a")
+    b = call(stack, "m-b")
+    ev = events(stack)
+    check("the evicted model is saved, then unloaded",
+          ("save", "m-a") in ev and ev.index(("save", "m-a")) < ev.index(("unload", "m-a")), ev)
+    check("a model never saved: restore misses, request still served",
+          b.status == 200 and ("restore-missing", "m-b") in ev, (b.status, ev))
+    reset_mocks(stack)
+    call(stack, "m-b")
+    call(stack, "m-a")         # saves m-b
+    back = call(stack, "m-b")  # restores m-b
+    ev = events(stack)
+    i_load, i_rest = ev.index(("load", "m-b"), 1), ev.index(("restore", "m-b"))
+    i_inf = max(i for i, x in enumerate(ev) if x == ("infer", "m-b"))
+    check("switching back: load, then restore, then the request", back.status == 200
+          and i_load < i_rest < i_inf, ev)
+    # across routers: leaving llama-cpp for raon saves on llama-cpp, coming back restores
+    reset_mocks(stack)
+    call(stack, "m-a")
+    call(stack, "m-raon")
+    call(stack, "m-a")
+    ev = events(stack)
+    check("across routers: saved on leaving, restored on return",
+          ("save", "m-a") in ev and ("restore", "m-a") in ev, ev)
+    check("the raon model was saved on its own router",
+          ("save", "m-raon") in events(stack, "rmock", "raon_llama_cpp"),
+          events(stack, "rmock", "raon_llama_cpp"))
+    settle(stack)
+
+
+def scenario_slot_cache_failures_never_block(stack):
+    print("slot cache: a failed or slow save, and a missing file, never block the switch")
+    reset_mocks(stack)
+    call(stack, "m-a")
+    mock(stack, "mock", "/__control", {"save_fail": True})
+    b = call(stack, "m-b")
+    ev = events(stack)
+    check("a failing save still unloads and switches", b.status == 200
+          and ("save-failed", "m-a") in ev and ("unload", "m-a") in ev, (b.status, ev))
+    mock(stack, "mock", "/__control", {"save_fail": False, "save_delay": SLOT_TIMEOUT + 2})
+    t = time.time()
+    c = call(stack, "m-c")
+    took = time.time() - t
+    check("a save slower than the timeout still switches, after about the timeout",
+          c.status == 200 and SLOT_TIMEOUT - 0.5 <= took < SLOT_TIMEOUT + 4, (c.status, took))
+    mock(stack, "mock", "/__control", {"save_delay": 0})
+    time.sleep(SLOT_TIMEOUT + 2.5)   # let the slow save's thread finish in the mock
+    settle(stack)
+
+
+def scenario_slot_cache_skip_header_and_other_backends(stack):
+    print("slot cache: the bench header and non-llama.cpp backends make no slot calls")
+    reset_mocks(stack)
+    call(stack, "m-a", headers={"X-Cortex-No-Slot-Cache": "1"})
+    call(stack, "m-b", headers={"X-Cortex-No-Slot-Cache": "1"})
+    call(stack, "m-a", headers={"X-Cortex-No-Slot-Cache": "1"})
+    ev = events(stack)
+    slot = [x for x in ev if x[0].startswith(("save", "restore")) or x[0] == "load"]
+    check("a request with X-Cortex-No-Slot-Cache neither saves nor restores", not slot, ev)
+    reset_mocks(stack)
+    call(stack, "m-a")
+    call(stack, "m-human", port=11434)
+    call(stack, "m-nllb", port=5002)
+    ol = events(stack, "mock", "ollama") + events(stack, "mock", "nllb")
+    check("ollama and nllb get no slot calls",
+          not [x for x in ol if x[0].startswith(("save", "restore", "load"))], ol)
+    check("leaving llama-cpp for ollama still saves the llama model",
+          ("save", "m-a") in events(stack), events(stack))
+    settle(stack)
+
+
+def scenario_slot_cache_waiter_during_restore(stack):
+    print("slot cache: a request arriving during the load and restore waits for them")
+    reset_mocks(stack)
+    call(stack, "m-a")
+    call(stack, "m-b")                    # saves m-a
+    mock(stack, "mock", "/__control", {"load_delay": 1.5})
+    t0 = time.time()
+    first = Call(stack, t0, 8080, "m-a", 0.1, bot=False, timeout=20)
+    second = Call(stack, t0, 8080, "m-a", 0.1, bot=False, after=0.5, timeout=20)
+    for c in (first, second):
+        c.start()
+    for c in (first, second):
+        c.join()
+    mock(stack, "mock", "/__control", {"load_delay": 0})
+    ev = events(stack)
+    i_rest = ev.index(("restore", "m-a"))
+    infers = [i for i, x in enumerate(ev) if x == ("infer", "m-a")]
+    check("both served", first.status == 200 and second.status == 200, (first.status, second.status))
+    check("no request reached the model before the restore", infers and min(infers[-2:]) > i_rest, ev)
+    settle(stack)
+
+
+def scenario_slot_cache_off(stack, conf):
+    print("slot cache: SLOT_CACHE = false makes no slot calls at all")
+    pol = os.path.join(conf, "cortex.lua")
+    s = open(pol).read()
+    with open(pol, "r+") as fh:      # in place: the container binds this inode
+        fh.seek(0); fh.write(s.replace("M.SLOT_CACHE = true", "M.SLOT_CACHE = false")); fh.truncate()
+    try:
+        stack.restart_openresty()
+        reset_mocks(stack)
+        call(stack, "m-a"); call(stack, "m-b"); call(stack, "m-a")
+        ev = events(stack)
+        check("no save, load or restore", not [x for x in ev if x[0].startswith(("save", "restore", "load"))], ev)
+    finally:
+        with open(pol, "r+") as fh:
+            fh.seek(0); fh.write(s); fh.truncate()
+        stack.restart_openresty()
+    settle(stack)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ref", help="test openresty/ as of this commit instead of the working tree")
@@ -453,9 +598,14 @@ def main():
                    scenario_raon_routes_and_switches_from_another_extra_router,
                    scenario_inkling_routes_and_switches,
                    scenario_mixed_routers_concurrently,
-                   scenario_fresh_state_unloads_what_is_resident):
+                   scenario_fresh_state_unloads_what_is_resident,
+                   scenario_slot_cache_saves_and_restores,
+                   scenario_slot_cache_failures_never_block,
+                   scenario_slot_cache_skip_header_and_other_backends,
+                   scenario_slot_cache_waiter_during_restore,
+                   scenario_slot_cache_off):
             try:
-                fn(stack)
+                fn(stack, conf) if fn is scenario_slot_cache_off else fn(stack)
             except Exception as e:
                 check(fn.__name__, False, f"{type(e).__name__}: {e}")
     finally:
