@@ -113,5 +113,7 @@ quick speed check above.
 **Decision (2026-11-26):** all three routers (raon, inkling, prism) stay for now, until more
 benching on b12785.
 
-Note: the running `inkling-llama-cpp` container reports b12588 while `compose.yml` pins b12651; it
-has not been recreated since the bump.
+Note: the `inkling-llama-cpp` container ran b12588 although `compose.yml` pinned b12651 (rebuilt,
+not recreated). Recreated 2026-11-26 on b12651 (`d426a3774`): all three inkling entries load and
+answer both test prompts correctly, no load or OOM errors; 64k decode 23.1 → 26.8 t/s against the
+b12588 run above (one sample). The inkling rows in `full-metrics.md` were benched on b12588.
