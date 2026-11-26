@@ -15,8 +15,14 @@ The blob on the SSD is never touched, so the SSD keeps a complete copy and
 evicting is only repointing the link and deleting the NVMe file. The router
 starts a new llama-server per load, which resolves the link then, so nothing
 restarts; a loaded model keeps the file it opened. Copies stay under GB
-gigabytes, evicting the least recently loaded first. DIR is mounted at the
-same path in both routers, so the absolute link resolves there too.
+gigabytes. To make room, the copy with the lowest *use score* goes first:
+each load counts 0.5 ** (its age / HALF_LIFE), so what counts is recent,
+frequent use (yesterday's loads count half, last week's almost nothing). A
+model is only copied if it can make room from copies scoring below its own;
+a one-off load (a smoke test, an A/B pass) cannot push out a model in daily
+use, and a model you stopped using fades out within days, however many loads
+it once had. DIR is mounted at the same path in every router, so the
+absolute link resolves there too.
 
 CORTEX_NVME_CACHE=off points every link back at its blob, deletes the
 copies and the state, and exits 0 (restart: on-failure keeps it stopped).
@@ -34,6 +40,9 @@ ENABLED = os.environ.get("CORTEX_NVME_CACHE", "on").strip().lower() not in ("off
 CAP = int(float(os.environ.get("CORTEX_NVME_CACHE_GB", "64")) * 1e9)
 LOADS = int(os.environ.get("CORTEX_NVME_CACHE_LOADS", "3"))
 WINDOW = float(os.environ.get("CORTEX_NVME_CACHE_DAYS", "7")) * 86400
+# Half-life of a load's weight in the eviction score, hours. 24 = yesterday's
+# loads count half. A choice, not a measurement (2026-11-26).
+HALF_LIFE = float(os.environ.get("CORTEX_NVME_CACHE_HALF_LIFE_H", "24")) * 3600
 DIR = os.environ.get("CORTEX_NVME_CACHE_DIR", "/opt/cortex-models").rstrip("/")
 HUB = os.environ.get("HF_HUB", "/root/.cache/huggingface/hub")
 ROUTERS = [u for u in os.environ.get(
@@ -223,17 +232,44 @@ def blob_path(sha):
     return None
 
 
+def score(s, now):
+    """Recent, frequent use: each load weighs 0.5 ** (age / HALF_LIFE)."""
+    return sum(0.5 ** ((now - t) / HALF_LIFE) for t in s.get("loads", []) if t <= now)
+
+
+def victims_for(state, key, need, now):
+    """The promoted copies to evict so `need` bytes fit under CAP, lowest score
+    first (oldest last load breaking ties), taking only copies that score below
+    the newcomer. None when that cannot free enough room."""
+    mine = score(state["sets"][key], now)
+    free = CAP - used_bytes(state)
+    chosen = []
+    cands = sorted((score(o, now), o.get("last", 0), k) for k, o in state["sets"].items()
+                   if o.get("promoted") and k != key)
+    for sc, _, k in cands:
+        if free >= need:
+            break
+        if sc >= mine:
+            return None
+        chosen.append((k, sc))
+        free += sum(f["size"] for f in state["sets"][k]["files"])
+    return chosen if free >= need else None
+
+
 def promote(state, key):
     s = state["sets"][key]
     need = sum(f["size"] for f in s["files"] if not os.path.exists(copy_path(f["sha"])))
     if need > CAP:
         log(f"{s['hf']}: {need / 1e9:.1f} GB is larger than the {CAP / 1e9:.0f} GB cap; not copied")
         return
-    while used_bytes(state) + need > CAP:
-        victims = [(o["last"], k) for k, o in state["sets"].items() if o.get("promoted") and k != key]
-        if not victims:
-            break
-        evict(state, min(victims)[1], "least recently loaded, to make room")
+    now = time.time()
+    victims = victims_for(state, key, need, now)
+    if victims is None:
+        log(f"{s['hf']}: not copied: making room would evict copies used more recently and often "
+            f"(its score {score(s, now):.2f})")
+        return
+    for k, sc in victims:
+        evict(state, k, f"lowest use score {sc:.2f} < {score(s, now):.2f}, to make room")
     if shutil.disk_usage(DIR).free - need < KEEP_FREE:
         log(f"{s['hf']}: not enough free space on {DIR}; not copied")
         return
@@ -346,7 +382,8 @@ def main():
         disable()
         return 0
     log(f"on: copy a model to {DIR} at load #{LOADS} within {WINDOW / 86400:g} days, "
-        f"cap {CAP / 1e9:g} GB; routers {', '.join(ROUTERS)}")
+        f"cap {CAP / 1e9:g} GB, evicting the lowest use score (half-life {HALF_LIFE / 3600:g} h); "
+        f"routers {', '.join(ROUTERS)}")
     state = load_state()
     reconcile(state)
     save_state(state)

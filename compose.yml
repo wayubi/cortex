@@ -321,6 +321,7 @@ services:
       - CORTEX_NVME_CACHE_GB=128          # size cap for the NVMe copies
       - CORTEX_NVME_CACHE_LOADS=3         # copy a model on its Nth load ...
       - CORTEX_NVME_CACHE_DAYS=7          # ... within this many days
+      - CORTEX_NVME_CACHE_HALF_LIFE_H=24  # eviction: lowest use score first; a load's weight halves per this many hours
       - CORTEX_NVME_CACHE_DIR=/opt/cortex-models
 
   pi:
