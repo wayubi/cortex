@@ -2,9 +2,10 @@ services:
 
   llama-build:
     # docker compose --profile build build llama-build
-    # Upstream ggml-org/llama.cpp at a pinned release tag (b10622 = commit
-    # 3737e41, 2026-08-25: the build serving cortex when pinning began). Bump
-    # LLAMA_REF + the tag below deliberately and re-bench after.
+    # Upstream ggml-org/llama.cpp at a pinned release tag (b12785 = commit
+    # 55d4828, 2026-11-26, shortly after v1.1.0; previous pin b10622, 2026-08-25,
+    # kept as image llama-cpp:b10622 for rollback). Bump LLAMA_REF + the tag
+    # below deliberately and re-bench after.
     profiles: ["build"]
     build:
       context: ./llama-cpp
@@ -12,9 +13,9 @@ services:
       args:
         BUILD_JOBS: "20"
         LLAMA_REPO: "https://github.com/ggml-org/llama.cpp.git"
-        LLAMA_REF: "b10622"
+        LLAMA_REF: "b12785"
       tags:
-        - "llama-cpp:b10622"
+        - "llama-cpp:b12785"
     image: llama-cpp:latest
 
   llama-cpp:
