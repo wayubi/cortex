@@ -106,15 +106,38 @@ local function http_request(method, host, port, path, body, timeout_ms)
     end
 
     local content_length = 0
+    local chunked = false
     while true do
         local line, err = sock:receive("*l")
         if not line or line == "" then break end
         local len = line:match("^[Cc]ontent%-[Ll]ength:%s*(%d+)")
         if len then content_length = tonumber(len) end
+        if line:lower():match("^transfer%-encoding:%s*chunked") then chunked = true end
     end
 
     local resp_body = ""
-    if content_length > 0 then
+    if chunked then
+        -- llama.cpp answers some calls (e.g. /slots) chunked: <hex size> CRLF
+        -- <data> CRLF ... 0 CRLF CRLF
+        local parts = {}
+        while true do
+            local size_line, err = sock:receive("*l")
+            if not size_line then
+                sock:close()
+                return nil, "receive chunk size: " .. (err or "?")
+            end
+            local size = tonumber(size_line:match("^%s*(%x+)"), 16)
+            if not size or size == 0 then break end
+            local data, err = sock:receive(size)
+            if not data then
+                sock:close()
+                return nil, "receive chunk: " .. (err or "?")
+            end
+            parts[#parts + 1] = data
+            sock:receive("*l")   -- the CRLF after each chunk
+        end
+        resp_body = table.concat(parts)
+    elseif content_length > 0 then
         resp_body, err = sock:receive(content_length)
         if not resp_body then
             sock:close()

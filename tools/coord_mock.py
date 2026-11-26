@@ -52,6 +52,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_chunked(self, obj, status=200):
+        """As llama.cpp answers /slots: Transfer-Encoding: chunked."""
+        body = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        half = len(body) // 2
+        for part in (body[:half], body[half:]):
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
+        self.wfile.write(b"0\r\n\r\n")
+
     def _backend(self):
         return PORT_BACKEND[self.server.server_address[1]]
 
@@ -100,15 +112,15 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     FILES.add(fname)
                 note(b, "save", model)
-                return self._send({"id_slot": 0, "filename": fname, "n_saved": 1, "n_written": 1})
+                return self._send_chunked({"id_slot": 0, "filename": fname, "n_saved": 1234, "n_written": 5678})
             if action == "restore":
                 with LOCK:
                     known = fname in FILES
                 if not known:
                     note(b, "restore-missing", model)
-                    return self._send({"error": {"code": 400, "message": "failed to open slot file"}}, 400)
+                    return self._send_chunked({"error": {"code": 400, "message": "failed to open slot file"}}, 400)
                 note(b, "restore", model)
-                return self._send({"id_slot": 0, "filename": fname, "n_restored": 1, "n_read": 1})
+                return self._send_chunked({"id_slot": 0, "filename": fname, "n_restored": 1234, "n_read": 5678})
             return self._send({"error": "unknown action"}, 400)
         if self.path == "/models/load":
             model = body.get("model")
