@@ -301,7 +301,8 @@ items that move between states.** Outside them stay only files a tool expects in
 - `docs/reference/`: design, how-tos, runbooks and measured findings. Keep a reference doc current and
   edit it in place, without a change log; a dated finding is a record and is not rewritten later.
   Today: `benchmarking.md` (bench method and evidence), `CPU_POLLING.md` (placement measurement),
-  `opencode-agents.md` (the OpenCode agents' design), `nllb-translation-service.md` (the nllb API),
+  `opencode-agents.md` (the OpenCode agents' design), `work-order-workflow.md` (how to use the
+  foreman), `nllb-translation-service.md` (the nllb API),
   `llama-cpp-b12785-quick-ab.md` (the last upstream bump's A/B) and
   `llama-cpp-tuning-and-version-gap.md` (untried llama.cpp knobs, 2026-11-22).
 - `docs/sessions/`: session states and handoffs, named `YYYY-MM-DD-<topic>.md`. **Git-ignored**: they

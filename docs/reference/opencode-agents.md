@@ -32,7 +32,7 @@ machine-specific skills) stays in the config volume.
 
 | File | Kind | Model | What |
 |---|---|---|---|
-| `agents/orchestrator.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | plans, batches subagents, quick-checks their work, then advisor until PASS, then reviewer |
+| `agents/orchestrator.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, batches subagents, quick-checks their work, then advisor until PASS, then reviewer |
 | `agents/coder.md` | subagent | mellum-2.1-12b-a2.5b-q4-128k-think | makes file changes (code, data, documents) from a complete brief; only the named files |
 | `agents/scout.md` | subagent | mellum (same entry) | read-only search; answers with `path:line` evidence |
 | `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
@@ -91,7 +91,7 @@ after running project code and report any change a command made.
 **Every step in a fresh session (`/new`).** The work order file is the hand-off: the foreman judges
 the record and the repository, not the builder's conversation; a builder that needs earlier chat
 shows the work order is incomplete; and switching agents in one session sends its whole history to
-the other model (nail-qwen re-reading groot's session). A command's `agent:` may switch only that
+the other model (nail-qwen re-reading the orchestrator's session). A command's `agent:` may switch only that
 message, inside the current session, so `/accept` typed in the builder's session would see its
 history.
 
@@ -112,8 +112,9 @@ history.
 
 ## Why it is built this way
 
-- **Batches.** Each delegation swaps groot out and mellum in, and back. The slot cache restores
-  groot's processed conversation after a swap (~9 s instead of re-reading ~51K tokens), but every
+- **Batches.** Each delegation swaps the orchestrator's model out and mellum in, and back. The slot
+  cache restores the orchestrator's processed conversation after a swap (measured on groot: ~9 s
+  instead of re-reading ~51K tokens; it matters more on inkling, which reads ~90 tokens/s), but every
   swap is still a load each way, and only one conversation per model survives a swap. Subagents
   sharing a model in one batch take turns in a single slot without re-reading: llama.cpp's RAM
   prompt cache (`--cache-ram`) keeps each one's prompt (measured on mellum: 21 tokens re-processed
@@ -129,8 +130,8 @@ history.
   the reason: on one model both would keep their prompts, with the same two swaps.)
 - **Advisor and reviewer only at the end**, never while planning or between batches: each call is
   a swap to a CPU-placed 35B. The cost is that a wrong plan is caught after the coders built on it;
-  if groot often mis-plans, one advisor plan check before the first batch would cost one swap.
-- **Groot fans out independent fixes but keeps its edit tools.** In a real round it made every fix
+  if the orchestrator often mis-plans, one advisor plan check before the first batch would cost one swap.
+- **The orchestrator fans out independent fixes but keeps its edit tools.** In a real round groot made every fix
   itself under the old wording ("tiny edits" allowed, "code writing" delegated, while the fixes
   were labels and records). The rule is now explicit, and the coder handles any file change.
 - **Advisor and reviewer run checks themselves.** Read-only, the advisor answered "can't verify"
@@ -165,10 +166,12 @@ history.
   such jobs (cortex URLs, `/v1/chat/completions`, an LLM client, a model setting; unknown = treat as
   one), runs them in one blocking call, and takes no turns or subagent calls until they end.
   Bot-marked scripts may be held up to `HUMAN_HOLD` (120 s) after its last request; that is expected.
-- **Groot as orchestrator.** It is the primary coding agent in general use and the fastest
-  large-context model (fully on the GPU). Its weak spot, checking a flawed plan against real data
-  (1 of 2 clean runs on a hard benchmark), is covered by reading the documents first and by the
-  advisor at the end.
+- **Inkling as orchestrator** (inkling-2-mini 96k, the user's choice on 2026-11-27; groot before).
+  Benched at 21 t/s decode and 90 t/s prefill, CPU-resident: a fresh session that reads ~50K tokens
+  spends ~10 min reading, and the slot cache saves it from repeating that after each subagent swap.
+  It differs from every subagent's model, which the batching rules assume. Its planning quality as
+  orchestrator is unmeasured. groot (61 / 1453 t/s, GPU) was the previous choice: fastest
+  large-context model, 1 of 2 right on a hard benchmark.
 - **The orchestrator does not commit or push** unless asked or the documents require it.
 - **The foreman is separate from the orchestrator and the advisor.** It writes the contract and
   judges against it, so it must not be the builder (it could "fix" what it judges: it edits only
@@ -223,9 +226,9 @@ copy it out before reading. The openresty log shows the swaps:
 
 ### Models
 
-- **The checkers' model is untuned.** The nail-qwen 128k entry has no bench record (hand-set
-  batch); its ~99%-ctx saturation gate has not run. Because the design relies on the checkers, bench
-  it first, then try advisor candidates on a past review with known findings (give a candidate the
+- **The checkers' model is benched, not yet judged.** The nail-qwen 128k entry has a bench record
+  (38 t/s decode, 1258 t/s prefill, CPU-resident; benched on the build before b12785). Try advisor
+  candidates on a past review with known findings (give a candidate the
   state before the review and count the findings it catches). On the evidence so far the qwen-3.6-35B
   family is mixed as a reviewer: nail-qwen reviewed 2/2 right on an easier benchmark but passed a
   wrong fix on a hard one.
