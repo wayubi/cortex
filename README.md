@@ -216,7 +216,7 @@ The consolidated table lives in `full-metrics.md`:
 ./tools/gen_metrics.sh    # regenerates full-metrics.md from both backends' models/*.json
 ```
 
-Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The design history and rationale behind the current pipeline: see `tracker/plans/resolved/plan-000006-bench-discover-mode.md`.
+Full methodology, gotchas and stress-test procedures: see `AGENTS.md`.
 
 ## File layout
 
@@ -276,7 +276,6 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 │   ├── reference/            # design and findings (CPU_POLLING.md: CPU/GPU placement methodology)
 │   └── sessions/             # session states and handoffs (git-ignored)
 └── tracker/                  # plans, issues and work orders: {open,resolved,closed}/ each
-    └── plans/resolved/plan-000006-bench-discover-mode.md   # current benchmarking pipeline: design, reviews, decisions
 ```
 
 ## Debugging

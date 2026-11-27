@@ -4,7 +4,7 @@
 #
 # The coordinator saves a model's slot (KV cache + context checkpoints) to
 # /slot-cache/<entry>.bin before unloading it and restores it after the next
-# load (tracker/plans/resolved/plan-000013-slot-cache-across-swaps.md). llama.cpp has no API to delete
+# load (see AGENTS.md, slot cache). llama.cpp has no API to delete
 # those files, and the folder is a tmpfs private to this container, so the
 # pruning runs here. Model weights are never kept here; only slot files.
 #

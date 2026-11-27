@@ -33,7 +33,7 @@ local TARGET = { ["11434"] = "ollama", ["8080"] = "llama_cpp", ["5002"] = "nllb"
 -- slot_cache: the router's build writes context checkpoints into slot files
 -- (upstream PR #26004) and the router has the /slot-cache tmpfs and
 -- `slot-save-path`, so the coordinator saves a model's slot before unloading
--- it and restores it after the next load (tracker/plans/resolved/plan-000013-slot-cache-across-swaps.md).
+-- it and restores it after the next load (see AGENTS.md, slot cache).
 -- Without checkpoints a restored slot is not reused, so leave it false.
 M.ROUTERS = {
     { key = "llama_cpp",       host = "llama-cpp", slot_cache = true },

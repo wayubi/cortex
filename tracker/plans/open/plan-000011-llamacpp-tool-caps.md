@@ -2,6 +2,10 @@
 
 **Date:** 2026-11-04
 **Status:** Shelved. Not started. Written so it can be picked up later without re-research.
+**Recheck first (2026-11-27):** the facts in section 1 were verified against llama.cpp `b10622`;
+the `llama-cpp` router now runs `b12785`. Before step 1, re-verify against the `b12785` source that
+`GET /props?model=<name>&autoload=false` still never loads a model, and that `chat_template_caps`
+still carries `supports_tools` and `supports_tool_calls`.
 **Audience:** an implementing agent. Follow the steps in order; each has an acceptance check.
 Stop and ask where a step says so.
 
