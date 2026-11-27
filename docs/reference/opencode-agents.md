@@ -38,7 +38,7 @@ machine-specific skills) stays in the config volume.
 | `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
 | `agents/advisor.md` | subagent | nail-qwen3.6-35b-a3b-q4-mtp-128k-think-coder | checks work and plans against the source documents; verdict `PASS` / `NOT PASSED` / `CAN'T VERIFY` |
 | `agents/reviewer.md` | subagent | nail-qwen (same entry) | reviews the code changes for defects |
-| `agents/foreman.md` | primary | nail-qwen (same entry) | triages issues into ranked work orders; final review of a work order: accepted or returned |
+| `agents/foreman.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | triages issues into ranked work orders; final review of a work order: accepted or returned |
 | `commands/orchestrate.md` | `/orchestrate <task>` | | runs the task as the orchestrator |
 | `commands/review.md` | `/review [focus]` | | reviewer on uncommitted changes (else branch vs base) |
 | `commands/verify.md` | `/verify [docs / focus]` | | advisor against the source documents |
@@ -176,8 +176,12 @@ history.
 - **The foreman is separate from the orchestrator and the advisor.** It writes the contract and
   judges against it, so it must not be the builder (it could "fix" what it judges: it edits only
   tracker records) nor a subagent the builder calls (the builder would choose when it is asked and
-  what it is shown). It is a primary the user runs, on the checkers' model, because triage and
-  acceptance are judgement, not code. It may run shell commands (the checklists need them) but not
+  what it is shown). It is a primary the user runs, on groot (2026-11-27): a model different from both the builder
+  (inkling) and the checkers (nail-qwen), the fastest large-context model (61 / 1453 t/s, on the
+  GPU) and proven at tool use. The deep checking happens in the build loop (advisor, reviewer); the
+  foreman's hardest job is writing a complete work order with an exact checklist, which keeps
+  acceptance mostly mechanical. groot's weak spot, checking a flawed plan against real data (1 of 2
+  on a hard benchmark), is the advisor's job. It may run shell commands (the checklists need them) but not
   commit: the user commits.
 - **Work-order records are append-only.** Builder reports and foreman reviews are added as numbered
   rounds and never edited; a wrong work order is corrected by an amendment in a review round. The
@@ -217,10 +221,10 @@ copy it out before reading. The openresty log shows the swaps:
 - A `/model` choice on the orchestrator persists across Tab switches.
 - The RAM prompt cache keeps several conversations on nail-qwen as it does on mellum.
 - The shell tool's maximum timeout (the cortex-job rule depends on it).
-- The foreman, not yet run: nail-qwen as a primary agent (tool calls and long sessions), whether it
-  keeps to tracker records with the edit tool allowed, the grouping and ranking quality of
-  `/triage`, and whether `/accept` catches a planted defect (try a work order with a known missed
-  check).
+- The foreman, not yet run on groot: whether its work orders are complete enough for the builder,
+  the grouping and ranking quality of `/triage`, whether it keeps to tracker records with the edit
+  tool allowed, and whether `/accept` catches a planted defect (a work order with a known missed
+  check, run on groot, nail-qwen and cyber-tiel-coder).
 
 ## Open items
 

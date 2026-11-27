@@ -1,7 +1,7 @@
 ---
 description: Owns work orders. Triages open issues (and plans, when asked) into prioritised work orders, and gives the final review of a finished work order, accepting it or returning it with findings. Writes only tracker records (work orders, issues, the triage index); never changes code. Run it with /triage or /accept.
 mode: primary
-model: cortex-llama-cpp/nail-qwen3.6-35b-a3b-q4-mtp-128k-think-coder
+model: cortex-llama-cpp/groot-19b-a3b-iq3m-mtp-128k-think-coder
 permissions:
   - action: subagent
     resource: "*"

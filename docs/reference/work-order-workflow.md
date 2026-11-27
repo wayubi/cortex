@@ -11,8 +11,8 @@ tracker").
 - **Where to run it.** OpenCode, started in the project's folder: in the `opencode` container,
   `docker exec -it cortex-opencode-1 bash`, then `cd` to the project and run `opencode`. A paired app
   works too, opened on the project's folder.
-- **Speed.** The foreman runs on the checkers' model (the 35B the advisor and reviewer use), partly
-  on the CPU, so it is slower than the orchestrator.
+- **Models.** The foreman runs on groot (on the GPU, fast); the orchestrator on inkling, which reads
+  slowly, so a fresh `/orchestrate` session spends minutes reading before it starts.
 
 ## The cycle
 
