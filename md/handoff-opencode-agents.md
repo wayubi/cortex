@@ -111,18 +111,22 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
 - **Batches.** Each delegation unloads groot and loads mellum, then groot reloads. Before the slot
   cache groot also re-read its whole context (~23 s per 51K tokens); now it restores it, so a
   wake-up costs ~9 s. Batching still matters: every swap is still a load each way, the slot cache
-  keeps only one conversation per model, and subagents sharing a model in one batch still take
-  turns in a single slot. One batch per stage means one wake-up instead of one per task.
+  keeps only one conversation per model across a swap, and subagents sharing a model in one batch
+  still take turns in a single slot (without re-reading: the RAM prompt cache keeps each one's
+  prompt). One batch per stage means one wake-up instead of one per task.
 - **One model per message.** Mixing models in one message swaps between requests. Groups that may
   share a message: coder + scout (mellum); vision alone (gemma). Advisor and reviewer share a model
   (qwen) but are called one at a time (below). Any two
   differently named models.ini entries swap, even with the same weights, so the sharing agents use
   the identical entry name.
-- **Advisor before reviewer, one at a time.** Calling both together was slow in testing (likely
-  because they share one slot, so they ran one after the other and evicted each other's prompt;
-  cause not measured), and reviewing
-  code that does not yet meet the requirements is wasted work. Same model, so moving from advisor to
-  reviewer is no swap. The advisor's verdict line is `PASS` / `NOT PASSED` / `CAN'T VERIFY` when it
+- **Advisor before reviewer, one at a time (decided, kept 2026-11-26).** The reason is the work:
+  reviewing code that does not yet meet the requirements is wasted, and its findings can conflict
+  with the advisor's fixes. Speed is no longer a reason: calling both together was slow in testing
+  on b10622 (cause not measured), but on b12785 two sessions on one model do **not** cost each
+  other their processed prompt (see "Same model = no swap"); together they would take about the
+  same total time as in sequence, with the same two swaps (both run on qwen). A possible middle
+  ground, not adopted: advisor alone until it passes, then advisor and reviewer together on the
+  final round. Same model, so moving from advisor to reviewer is no swap. The advisor's verdict line is `PASS` / `NOT PASSED` / `CAN'T VERIFY` when it
   checks work, so the orchestrator has an unambiguous signal.
 - **Advisor/reviewer only at the end** (orchestrator step 7; never while planning, between batches
   or when stuck): each call is a qwen swap. The advisor's description still says "when choosing an
@@ -170,11 +174,18 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
   coders have built on it, and the fix is a re-plan and a second batch. Accepted to keep qwen swaps
   rare. If testing shows groot often mis-plans, one advisor plan check before the first coding
   batch would cost one qwen swap per task; revisit then.
-- **Same model = no swap, but not simultaneous.** Every router runs `parallel = 1`, so subagents
-  sharing a model are served one after another, and each may evict the others' cached prompt.
-  Real concurrency needs `parallel = N` on a dedicated entry (llama.cpp splits `ctx-size` across
-  the slots; changes what the bench measures; batch/ctx re-tuned) and/or the RAM prompt cache
-  (`--cache-ram`, default on the pinned build unchecked). Both unmeasured; `models.ini` changes.
+- **Same model = no swap, served one at a time, prompts kept.** Every router runs `parallel = 1`,
+  so subagents sharing a model take turns in one slot. Their processed prompts are **not** lost
+  between turns: llama.cpp's in-process RAM prompt cache (`--cache-ram`, 8 GiB default, with
+  `--cache-idle-slots`, both on by default in b12785) parks a conversation when another takes the
+  slot and restores it when it returns. Measured on mellum (2026-11-26): A (19K tokens), then B
+  (21K), then A's next turn processed **21 tokens** with 19,374 from cache (0.09 s), and the same
+  for B. Not yet measured on qwen-35B (hybrid; same mechanism with context checkpoints). This
+  cache lives in the model's process and is lost on unload; the slot cache then saves only the
+  conversation in the slot (the last). Real concurrency would still need `parallel = N` on a
+  dedicated entry (llama.cpp splits `ctx-size` across the slots; batch/ctx re-tuned; unmeasured).
+  (An earlier version of this note said such sessions evict each other's prompt; that was
+  inferred, not measured, and is wrong on b12785 for mellum.)
 - **Fewer distinct models.** Each distinct model costs at least one swap per batch, so roles share
   models where quality allows (coder + scout; advisor + reviewer; hard-coder + thinker on raon).
   A task with routine and hard code costs two batches (mellum, raon): the orchestrator puts every
@@ -218,13 +229,33 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
 - Whether a `/model` choice on the orchestrator persists across Tab switches. The `model:` line is
   the agent's default; a subagent without one inherits the caller's model (so the subagents must
   keep theirs).
-- Coder/scout tasks on `parallel = 1` run one after the other and may evict each other's cached
-  prompt. `--cache-ram` (in-process RAM prompt cache) defaults to 8192 MiB on b12785 (checked in
-  `--help`); whether it keeps several conversations of one model with `parallel = 1` is
-  unverified. The slot cache does not help here: it acts only on model swaps.
+- Whether the RAM prompt cache keeps several conversations on **qwen-35B** (advisor/reviewer) as it
+  does on mellum (measured: yes). Test: two ~20K-token conversations alternated on qwen 128k, check
+  `cache_n` on each second turn.
 - The OpenCode v2 shell tool's maximum timeout (the orchestrator's foreground-wait rule depends on
   it; each re-issued wait call is one short request to the orchestrator's model, i.e. a swap under a
   running cortex job).
+
+## Next steps (end of 2026-11-26)
+
+In order of what unblocks the most:
+
+1. **Commit the agent and command files.** `.local/opencode_data` is its own git repo (not this
+   one); the files changed this session are uncommitted there: `agents/orchestrator.md`, `coder.md`,
+   `scout.md`, `vision.md`, `advisor.md`, `reviewer.md`, `commands/orchestrate.md`, `review.md`,
+   `verify.md`, `handoff.md`, `opencode.json` (plugin removed), `WATCHDOG.yml` (deleted). The
+   maintainer commits these.
+2. **Test the agents in real OpenCode sessions** and settle the "Unverified" list: batched subagent
+   calls (one `switch:` to mellum per batch), images reaching `vision`, mellum's tool calls inside
+   OpenCode, the shell tool's maximum timeout. Record each result here.
+3. **Bench the checkers' model first:** `qwen-3.6-35b-a3b-q4-mtp-128k-*` (untuned, `batch 4096`), then
+   the models the b12785 quick A/B flagged (qwen-3.6-35B family, groot, gemma-4-12B); then raon on
+   b12785, which decides whether the raon router can go.
+4. **Watch normal use:** slot-cache RAM per router over a day (`df -h /slot-cache`), prism's and
+   inkling's 2 GB caps against their first `slot-cache: saved` lines, and the NVMe cache promoting
+   cyber-tiel and nail-qwen on their next loads (`docker logs cortex-model-cache-1`).
+5. **Only then:** the raon hard-coder/thinker subagent and the inkling thinker (below), after the
+   comparison test.
 
 ## Open items / ideas (not done)
 
@@ -329,9 +360,9 @@ OpenCode.
 
 ### Other
 
-- **Swap cost: done** (see "Infrastructure the agents run on"). Remaining: the slot cache keeps
-  one conversation per model, so several coders on mellum still re-read their own prompts when
-  they alternate within a batch.
+- **Swap cost: done** (see "Infrastructure the agents run on"). Several coders on mellum do not
+  re-read their prompts when they alternate within a batch (RAM prompt cache, measured); after a
+  model swap only the last conversation comes back.
 - **raon on b12785** (for the hard-coder plan): loads on upstream b12785 with the same answers as
   KRAFTON's build, but prefill was 21-30% slower there (one sample); raon stays on its own router
   until benched (`md/llama-cpp-b12785-quick-ab.md`).
@@ -406,3 +437,11 @@ OpenCode.
   now evicts by a recency-weighted use score (half-life 24 h) instead of least recently loaded.
 - **2026-11-26** — handoff: new section "Infrastructure the agents run on" (builds, slot cache, NVMe
   cache, measured loads); batches rationale, model table, unverified and open items updated.
+- **2026-11-26** — handoff: "Next steps" section (what is left and in which order).
+- **2026-11-26** — measured: two sessions on one model keep their prompts between turns (RAM prompt
+  cache, mellum, 21 tokens re-processed instead of 19K); the note that they evict each other was
+  wrong. Advisor-then-reviewer kept sequential for the work reason; "together" documented as costing
+  no re-reads and no extra swap.
+- **2026-11-26** — `orchestrator.md`: the batching rationale no longer says the orchestrator re-reads
+  its whole conversation on resume (the slot cache restores it); it now gives the swap cost and that
+  subagents sharing a model keep their progress between turns. The batching rules are unchanged.
