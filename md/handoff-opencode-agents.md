@@ -151,6 +151,16 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
   per-item requirements, output files must be real output, records (status, checkboxes, folder,
   name) must agree, the implementer must not close what a reviewer must approve or edit a
   reviewer's text, uncommitted work is not done when commits are required.
+- **Advisor re-derives, and covers every review request** (added 2026-11-26 after an external
+  review of a real orchestrated round found two misses: a label "fixed" by applying the contract's
+  rule backwards, with wrong reasoning in the report; and a ruling the previous review asked for,
+  left unanswered). The advisor now applies the rule itself to the underlying data for each
+  corrected item (all items up to ~20, else a stated sample), treats the work's reasoning as a
+  claim, and gives `NOT PASSED` for any request of the latest review the work does not answer. The
+  orchestrator now passes the data and source paths for data changes, and its report covers every
+  item of the latest review, escalating rulings it may not make as open questions with a proposed
+  answer. Not yet known: whether the advisor had flagged these items in that round (its session log
+  would show it).
 - **Reviewer** covers code defects; **advisor** covers requirements. Their descriptions point at
   each other.
 - **New files are part of the change.** `git diff` does not show untracked files, and coders create
@@ -452,3 +462,6 @@ OpenCode.
 - **2026-11-26** — agents and commands moved into the repository (`opencode/agents/`,
   `opencode/commands/`), bind-mounted read-only by `compose.yml`; the `.local/` copies kept until the
   container is recreated; the `chrome-web` skill stays machine-local.
+- **2026-11-26** — `advisor.md` (re-derive corrected items from the data; every request of the latest
+  review gets a verdict) and `orchestrator.md` (data paths to the advisor; answer or escalate every
+  review item), in `opencode/agents/` and the `.local/` copy.

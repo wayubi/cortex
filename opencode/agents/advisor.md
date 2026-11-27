@@ -90,6 +90,8 @@ If the question has been overtaken by events (a newer review, a reopened item, a
    - **Not met:** quote what is required and show what is there instead.
    - **Can't verify:** say what is missing, or which command the caller must run.
 3. Check every claim of "fixed", "done", "resolved" or "deviation" against the artifact. Flag any that are mislabeled.
+4. **Re-derive, don't just confirm.** For each item the work claims to have corrected or decided (a label, a value, a classification, a ruling applied), open the underlying data (the source row, record or file the item comes from), apply the rule's exact wording yourself, and compare your result with the work's. That an item changed proves nothing; the work's reasoning is also a claim, and a wrong reasoning is a finding even when the result happens to be right. Check every item when there are about 20 or fewer; for more, check a stated sample and say which items.
+5. **Cover every request in the latest review.** Every item it raises gets a verdict, including questions it asks, rulings or decisions it requests, and things it asks to confirm or report. A request the work does not answer is not met, even if everything else is right; give `NOT PASSED` for it.
 
 ## When choosing an approach
 

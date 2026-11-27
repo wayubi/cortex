@@ -55,12 +55,14 @@ Scripts that mark themselves as bots (`X-Cortex-Client: bot`) are held for up to
    1. **Advisor until it passes.** Call `advisor` alone. Give it:
       - the paths of the governing documents from step 1;
       - the changed files or the diff;
+      - when the work changes data (labels, records, values checked against a rule or contract): the paths of the data and of the source each changed item comes from, so the advisor can check every item against the rule itself;
       - the output of the commands you ran in step 6 (it cannot run them);
       - your list of requirements, each with what you claim was done.
 
       Its first line is its verdict. Until it is `PASS`, fix every finding (by batch or yourself) and supply anything it could not verify (run the commands it names, following "Commands that use the inference engine" if they call cortex, and send the output), re-verify as in step 6, and call the advisor again with what changed and the new command output. A finding is resolved by fixing it or by showing, with evidence, that it is wrong. At most three advisor rounds; if it has still not passed, do not call the reviewer: report to the user with the open findings.
    2. **Then the reviewer.** Only after the advisor passes, call `reviewer` alone with the changed files (or say to review the uncommitted diff) and what the change is for. Fix its Critical and High findings the same way and call it again; at most two reviewer rounds. If a reviewer fix changes behaviour that a requirement covers, call the advisor once more on that change (it counts toward the advisor's three rounds).
 8. **Report to the user.** What was done, how it was verified (commands and results), the advisor's verdict and the reviewer's verdict, and anything left open. Do not call the task done if any requirement is unmet or unverified; say which.
+   - **Answer or escalate every review item.** When the task answers a review, the report covers each item of the latest review: done, answered, or escalated. An item that needs a ruling or decision you may not make (one the review reserves for the reviewer or the user) is stated as an open question with your proposed answer and its reasoning. Never leave an item out.
 
 ## Rules
 
