@@ -102,12 +102,18 @@ container start; their config volumes are `pi_data:/root/.pi/agent` and
   record in `/root/.local/state/opencode/service.json` is rewritten at every start. It listens on
   127.0.0.1 by default, reachable only inside the container. **Direct access:** set
   `OPENCODE_HOSTNAME=0.0.0.0` (the entrypoint writes it to `service.json` before the start) and
-  publish 49374/tcp, both in `compose.override.yml`, then `opencode pair --url
-  http://<host>:49374`. That is plain HTTP guarded only by the server password: keep it on a LAN or
+  publish 49374/tcp (or put a reverse proxy on a shared network in front), both in
+  `compose.override.yml`, then `opencode pair --url http://<host>:49374`. Without `--url` the links
+  carry the container's own addresses, which other devices cannot reach; `OPENCODE_PAIR_URL` makes
+  a plain `opencode pair` add it (`opencode/opencode-pair-url.sh`, installed as
+  `/usr/local/sbin/opencode` ahead of the binary; `--url` or `--remote` on the command line wins). That is plain HTTP guarded only by the server password: keep it on a LAN or
   VPN, or put HTTPS in front before forwarding it to the internet (Docker's published ports bypass
   host firewalls such as ufw). `opencode pair --remote` uses OpenCode's OpenTunnel relay instead;
-  it stores a route in `service.json` (`opencode service unset remote` removes it). Session history
-  (`/root/.local/share/opencode`) is not a volume, so a recreate starts with none.
+  it stores a route in `service.json` (`opencode service unset remote` removes it). OpenCode's data
+  (session database, snapshots, tool output, logs) is kept in the config volume:
+  `XDG_DATA_HOME=/root/.config/opencode/share` puts it in `share/opencode/` there, so it survives a
+  recreate (git-ignore `share/` if the config folder is a git repo). `/root/.local/state/opencode`
+  holds only the running server's record (deleted when it stops) and is not kept.
 - The openresty scripts are a directory mount, so the first deploy needs
   `docker compose up -d openresty` (recreate); later edits are seen without a
   restart. Create the new clients with `docker compose up -d pi opencode`.

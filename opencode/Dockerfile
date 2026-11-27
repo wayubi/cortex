@@ -29,6 +29,8 @@ RUN echo "cachebust=$CACHEBUST" \
  && opencode --version
 
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+# `opencode pair` defaults to --url "$OPENCODE_PAIR_URL" (see the script)
+COPY --chmod=755 opencode-pair-url.sh /usr/local/sbin/opencode
 
 ENV TERM=xterm-256color \
     LANG=C.UTF-8

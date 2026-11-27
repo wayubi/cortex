@@ -378,9 +378,13 @@ services:
       - OPENCODE_SYNC_RETRIES=10
       - OPENCODE_SYNC_DELAY=3
       - CORTEX_GENERATE_MODELS=/opt/cortex-scripts/generate-models-opencode.sh
+      # OpenCode's data (session database, snapshots, tool output, logs) inside the config
+      # volume, so it survives a recreate (default /root/.local/share/opencode)
+      - XDG_DATA_HOME=/root/.config/opencode/share
       # start the background server at container start (entrypoint.sh). To reach it from other
       # machines, set OPENCODE_HOSTNAME=0.0.0.0 and publish port 49374 in compose.override.yml,
-      # then pair with `opencode pair --url http://<host>:49374`; `opencode pair --remote` uses
+      # then pair with `opencode pair --url http://<host>:49374` (or set OPENCODE_PAIR_URL there,
+      # and a plain `opencode pair` uses it); `opencode pair --remote` uses
       # OpenCode's relay instead (exposes the server to the internet)
       - OPENCODE_SERVICE=1
     volumes:

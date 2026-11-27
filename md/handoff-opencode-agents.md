@@ -93,8 +93,8 @@ after running project code and report any change a command made.
   longer used fades out within days.
 - **Background server:** starts with the opencode container (`OPENCODE_SERVICE=1`); direct
   access with `OPENCODE_HOSTNAME=0.0.0.0` plus a published port 49374/tcp, or the relay with
-  `opencode pair --remote` (AGENTS.md, "Client agents"). A recreate starts with no session
-  history: `/root/.local/share/opencode` (the session database) is not a volume.
+  `opencode pair --remote` (AGENTS.md, "Client agents"). Session history survives a recreate: OpenCode's
+  data directory is `share/opencode/` in the config volume (`XDG_DATA_HOME`).
 - **Measured loads (warm):** groot ~4-7 s, mellum 2-3 s, qwen-35B 128k 8 s (NVMe), gemma vision
   ~5 s.
 
@@ -548,3 +548,8 @@ OpenCode.
 - **2026-11-27** — the opencode container starts OpenCode's background server
   (`OPENCODE_SERVICE=1`); `OPENCODE_HOSTNAME` sets the address it listens on; direct access and the
   relay documented in AGENTS.md.
+- **2026-11-27** — session history kept across recreates: `XDG_DATA_HOME` puts OpenCode's data in
+  the config volume (`share/opencode/`); `/root/.local/state` (the running server's record) is not
+  kept.
+- **2026-11-27** — `opencode pair` without `--url` or `--remote` uses `OPENCODE_PAIR_URL` (wrapper
+  `opencode/opencode-pair-url.sh`), for a server reached through a reverse proxy.
