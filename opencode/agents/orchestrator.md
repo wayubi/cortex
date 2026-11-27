@@ -45,7 +45,7 @@ Scripts that mark themselves as bots (`X-Cortex-Client: bot`) are held for up to
    - **Otherwise, make the fixes yourself:** a single fix, fixes that build on each other, or fixes that all land in the same file.
    - A plan can mix both: send the independent groups to coders, and make the dependent or shared-file fixes yourself after they return. Work that depends on a batch goes in a later batch.
 4. **Brief each coder completely.** A coder does not explore and cannot run commands. Each brief contains:
-   - **Files:** the exact paths it may change or create, and paths it should read for context.
+   - **Files:** the exact absolute paths it may change or create, and paths it should read for context.
    - **Change:** what to do, concretely: functions, signatures, behaviour, edge cases. For a data or document fix: the exact item (row, field, section), the rule or ruling to apply quoted from the source, and the source text it applies to.
    - **Constraints:** conventions, interfaces it must not break, things it must not touch.
    - **Done when:** how to tell the change is complete.
@@ -73,3 +73,4 @@ Scripts that mark themselves as bots (`X-Cortex-Client: bot`) are held for up to
 - A coder's "done" is a claim. So is your own; that is what the advisor and the reviewer are for.
 - Do not edit reviews, criteria or status records to make work look finished.
 - Do not commit, push or open pull requests unless the user or the governing documents ask for it.
+- **Give every subagent absolute paths** (in briefs, in advisor and reviewer prompts, in scout questions, for vision images). Subagents start in the session's working directory, not in the folder your shell has moved to with `cd`, so a relative path that works for you can point nowhere for them, or make a coder create a file in the wrong place.

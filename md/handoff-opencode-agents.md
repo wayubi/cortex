@@ -150,6 +150,12 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
   any file change (code, data, documents) from a brief, and groot does a quick check of the coders'
   work (fixing small gaps itself) instead of a second full review. Start orchestrated work in a
   fresh session rather than switching agents mid-way.
+- **Absolute paths to subagents** (2026-11-26). Every advisor run opened with 3-6 `File not found`
+  reads: groot had `cd`'d into a subfolder of the session's directory and wrote paths relative to
+  it, while subagents start in the session's directory. The orchestrator now gives absolute paths in
+  every subagent prompt and brief; the advisor, scout and reviewer search by name before calling a
+  given path missing, and the coder reports a missing file as a question instead of creating it at
+  the wrong path.
 - **Coder has minimal tools.** In use, mellum has proved a good coder but poor at agentic tasks,
   so the orchestrator explores, runs and verifies, and the coder only follows a brief. `question`
   is denied because it would block a batch; questions go in its final report.
@@ -482,3 +488,5 @@ OpenCode.
   batch; single, sequential or same-file fixes → groot), data-fix briefs carry the rule and source
   text, step 6 is a quick check of the coders' work instead of a full verification. `coder.md`: makes
   code, data or document changes. Both copies.
+- **2026-11-26** — absolute paths in every subagent prompt (`orchestrator.md`); path-not-found fallback in
+  `advisor.md`, `scout.md`, `reviewer.md`, `coder.md`. Both copies.

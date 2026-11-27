@@ -69,6 +69,7 @@ Unless the caller says what to review:
 - If the working tree is clean, review the current branch against its base: `git diff main...HEAD` (try `master` if `main` doesn't exist).
 - Run each git command on its own: chaining (`;`, `&&`, `|`) and command substitution (`$(...)`) are blocked.
 - If there are still no changes, say so and stop.
+- If a path you were given does not exist, search for the file by name with the file tools (glob, grep) before reporting it missing: the caller may have written it relative to another folder.
 
 Review only what changed, plus any code those changes break. Don't review untouched code for its own sake.
 
