@@ -98,12 +98,16 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
 2. Orchestrator reads the governing documents (project instructions, spec, work order, issues,
    review rounds) and the code; broad searches go to `scout` batches, images to `vision` (own
    message).
-3. It splits the work into **independent** coder tasks, **each file owned by exactly one task**,
-   and writes a complete brief per task (Files to change or create / Change / Constraints / Done
-   when).
+3. It lists every fix the work needs (code, data, documents) and groups them by file. **Two or more
+   independent groups** (different files, no fix needing another's result) go to coders, one per
+   group, with a complete brief each (Files / Change, with the rule and source text for data fixes /
+   Constraints / Done when). **A single fix, fixes that build on each other, or fixes in one file**
+   groot makes itself. Groot keeps its own edit tools.
 4. It sends **every coder task of a batch in one message** and waits for all of them.
-5. It verifies itself: `git diff` plus the new untracked files, runs the tests, checks each
-   requirement against the files.
+5. **Quick check, not a review:** for each coder, its report and diff against the brief (only its
+   files, every item done, nothing extra, no placeholders); groot fixes small shortcomings itself
+   and sends larger ones back as a follow-up batch. Then it runs the project's quick checks so their
+   output can go to the advisor.
 6. When it believes it is done, it checks automatically, **advisor first, reviewer second, never
    together**. It calls the `advisor` alone (document paths, diff, command output, its claims) and
    goes back and forth, fixing findings and sending what it could not verify, until the advisor's
@@ -137,6 +141,15 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
 - **Advisor/reviewer only at the end** (orchestrator step 7; never while planning, between batches
   or when stuck): each call is a qwen swap. The advisor's description still says "when choosing an
   approach, or when stuck"; that is left for other primary agents (e.g. the built-in build agent).
+- **Fan out only independent fixes; groot keeps editing** (2026-11-26). In a real orchestrated
+  round groot made every fix itself and never called a coder: the old text let it do "tiny edits"
+  and "small fixes" itself, said it delegates "code writing" (the fixes were labels and records),
+  and the session had been switched to the orchestrator from hours of `build`-mode editing. The
+  maintainer chose not to take groot's edit tools away: the rule is now explicit (independent
+  file groups → coders in parallel; single, sequential or same-file fixes → groot), the coder makes
+  any file change (code, data, documents) from a brief, and groot does a quick check of the coders'
+  work (fixing small gaps itself) instead of a second full review. Start orchestrated work in a
+  fresh session rather than switching agents mid-way.
 - **Coder has minimal tools.** In use, mellum has proved a good coder but poor at agentic tasks,
   so the orchestrator explores, runs and verifies, and the coder only follows a brief. `question`
   is denied because it would block a batch; questions go in its final report.
@@ -465,3 +478,7 @@ OpenCode.
 - **2026-11-26** — `advisor.md` (re-derive corrected items from the data; every request of the latest
   review gets a verdict) and `orchestrator.md` (data paths to the advisor; answer or escalate every
   review item), in `opencode/agents/` and the `.local/` copy.
+- **2026-11-26** — `orchestrator.md`: explicit fan-out rule (independent file groups → coders in one
+  batch; single, sequential or same-file fixes → groot), data-fix briefs carry the rule and source
+  text, step 6 is a quick check of the coders' work instead of a full verification. `coder.md`: makes
+  code, data or document changes. Both copies.
