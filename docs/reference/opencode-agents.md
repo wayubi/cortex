@@ -17,6 +17,9 @@ when the design changes; the history of changes is in git.
 - **Project-agnostic.** Used across many projects; nothing depends on one project's `AGENTS.md`.
 - **Few model swaps** on the single GPU: the coordinator unloads the resident model whenever the
   requested model changes.
+- A **foreman** primary agent owns work orders: it triages open issues into ranked work orders and
+  gives each finished work order its final review, accepting it or returning it with findings. The
+  agent that writes a work order is the one that judges it; the builder never closes its own work.
 - **The primary is expected to make mistakes.** The advisor and reviewer exist to catch them, so
   the checkers' quality matters more than the orchestrator's.
 
@@ -35,9 +38,12 @@ machine-specific skills) stays in the config volume.
 | `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
 | `agents/advisor.md` | subagent | nail-qwen3.6-35b-a3b-q4-mtp-128k-think-coder | checks work and plans against the source documents; verdict `PASS` / `NOT PASSED` / `CAN'T VERIFY` |
 | `agents/reviewer.md` | subagent | nail-qwen (same entry) | reviews the code changes for defects |
+| `agents/foreman.md` | primary | nail-qwen (same entry) | triages issues into ranked work orders; final review of a work order: accepted or returned |
 | `commands/orchestrate.md` | `/orchestrate <task>` | | runs the task as the orchestrator |
 | `commands/review.md` | `/review [focus]` | | reviewer on uncommitted changes (else branch vs base) |
 | `commands/verify.md` | `/verify [docs / focus]` | | advisor against the source documents |
+| `commands/triage.md` | `/triage [scope]` | | the foreman proposes work orders and a ranking; writes on approval |
+| `commands/accept.md` | `/accept <work order>` | | the foreman's final review: accepted, or returned with a new review round |
 | `commands/handoff.md` | `/handoff [topic]` | | the current agent writes a `handoff-<topic>.md` in the project's planning folder (no swap) |
 
 ### Permissions
@@ -51,6 +57,7 @@ special-character denies) kept refusing the agents' real work. Safety rests on t
 | advisor, reviewer, scout | no | **allowed**, except `rm`, `git push`, `git reset --hard`, `git clean`, `sudo`, `docker` | subagent; repeated failing calls (`doom_loop`) |
 | coder | yes | none (it edits to a brief; the orchestrator runs the checks) | subagent; `question` (would block a batch); `doom_loop` |
 | vision | no | none | subagent; `doom_loop` |
+| foreman | yes, by instruction only tracker records | **allowed**, except the checkers' list and `git commit` | subagent; `doom_loop` |
 | orchestrator | OpenCode defaults (no rules) | | |
 
 OpenCode checks each part of a chained command (`a && b`, `a | b`, `a; b`) on its own; the last
@@ -78,6 +85,30 @@ after running project code and report any change a command made.
    and skips the reviewer). Then the **reviewer alone**; Critical/High findings fixed (at most two
    rounds), and the advisor asked once more if a fix changes behaviour a requirement covers.
 7. Its report answers or escalates every item of the latest review.
+
+### Work orders
+
+**Every step in a fresh session (`/new`).** The work order file is the hand-off: the foreman judges
+the record and the repository, not the builder's conversation; a builder that needs earlier chat
+shows the work order is incomplete; and switching agents in one session sends its whole history to
+the other model (nail-qwen re-reading groot's session). A command's `agent:` may switch only that
+message, inside the current session, so `/accept` typed in the builder's session would see its
+history.
+
+1. `/triage [scope]`: the foreman reads the open issues (plans only when named) and the code they
+   touch, leaves out what needs a decision, lacks evidence or should be closed, groups the rest
+   (shared files or area, dependencies, shared checks; about five issues or one coherent change per
+   work order; overlapping work orders made sequential), and ranks all open work orders (severity,
+   then unblocking, then cost). It proposes and waits; on approval it writes the work orders from the
+   template, adds the `**Work order:**` back-links and updates `tracker/work-orders/triage.md`.
+2. `/orchestrate <work order>`: the orchestrator builds as usual and writes its report into the work
+   order as `Report back, round N`, changing nothing else there.
+3. `/accept <work order>`: the foreman runs the PASS CHECKLIST itself, checks the diff from `Base`
+   against the scope and every included issue's acceptance criteria, and rules on the builder's
+   questions. **Accepted:** a review round with the results, the work order and the items it fully
+   covered moved to `resolved/`, the index updated. **Returned:** a review round with numbered
+   blocker and nit findings, rulings and any amendments; back to step 2. After three returned
+   rounds it asks the user. New defects outside the scope become new issues.
 
 ## Why it is built this way
 
@@ -139,6 +170,17 @@ after running project code and report any change a command made.
   (1 of 2 clean runs on a hard benchmark), is covered by reading the documents first and by the
   advisor at the end.
 - **The orchestrator does not commit or push** unless asked or the documents require it.
+- **The foreman is separate from the orchestrator and the advisor.** It writes the contract and
+  judges against it, so it must not be the builder (it could "fix" what it judges: it edits only
+  tracker records) nor a subagent the builder calls (the builder would choose when it is asked and
+  what it is shown). It is a primary the user runs, on the checkers' model, because triage and
+  acceptance are judgement, not code. It may run shell commands (the checklists need them) but not
+  commit: the user commits.
+- **Work-order records are append-only.** Builder reports and foreman reviews are added as numbered
+  rounds and never edited; a wrong work order is corrected by an amendment in a review round. The
+  history of what was asked, claimed and ruled stays readable, as the advisor's record rules expect.
+- **Three returned rounds, then the user.** A work order that fails three reviews is usually wrong
+  itself (too big, or a bad rule); another round would not fix that.
 
 ## Verified
 
@@ -172,6 +214,10 @@ copy it out before reading. The openresty log shows the swaps:
 - A `/model` choice on the orchestrator persists across Tab switches.
 - The RAM prompt cache keeps several conversations on nail-qwen as it does on mellum.
 - The shell tool's maximum timeout (the cortex-job rule depends on it).
+- The foreman, not yet run: nail-qwen as a primary agent (tool calls and long sessions), whether it
+  keeps to tracker records with the edit tool allowed, the grouping and ranking quality of
+  `/triage`, and whether `/accept` catches a planted defect (try a work order with a known missed
+  check).
 
 ## Open items
 

@@ -9,6 +9,7 @@ repository is public. -->
 **Base:** commit `<sha>` (the state the work starts from)
 **Date:** YYYY-MM-DD
 **Status:** open
+<!-- open | open (returned, round N) | resolved YYYY-MM-DD | closed YYYY-MM-DD. Rank: the triage index. -->
 **Author:** <who wrote it>
 **Includes:** <issue-NNNNNN, plan-NNNNNN, ...> (each gets `**Work order:** work-order-NNNNNN`)
 **Predecessors:** <optional: earlier work orders this builds on>
@@ -36,11 +37,16 @@ If every box passes, the work is accepted.>
 
 - [ ] C1:
 
-## 4. Report back
+## Report back, round 1 (YYYY-MM-DD)
 
-<What the agent reports when done: commits, test output, measurements, questions.>
+<Written by the builder, never edited afterwards: commits, test and checklist output, measurements,
+answers to every finding of the latest review round, questions. Each later round adds its own
+section.>
 
-## Review
+## Review, round 1 (accepted|returned, YYYY-MM-DD)
 
-<Filled in by the reviewer: checklist results, rulings on questions, the decision. On resolve,
-move the included items it fully covered to resolved/ in the same commit.>
+<Written by the foreman (/accept), never edited afterwards: each checklist item with its result;
+numbered findings, each a **blocker** or a **nit**, with evidence; rulings on the builder's
+questions; amendments, if the work order was wrong. Accepted: the commits, and the included items it
+fully covered move to resolved/ in the same change. Round 3 returned is the last; after that the
+foreman asks the user.>

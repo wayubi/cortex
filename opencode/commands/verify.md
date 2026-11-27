@@ -8,4 +8,4 @@ Check the work in this repository against its source documents and report every 
 
 Source documents and focus named by the user (if none, find the governing documents yourself): $ARGUMENTS
 
-The deliverable is the current state of the repository, including uncommitted changes. You cannot run commands other than read-only git: for any claim that needs one (tests, scripts, reproductions), name the exact command so it can be run and its output sent back to you.
+The deliverable is the current state of the repository, including uncommitted changes. Run the commands a claim needs yourself (tests, scripts, reproductions), without changing anything; only if one is refused or needs something you do not have, name the exact command so it can be run and its output sent back to you.

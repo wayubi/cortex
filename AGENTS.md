@@ -333,6 +333,15 @@ Each tracker has the same three states:
   a back-link (`**Work order:** work-order-NNNNNN`). An item is in at most one open work order.
   Resolving a work order moves the sources it fully covered to `resolved/` in the same commit; a
   source it only partly covered stays open with a note.
+- **Work-order lifecycle:** the OpenCode `foreman` writes work orders (`/triage`: it proposes the
+  grouping and ranking, and writes on approval) and gives the final review (`/accept`). The builder
+  (`/orchestrate <work order>`) adds only a `Report back, round N` section. The foreman appends a
+  `Review, round N` section: accepted (it moves the work order and the items it covered to
+  `resolved/`) or returned (numbered blocker and nit findings, rulings, amendments). Reports and
+  reviews are appended, never edited. After three returned rounds the foreman asks the user. Neither
+  agent commits. Each step runs in a fresh OpenCode session; the work order is the hand-off.
+- **Order of work:** `tracker/work-orders/triage.md` ranks the open work orders and lists the open
+  issues left out of them, with the reason.
 - **AGENTS.md, the README and code comments name no specific plan, issue or work order**: they
   state how things are, and the tracker holds the history behind them.
 - **Public repository:** no personal names, hostnames, IPs or private paths in `docs/reference/` or

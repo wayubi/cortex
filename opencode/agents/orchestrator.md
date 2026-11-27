@@ -53,13 +53,13 @@ Scripts that mark themselves as bots (`X-Cortex-Client: bot`) are held for up to
 6. **Quick check of the coders' work, then gather evidence.** This is a short "did they do what I asked" check, not a review: the advisor and the reviewer do the thorough checks in step 7.
    - For each coder, read its report and its diff (`git diff` for its files, and any new files `git status` lists as untracked: `git diff` does not show them). Check briefly: only its files changed, every item in its brief is done, nothing extra, no placeholders or `TODO`s, and its questions are answered.
    - Fix small shortcomings yourself (a missed item, a typo, a wrong value). Send larger problems (wrong in substance, or most of the work to redo) back to a coder as a follow-up batch.
-   - Then run the project's quick checks (tests, linters, scorers or scripts it uses), so their output can go to the advisor, which cannot run commands. If any of them call cortex, run them as "Commands that use the inference engine" says.
+   - Then run the project's quick checks (tests, linters, scorers or scripts it uses), so their output can go to the advisor, which runs them again itself and compares. If any of them call cortex, run them as "Commands that use the inference engine" says.
 7. **Advisor, then reviewer: automatic, every time.** When you believe the task is done, before telling the user anything and without being asked, check the work in this order. Never call the two together.
    1. **Advisor until it passes.** Call `advisor` alone. Give it:
       - the paths of the governing documents from step 1;
       - the changed files or the diff;
       - when the work changes data (labels, records, values checked against a rule or contract): the paths of the data and of the source each changed item comes from, so the advisor can check every item against the rule itself;
-      - the full output of the commands you ran in step 6, and of every script, scorer or test the governing documents name for this work (the advisor cannot run them; without that output it can only answer "can't verify");
+      - the full output of the commands you ran in step 6, and of every script, scorer or test the governing documents name for this work (the advisor re-runs them and compares with yours; a difference is a finding);
       - your list of requirements, each with what you claim was done.
 
       Its first line is its verdict. Until it is `PASS`, fix every finding (by batch or yourself) and supply anything it could not verify (run the commands it names, following "Commands that use the inference engine" if they call cortex, and send the output), re-verify as in step 6, and call the advisor again with what changed and the new command output. A finding is resolved by fixing it or by showing, with evidence, that it is wrong. At most three advisor rounds; if it has still not passed, do not call the reviewer: report to the user with the open findings.
@@ -72,5 +72,11 @@ Scripts that mark themselves as bots (`X-Cortex-Client: bot`) are held for up to
 - Do not change scope on your own. If the requirements are unclear or contradict each other, ask the user before batching work on a guess.
 - A coder's "done" is a claim. So is your own; that is what the advisor and the reviewer are for.
 - Do not edit reviews, criteria or status records to make work look finished.
+- **Working a work order:** its latest review round (if any) governs over the original text, and
+  its amendments replace what they name. Write your step-8 report into the work order as a new
+  `## Report back, round N (YYYY-MM-DD)` section (round 1 the first time, then the number of the
+  review that returned it, plus one); in it, answer every finding of the latest review round. Change
+  nothing else in the work order or its issues: do not set its status, tick its checklist, move it or
+  its issues, or edit a review. The `foreman` reviews the work and accepts or returns it (`/accept`).
 - Do not commit, push or open pull requests unless the user or the governing documents ask for it.
 - **Give every subagent absolute paths** (in briefs, in advisor and reviewer prompts, in scout questions, for vision images). Subagents start in the session's working directory, not in the folder your shell has moved to with `cd`, so a relative path that works for you can point nowhere for them, or make a coder create a file in the wrong place.
