@@ -41,8 +41,9 @@ container start; their config volumes are `pi_data:/root/.pi/agent` and
 `opencode_data:/root/.config/opencode`.
 
 - **OpenCode agents and commands** are tracked in `opencode/agents/` and `opencode/commands/` and
-  bind-mounted read-only over `/root/.config/opencode/agents` and `/commands`, on top of the config
-  volume. Edit them here; the container sees changes at once (directory mounts), and a running
+  bind-mounted read-write over `/root/.config/opencode/agents` and `/commands`, on top of the config
+  volume. Edit them here or from inside OpenCode (its edits land in this working tree; review them with
+  git); the container sees changes at once (directory mounts), and a running
   OpenCode session may need a restart to reload them. Design, evidence and open items:
   `md/handoff-opencode-agents.md`. They are OpenCode-specific: Pi has no built-in agents or
   subagents, and its prompt templates lack OpenCode's `agent:` / `subagent:` fields. Machine-specific

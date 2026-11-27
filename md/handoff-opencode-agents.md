@@ -31,7 +31,8 @@ the open items whenever any of these files change.
 ## Where things are
 
 The agents and commands are **tracked in this repository** under `opencode/agents/` and
-`opencode/commands/` (moved 2026-11-26), and `compose.yml` bind-mounts them read-only over
+`opencode/commands/` (moved 2026-11-26), and `compose.yml` bind-mounts them read-write (so OpenCode
+can edit them; review with git) over
 `/root/.config/opencode/agents` and `/commands` in the `opencode` container. The rest of the global
 config (`opencode.json`, the machine-specific `chrome-web` skill) stays in the machine-local config
 volume (`.local/opencode_data/`, gitignored), mounted at `/root/.config/opencode`. Until the
