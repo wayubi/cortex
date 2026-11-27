@@ -30,8 +30,8 @@
 #
 # Global flags (before the subcommand): --backend=<name>, --no-inherit, --reset-parent,
 # --thorough (exhaustive tuners/bisect), --strict (skip bench when mtp tuning
-# failed, §6.4 part 3), --refine=64|coarse|off (discover refinement depth, §42
-# Change H; env BENCH_REFINE), --no-confirm/--batch-only (bisect/batch only: stop
+# failed), --refine=64|coarse|off (discover refinement depth; env BENCH_REFINE),
+# --no-confirm/--batch-only (bisect/batch only: stop
 # after the pick; skip saturation, long-decode and the decode cliff). Default mode
 # is discover; --thorough re-enables the old exhaustive tuners/bisect. Env
 # BENCH_THOROUGH=1 is honoured; BENCH_DISCOVER=1 is a deprecated no-op alias
@@ -111,10 +111,10 @@ OMG_GREP="cudaMalloc failed|failed to allocate compute pp buffers|terminate call
 POLL_MIN_SAMPLES=3
 POLL_MAX_SAMPLES=80
 MAX_BATCH=16384          # batch search cap: never probe above min(ctx, MAX_BATCH)
-DL_POLL_SEC=30           # Change O (§56): seconds between download-progress samples
-DL_IDLE_MAX=6            # Change O: 30s × 6 = 3 min of no progress → stall
+DL_POLL_SEC=30           # seconds between download-progress samples
+DL_IDLE_MAX=6            # 30s × 6 = 3 min of no progress → stall
 MTP_TIE_NATS=0.25        # mtpverify: gap below this (nats) at the divergence token = a near-tie, premise holds
-# Decode measurement (§5): speed samples use a natural-stop prompt (NO ignore_eos)
+# Decode measurement: speed samples use a natural-stop prompt (NO ignore_eos)
 # so a looping / forced decode cannot inflate t/s or acceptance. A sample shorter
 # than MIN_DECODE_TOKENS is SHORT (retried once with the LONG prompt, then ignored).
 MIN_DECODE_TOKENS=512
@@ -122,12 +122,12 @@ DECODE_PROMPT="Write a comprehensive technical report on the history of computin
 DECODE_PROMPT_LONG="Write a comprehensive technical report on the history of computing. Cover these twelve eras in order, with a heading and at least 400 words each: mechanical calculators, Babbage and Lovelace, Hollerith and tabulation, relay computers, ENIAC and the stored program, transistors, integrated circuits, minicomputers, microprocessors, personal computers, the web, mobile and cloud. Finish with a 200-word conclusion. Do not summarise; write every section in full."
 PREFILL_TOL=0             # discover pick tolerance. Default 0 = best-measured rung.
                           # Set to 0.03 to prefer a smaller batch within 3% of best for
-                          # MTP draft headroom (plan §30.2 Change C).
-PREFILL_NOISE=0.03        # discover refinement (§30.2b Change E): keep refining only while a
+                          # MTP draft headroom.
+PREFILL_NOISE=0.03        # discover refinement: keep refining only while a
                           # midpoint beats the current best by more than this fraction (3%).
 DECODE_CLIFF=0.70         # discover: decode at pick below this fraction of the 256 baseline = spill cliff
 DECODE_WARN=0.90          # discover: below this: WARN only
-MTP_TIE=0.02              # MTP tuning: candidates within 2% of the best mean are a tie → smallest n_max wins (plan §44; was 0.05)
+MTP_TIE=0.02              # MTP tuning: candidates within 2% of the best mean are a tie → smallest n_max wins (was 0.05)
 MTP_AB_SAMPLES=2          # MTP A/B: max valid decode samples per side
 MTP_AB_CLEAR=0.05         # MTP A/B: a first-round on/off gap beyond this (above the ~2–4% spread of one
                           # sample) decides at once; a closer result takes a second round
@@ -135,12 +135,12 @@ MTP_AB_TIE=0.02           # MTP A/B: MTP kept only if its mean beats MTP-off by 
                           # a tie goes to MTP off (no draft buffer, simpler config)
 THOROUGH=0
 EARLY_AB=${BENCH_EARLY_AB:-1}  # early MTP A/B before the bisect (--no-early-ab / BENCH_EARLY_AB=0 to skip)
-STRICT=0                  # --strict: skip bench when mtp tuning failed (plan §6.4 part 3 / §7)
+STRICT=0                  # --strict: skip bench when mtp tuning failed
 BATCH_ONLY=0              # --no-confirm / --batch-only / `batch`: discover ladder + refinement
                           # only; apply the pick, skip saturation/long-decode/decode-cliff
-REFINE_MODE=64            # discover refinement depth (plan §42 Change H): 64 (default, Change G
-                          # golden-section to 64) | coarse (Change E: stop when no step beats the
-                          # pre-step best by PREFILL_NOISE, E resolution width) | off (ladder only).
+REFINE_MODE=64            # discover refinement depth: 64 (default,
+                          # golden-section to 64) | coarse (stop when no step beats the
+                          # pre-step best by PREFILL_NOISE, coarse width) | off (ladder only).
                           # Set via --refine= or env BENCH_REFINE. Warm-up + median-of-3 always on.
 
 # Shared per-model state (set before each engine call)
@@ -570,7 +570,7 @@ print(b.group(1) if b else '')
   [ -n "$PARENT_BATCH" ] && set_batch_for "$CHILD" "$PARENT_BATCH"
 
   # Write parent's MTP values (n_max/p_min) to child's models.ini section ONLY
-  # when the parent JSON records mtp.tuning_status == "ok" (§6.4 part 4 / Q7).
+  # when the parent JSON records mtp.tuning_status == "ok".
   # Unvalidated MTP values (the old n_max_confirmed load-log field) must not
   # propagate. Batch and the rest of the JSON still always inherit.
   local PARENT_TUNING
@@ -647,7 +647,7 @@ maybe_inherit() {
   local MODEL=$1
   local PARENT
   PARENT=$(family_of "$MODEL")
-  INHERIT_PARENT_FAILED=0   # §50.2 Change L signal for the caller's verdict
+  INHERIT_PARENT_FAILED=0   # signal for the caller's verdict
 
   # No-inherit: always run real bench
   [ "$INHERIT_MODE" -eq 0 ] && return 1
@@ -662,7 +662,7 @@ maybe_inherit() {
   fi
 
   # Sibling: inherit from parent if parent has JSON
-  # §50.2 Change L: when RESET_PARENT is on, only inherit from a parent that was
+  # when RESET_PARENT is on, only inherit from a parent that was
   # actually benched successfully THIS run (RESET_DONE set). A head that failed
   # its bisect/bench must not feed its stale record to siblings — copying it and
   # stamping a fresh propagated_date would make the failure invisible. Set a
@@ -722,7 +722,7 @@ oom_count_since_mark() { oom_since_mark | wc -l | tr -d ' '; }
 # The router logs "proxy_reques: proxying request to model <model> on port <N>"
 # ONLY after the model finishes loading and the request is being served.
 # A hung cold-load (e.g. HF network fetch stalled) never emits this line.
-# SERVED_GRACE = max seconds to wait for the proxy_reques line. Change K (§49.1):
+# SERVED_GRACE = max seconds to wait for the proxy_reques line.
 # base 180s + 40s per 64k ctx (the old 60s base was too tight for the largest
 # saturation bodies — intermittent cold-load hangs on GLM 128K/198K heads that had
 # served every prior probe). Set ctx-aware in each command via served_grace.
@@ -1196,11 +1196,11 @@ print(f'{p:.1f}|{d:.1f}|${AVG_CPU:-0}')
 #   gpu_util > GPU_ACTIVE_PCT AND cpu < GPU_CPU_MAX → GPU-resident (model active on GPU)
 #   GPU_CPU_MAX is 150, not 100: gemma-class decode idles one core at 100-105%, so a
 #   <100 threshold never early-kills and the probe runs its full 40-sample window.
-#   A real draft spill measures 270-1600% (§30.2 Change B), so <150 + GPU is still safe.
+#   A real draft spill measures 270-1600%, so <150 + GPU is still safe.
 #   150-200% is noise/AMBIGUOUS — not proven GPU, not proven CPU (never forced).
 # Echoes one of: GPU | CPU | AMBIGUOUS
 GPU_ACTIVE_PCT=25
-GPU_CPU_MAX=150           # cpu < this + GPU active => GPU-resident (plan §30.2 Change B)
+GPU_CPU_MAX=150           # cpu < this + GPU active => GPU-resident
 RESID_MIN_FLOOR_SAMPLES=10   # 20s @2s before early-kill verdicts are allowed (belt-and-suspenders)
 
 # The busiest llama-server line of one `top` frame (several routers and the model
@@ -1208,7 +1208,7 @@ RESID_MIN_FLOOR_SAMPLES=10   # 20s @2s before early-kill verdicts are allowed (b
 # field 9 does not depend on a toprc, COLUMNS or LC_NUMERIC.
 llama_top() { LC_ALL=C top -bn1 -w 512 -o %CPU 2>/dev/null | grep llama-s | head -n1 || true; }
 
-# ── Binary placement classifier (plan §37 Change F) ─────────
+# ── Binary placement classifier ─────────
 # One classifier shared by residency_probe, decode_sample and cmd_bench so the
 # published record never says AMBIGUOUS. A GPU-resident llama.cpp keeps exactly
 # one host thread busy feeding the GPU, so its process CPU sits at ~100% and
@@ -1334,7 +1334,7 @@ with open('/tmp/resid_payload.json','w') as f: json.dump(payload, f)
   fi
 
   # Fallback: classify from the full window averages via the shared binary
-  # classifier (plan §37 Change F) — never AMBIGUOUS.
+  # classifier — never AMBIGUOUS.
   local R_AVG=0 R_GAVG=0
   [ "$R_CPU_CNT" -gt 0 ] && R_AVG=$(echo "scale=1; $R_CPU_SUM / $R_CPU_CNT" | bc)
   [ "$R_GPU_CNT" -gt 0 ] && R_GAVG=$(echo "scale=1; $R_GPU_SUM / $R_GPU_CNT" | bc)
@@ -1935,7 +1935,7 @@ for b, p in pts[:$SHORTLIST_SIZE]:
 # Snapshots the model's section to a temp file, sets MTP config, restarts, probes.
 # MTP supported = probe succeeds AND log shows MTP engagement.
 # On failure, restores the original section and exits 1 (caller decides).
-# Change O (§56): wait for a model's HF weights to be fully cached before any timed
+# wait for a model's HF weights to be fully cached before any timed
 # work. llama.cpp's downloader writes a *.downloadInProgress marker during fetch
 # and renames it away only on completion (common/download.cpp:369-404). This
 # marker, not growth sampling, is the primary signal — it survives container
@@ -2257,8 +2257,7 @@ with open('/tmp/cache_probe.json','w') as f: json.dump(payload, f)
   if [ "$MARKER_FOUND" -eq 0 ]; then
     # No marker appeared and refs/main absent after DL_IDLE_MAX × DL_POLL_SEC:
     # the download never started or the server is unresponsive. Return 2 (stall)
-    # so callers skip the model — never assume cached when refs/main is absent
-    # (§57.3).
+    # so callers skip the model — never assume cached when refs/main is absent.
     log "  weights not cached, no download started (${DL_IDLE_MAX}×${DL_POLL_SEC}s)"
     kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null || true
     return 2
@@ -2346,7 +2345,7 @@ with open('/tmp/mtp_payload.json','w') as f: json.dump(payload, f)
     if [ "$RC" -eq 2 ]; then
       log "  STALL during MTP detection (network/HF fetch) — aborting"
       restore_section "$SNAP"
-      # Change N (§55.3): write stall status so cmd_mtpcheck can distinguish
+      # write stall status so cmd_mtpcheck can distinguish
       # this from NOT MTP. A model whose weights won't load must not produce a
       # record at all.
       MTP_STAT="$(mtp_status_file)" python3 -c "
@@ -2487,7 +2486,7 @@ open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_mtp','reason':'
   rm -f "$SNAP"
 }
 
-# ── Natural-stop decode sample (§5) ─────────────────────────
+# ── Natural-stop decode sample ─────────────────────────
 # A speed/quality sample that lets the model stop at EOS (NO ignore_eos), so a
 # looping forced decode cannot inflate t/s or acceptance. Polls placement exactly
 # as run_decode_test does. Retries once with DECODE_PROMPT_LONG if the model
@@ -2648,7 +2647,7 @@ run_decode_test() {
   echo "$SPEED|$ACCEPT|$PLACEMENT|$AVGCPU|$QUALITY|$OOM|$TOKENS|$MEANLEN|$FINISH"
 }
 
-# ── MTP tuning status plumbing (§6.4 part 1) ───────────────
+# ── MTP tuning status plumbing ───────────────
 # Both tuners (cmd_mtp_thorough and cmd_mtp_discover) and mtpcheck write
 # /tmp/mtp_status_<model>.json on every exit path so cmd_bench can distinguish
 # not_mtp / failed / stall / not_run / ok. Samples are accumulated line by line
@@ -3194,11 +3193,11 @@ cmd_vision() {
 # ── SUBCOMMAND: mtpcheck ────────────────────────────────────
 # Empirically determine MTP capability, write spec-type to models.ini.
 # Exit 0 = MTP-capable (spec-type left set), 1 = not MTP (config restored).
-# Writes {"status":"not_mtp"} when the model is not MTP-capable (§6.4 part 1).
+# Writes {"status":"not_mtp"} when the model is not MTP-capable.
 # detect_mtp is run in a subshell because it exits (not returns) on the
 # not-capable paths; we need its exit code so we can stamp the status file.
 cmd_mtpcheck() {
-  # §58.2: clear any prior status BEFORE detection, so the file can only ever
+  # clear any prior status BEFORE detection, so the file can only ever
   # describe this run. detect_mtp writes a status only on its own STALL path —
   # its other four failure exits (no MTP layers, MTP-context OOM, probe failed
   # twice, MTP did not engage) leave whatever was there before. Without this, a
@@ -3217,7 +3216,7 @@ open(os.environ['MTP_STAT'],'w').write(json.dumps({'status':'not_run','written_a
   else
     # Check if detect_mtp wrote a stall status (it catches STALL itself and writes
     # to the status file before exit 2). Return 2 so callers can skip the model
-    # rather than recording it as non-MTP (Change N, §55.3).
+    # rather than recording it as non-MTP.
     local SF; SF=$(mtp_status_file)
     if [ -f "$SF" ] && grep -q '"stall"' "$SF" 2>/dev/null; then
       log "  mtpcheck: STALL (model never served — network/download failure)"
@@ -3369,7 +3368,7 @@ print(out)
 ")
   fi
 
-  # ── Compare with the OFF-only margin criterion (§18.3) ──
+  # ── Compare with the OFF-only margin criterion ──
   python3 -c "
 import json, os
 MTPV_OFF='$OFF_JSON'; MTPV_ON='$ON_JSON'
@@ -3453,7 +3452,7 @@ else:
 # ── MTP tuning: THOROUGH variant (old exhaustive tuner) ─────
 # Empirically determines optimal n_max and p_min per model. This is the OLD
 # quality-gated, fail-hard, exhaustive tuner (Phase 1 confirm + Phase 3 strict
-# degeneracy confirm). Kept verbatim (plus the §6.4 status-file writes that apply
+# degeneracy confirm). Kept verbatim (plus the status-file writes that apply
 # to both tuners) and dispatched only for --thorough / the default this step.
 # Phase 1: n_max sweep {2,3,4,5} at p_min=0.7 (speed axis).
 # Phase 2: p_min sweep {0.5-0.9} at winning n_max (quality axis).
@@ -3487,7 +3486,7 @@ cmd_mtp_thorough() {
   mtp_init_samples
   log ""; log "Model: $MODEL | ctx: $CTX | mode: THOROUGH"
 
-  # ── §45.3 Change J: placement baseline (same rule as cmd_mtp_discover). ──
+  # ── placement baseline (same rule as cmd_mtp_discover). ──
   # On a CPU-compute MTP model, `CPU` is the baseline at every batch, not a draft
   # spill, so the four gates below must not reject on placement. Resolve from the
   # same-day discover JSON mode; else from the first measured sample (the sweep set
@@ -3528,7 +3527,7 @@ cmd_mtp_thorough() {
     IFS='|' read -r SPEED ACC PLACEMENT AVGCPU QUALITY OOM TOKENS MEANLEN FINISH <<< "$RESULT"
     mtp_add_sample "$N" "$SWEEP_PMIN" "$SPEED" "$TOKENS" "$PLACEMENT" "$ACC" "$QUALITY" "$OOM" "$MEANLEN"
     NMAX_RESULTS[$N]="$SPEED|$ACC|$PLACEMENT|$QUALITY|$OOM|$TOKENS|$MEANLEN"
-    # §45.3: if no discover-JSON baseline, the first measured sample establishes it.
+    # if no discover-JSON baseline, the first measured sample establishes it.
     if [ -z "$BASE_PLACEMENT" ] && { [ "$PLACEMENT" = "GPU" ] || [ "$PLACEMENT" = "CPU" ]; }; then
       BASE_PLACEMENT=$PLACEMENT
       export MTP_BASE="$BASE_PLACEMENT"
@@ -3665,7 +3664,7 @@ cmd_mtp_thorough() {
 
 # ── MTP discover-mode ranking helpers (read the collected sample TSV) ──
 # Valid phase-1 sample: p_min == 0.7, oom == 0, tokens >= MIN, and (when the
-# model's baseline placement is GPU, §45.3 Change J) placement != CPU. On a CPU-
+# model's baseline placement is GPU) placement != CPU. On a CPU-
 # compute model (MTP_BASE=CPU) a CPU sample is the baseline, not a spill.
 mtp_mean_for() {  # $1 nmax $2 pmin -> mean tps over valid samples of that config ('' if none)
   local NM=$1 PM=$2
@@ -3688,7 +3687,7 @@ else:
 "
 }
 
-# Phase-1 winner with the §6.2 tie rule (plan §25#3): pick the smallest n_max
+# Phase-1 winner with the tie rule: pick the smallest n_max
 # whose mean is within MTP_TIE of the best mean. Unlike a best-vs-runner-up test,
 # this considers every measured candidate, so a low n_max that is within tolerance
 # (e.g. n_max=2 when 4 is best but 2 is within 5%) is preferred for draft-buffer
@@ -3719,9 +3718,9 @@ print(winner)
 '
 }
 
-# ── SUBCOMMAND: mtp DISCOVER variant (plan §6.1/§6.2) ────────
+# ── SUBCOMMAND: mtp DISCOVER variant ────────
 # Adaptive, non-exhaustive n_max/p_min search. NO quality gate (MTP parameters
-# cannot change the output distribution — §18 premise); placement / OOM / SHORT
+# cannot change the output distribution); placement / OOM / SHORT
 # are the only rejections and degeneracy is only a WARN diagnostic. Always
 # includes the ini's current n_max (it was validated by the batch ladder).
 cmd_mtp_discover() {
@@ -3750,7 +3749,7 @@ cmd_mtp_discover() {
   [ -z "$CUR" ] && CUR=2
   log "  ini spec-draft-n-max=$CUR spec-draft-p-min=${ORIG_PMIN:-unset}"
 
-  # ── §45.3 Change J: placement gate relative to the model's baseline ──
+  # ── placement gate relative to the model's baseline ──
   # On a GPU-resident model a `CPU` verdict means the draft buffer at this n_max
   # spilled off the GPU — a rejection. On a model that is CPU-compute at every
   # batch (MTP MoE with experts on CPU), `CPU` is the baseline, not a spill, so
@@ -3820,7 +3819,7 @@ cmd_mtp_discover() {
     if [ "$DR" -eq 2 ]; then mtp_die_stall "STALL measuring n_max=$NM at p_min=$P_REF"; fi
     IFS='|' read -r SP TK PL OO <<< "$R"
     SP=${SP:-0}; TK=${TK:-0}; OO=${OO:-1}; PL=${PL:-SHORT}
-    # §45.3: if no baseline yet (no same-day discover JSON), the first measured
+    # if no baseline yet (no same-day discover JSON), the first measured
     # candidate establishes it. The ladder set is sorted, so this is the smallest
     # candidate; its placement is the model's baseline, not a spill (a smaller
     # n_max cannot spill where a larger one does not).
@@ -3924,7 +3923,7 @@ print(rank[0] if rank else '')
     fi
   done
   if [ -n "${WIN_CAND:-}" ]; then
-    # §30.3: confirm the win with a second sample before switching away from 0.7
+    # confirm the win with a second sample before switching away from 0.7
     # (a single sample can beat the reference by >5% on noise). One extra run.
     log "  p_min=$WIN_CAND (${WIN_CAND_TP} t/s) beat 0.7 by > ${MTP_TIE} on one sample — confirming with a second"
     discover_measure "$WIN_NMAX" "$WIN_CAND" "phase-2 p_min=$WIN_CAND (confirm)" >/dev/null || mtp_die_stall "STALL confirming p_min=$WIN_CAND"
@@ -4595,7 +4594,7 @@ cmd_bisect_thorough() {
 # ── SUBCOMMAND: bisect — thin dispatcher ────────────────────
 # Reads the 2nd arg as an optional single-batch test. A positive integer routes to
 # the shared cmd_bisect_test_batch (used by BOTH bisect routes). Otherwise dispatch
-# between the discover-mode ladder (plan §4, cmd_bisect_discover) and the legacy
+# between the discover-mode ladder (cmd_bisect_discover) and the legacy
 # exhaustive search (cmd_bisect_thorough).
 # Default is DISCOVER; --thorough / THOROUGH=1 selects the old exhaustive path.
 # BENCH_DISCOVER=1 is a deprecated alias for discover.
@@ -4664,7 +4663,7 @@ cmd_bisect_test_batch() {
   exit 0
 }
 
-# ── Sized prefill t/s probe (§4.2) ──────────────────────────
+# ── Sized prefill t/s probe ──────────────────────────
 # Same prompt length for EVERY rung of one model so rungs are ranked on identical
 # work (prefill t/s falls with prompt length, so a batch-proportional prompt would
 # bias large batches down). Length = min(floor(0.75×ctx), 16384) tokens; chars =
@@ -4673,15 +4672,15 @@ cmd_bisect_test_batch() {
 # instance. Reuses prefill_probe's body approach — log-parsed 'prompt eval time',
 # overflow-shrink retry, OOM check.
 # Echoes prefill_t_s to stdout; "0" on OOM/crash/parse-fail, "STALL" on a genuine
-# network/cold-load stall (fire_request rc 2 — Change M, §53.3). Callers keep
+# network/cold-load stall (fire_request rc 2). Callers keep
 # STALL fatal and treat 0 as a rung failure. Progress → stderr.
-# §39.2#1 (Change G): the SAME measurement rule applies to every point in the JSON
+# the SAME measurement rule applies to every point in the JSON
 # — a ladder rung and a refinement candidate are measured identically. So the
 # "first probe under 5 s → median of three" policy lives HERE (in the one function
 # both the ladder and discover_measure_candidate call), not only in the refinement
 # path. Every sized-prefill value recorded for a batch is therefore a median when
 # the probe is fast, never a single high-noise sample that could out-rank a median.
-# §40.2#2: the FIRST prefill at a new ubatch shape pays a one-time setup cost (CUDA
+# the FIRST prefill at a new ubatch shape pays a one-time setup cost (CUDA
 # graph capture for that shape), which weighs more on larger ubatches (a fixed-
 # length probe holds fewer of them). So run ONE untimed warm-up probe first, then
 # take the timed sample(s): a slow probe (>5 s, every 64K/256K and CPU-compute
@@ -4736,13 +4735,13 @@ n = $PROBE_CHARS
 prompt = (filler * ((n // len(filler)) + 1))[:n]
 # cache_prompt:false so no prefix of the prompt is served from the slot's prompt
 # cache (measure_ratio runs a filler prefix just before rung 256); otherwise the
-# log-parsed throughput is a few-token figure, not the full probe (plan §25#2).
+# log-parsed throughput is a few-token figure, not the full probe.
 payload = {'model':'$MODEL','messages':[{'role':'user','content':prompt}],'max_tokens':1,'ignore_eos':True,'cache_prompt':False}
 with open('/tmp/pp_sized.json','w') as f: json.dump(payload, f)
 "
     fire_request /tmp/pp_sized.json /tmp/pp_sized_out.json "prefill-sized" "$(adaptive_timeout 1)"
     local RC=$?
-    # Change M (§53.3): a genuine network/cold-load stall (fire_request rc 2) is
+    # a genuine network/cold-load stall (fire_request rc 2) is
     # signalled as STALL so the caller can keep it fatal; every other failure
     # (OOM, crash, unparseable response) returns 0 and becomes a rung failure.
     if [ "$RC" -eq 2 ]; then echo "STALL"; return 0; fi
@@ -4784,7 +4783,7 @@ with open('/tmp/pp_sized.json','w') as f: json.dump(payload, f)
   echo "0"
 }
 
-# ── SUBCOMMAND: bisect discover mode (plan §4, the default) ──
+# ── SUBCOMMAND: bisect discover mode (the default) ──
 # One coarse ladder (powers of two from 256 up to min(ctx, MAX_BATCH)), three cheap
 # measurements per rung (tiny → residency → sized prefill), then a smallest-within-
 # 3%-of-best pick (optional ceiling-edge midpoint refinement), then one-restart
@@ -4824,7 +4823,7 @@ cmd_bisect_discover() {
   local PROBE_TOKENS
   PROBE_TOKENS=$(python3 -c "print(int(min(int($CTX * 0.75), 16384)))")
 
-  # Change A (§30.2): a "simple" non-MTP model has no draft to spill and no
+  # a "simple" non-MTP model has no draft to spill and no
   # override-tensor (CPU expert offload), so decode is batch-independent. Its
   # residency can only say GPU (or CPU if it is a genuine CPU-compute model — the
   # rung-256 probe still sets MODE), and neither DEC_BASE nor the pick decode
@@ -4877,7 +4876,7 @@ cmd_bisect_discover() {
     fi
     log "  Tiny PASS @ $B"
 
-    # Residency (skipped entirely once MODE=CPU). Change A: a simple non-MTP
+    # Residency (skipped entirely once MODE=CPU). A simple non-MTP
     # model runs residency once at rung 256 to set MODE; later rungs skip it
     # (no draft to spill, so the verdict cannot change).
     if [ "$MODE" != "CPU" ] && { [ "$SIMPLE_NONMTP" -eq 0 ] || [ "$B" -eq "$B0" ]; }; then
@@ -4913,7 +4912,7 @@ cmd_bisect_discover() {
     fi
 
     # Sized prefill probe (identical prompt length on every rung).
-    # Change M (§53.3): STALL (genuine network/cold-load) stays fatal; any 0 —
+    # STALL (genuine network/cold-load) stays fatal; any 0 —
     # OOM, crash (recognised by OMG_GREP or not), or unparseable — is a rung
     # failure that sets the ceiling. The tiny probe already proved the model loads,
     # so a probe that returns nothing means the batch is bad, not the network.
@@ -4936,7 +4935,7 @@ cmd_bisect_discover() {
     echo "$B PASS $PF" >> "$POINTS"
 
     # Decode baseline at the first GPU rung (256), after the prefill measurement.
-    # Change A: skipped for simple non-MTP models (decode is batch-independent).
+    # skipped for simple non-MTP models (decode is batch-independent).
     # Batch-only: skipped too — its only consumer is the confirm-phase cliff check.
     if [ "$B" -eq "$B0" ] && [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 0 ] \
        && [ "$BATCH_ONLY" -eq 0 ]; then
@@ -4993,7 +4992,7 @@ print(' '.join(out))
     exit 1
   fi
 
-  # ── Phase B: pick = best PASS point; Change G golden-section refinement (§38) ──
+  # ── Phase B: pick = best PASS point; golden-section refinement ──
   # PREFILL_TOL default 0 → best-measured rung; a user-set value keeps the
   # smallest-within-tolerance rule. Refinement tracks extra points in
   # REFINE_B[]/REFINE_P[] (for step-down + JSON), never in the ladder arrays.
@@ -5016,7 +5015,7 @@ print(' '.join(out))
   # stdout carries ONLY the numeric prefill when captured via $(...) — otherwise
   # the points append and the caller's parse are polluted by progress lines.
   # Optional $2 (SKIP_RES=1) forces residency to be skipped even for a non-simple
-  # GPU model — used for interior points of a PASS/PASS bracket (Change G, §38):
+  # GPU model — used for interior points of a PASS/PASS bracket:
   # memory is monotonic in batch, so nothing between two passing rungs can spill.
   discover_measure_candidate() {
     local CB=$1 SKIP_RES=${2:-0}
@@ -5031,9 +5030,9 @@ print(' '.join(out))
       if [ "$RV" = "CPU" ]; then echo "0"; return 0; fi
       if [ "$RV" = "STALL" ]; then log "  STALL at $CB (residency) — aborting" >&2; return 2; fi
     fi
-    # §39.2#1: prefill_probe_sized now does the <5s median-of-3 itself (the SAME
+    # prefill_probe_sized now does the <5s median-of-3 itself (the SAME
     # rule the ladder uses), so every batch is measured identically.
-    # Change M (§53.3): a genuine stall aborts (rc 2); any 0 is a failed candidate
+    # a genuine stall aborts (rc 2); any 0 is a failed candidate
     # (the caller makes it the new upper bound).
     local CPF
     CPF=$(prefill_probe_sized "$CTX")
@@ -5043,14 +5042,14 @@ print(' '.join(out))
     return 0
   }
 
-  # ── Phase B refinement — golden-section (§38 Change G); depth is a setting (§42
-  # Change H: --refine=64|coarse|off) ──
-  # 64 (default): always refine the bracket around the Change C pick down to
-  # 64-token granularity (Change G, §41). coarse: the SAME loop with the Change E
-  # stop rules (noise gate + E resolution). off: no refinement. Refinement runs for
+  # ── Phase B refinement — golden-section; depth is a setting
+  # (--refine=64|coarse|off) ──
+  # 64 (default): always refine the bracket around the pick down to
+  # 64-token granularity. coarse: the SAME loop with the coarse
+  # stop rules (noise gate + coarse resolution). off: no refinement. Refinement runs for
   # ALL modes when on: the prefill curve is not flat where it matters on simple
   # non-MTP models (lfm 8K/16K/32K rose to 2112/2176/3008) or CPU-compute
-  # (gpt-oss rises to 2048, falls at 4096). Change A still only skips residency and
+  # (gpt-oss rises to 2048, falls at 4096). The simple non-MTP shortcut still only skips residency and
   # decode samples on simple models (batch-independent), not prefill refinement.
 
   # find_measured $batch: echo the stored prefill of an already-measured PASS
@@ -5081,7 +5080,7 @@ print(' '.join(out))
       echo "$CB FAIL" >> "$POINTS"
       GOLD_RES="0"; return 0
     fi
-    # §45.4#2: CPU-compute probes are single timed samples (over 5s → no median)
+    # CPU-compute probes are single timed samples (over 5s → no median)
     # and noisier than GPU probes (e.g. 3392 at 1564 between neighbours 1825/1786,
     # a 13% outlier). Cheap guard: when a CPU-compute candidate measures >5% below
     # BOTH of its measured neighbours (nearest measured batch above and below), it
@@ -5123,7 +5122,7 @@ print(' '.join(out))
     return 0
   }
 
-  # §42 Change H: refinement depth is a setting (one of 64|coarse|off, validated
+  # refinement depth is a setting (one of 64|coarse|off, validated
   # at startup). off → no refinement at all: pick stays the best ladder rung and
   # no bracket is computed.
   if [ "$REFINE_MODE" = "off" ]; then
@@ -5134,7 +5133,7 @@ print(' '.join(out))
   # measured PASS strictly above PICK if one exists; else, at a ceiling edge
   # (PICK==HIGHPASS with an OOM/SPILL rung above), BHI = that failed rung; else
   # PICK is the top measured rung with nothing above (ladder ended at/below cap
-  # with the best at the top) — §39.2#2: refine DOWN in [BLO, PICK], because the
+  # with the best at the top) — refine DOWN in [BLO, PICK], because the
   # true prefill peak can sit between the lower rung and the cap at a non-rung
   # (lfm 4K: pick 4096 = cap, peak actually ~3K, bracket [2048, 4096] must be
   # searched). Exception: if BLO >= PROBE_TOKENS the whole bracket is a single
@@ -5163,13 +5162,13 @@ print(' '.join(out))
   if [ "$BHI" -le "$BLO" ]; then
     log "  no bracket above/below — skip refinement (lo=$BLO hi=$BHI)"
   else
-    # Resolution / width stop and the noise gate depend on REFINE_MODE (§42).
-    #   mode 64:   golden-section to a 64-token bracket (Change G, §41).
+    # Resolution / width stop and the noise gate depend on REFINE_MODE.
+    #   mode 64:   golden-section to a 64-token bracket.
     #   mode coarse: the SAME loop, but stop when a step's better interior point
     #     does not beat the pre-step best by PREFILL_NOISE, and stop the bracket at
-    #     the Change E resolution — max(64, 6% of lower) at a ceiling edge, else
-    #     max(256, 6% of best) (Change E, §34). Typically one to three probes.
-    # Warm-up + median-of-3 stay on in every mode (§40.2#2 is a measurement rule,
+    #     the coarse resolution — max(64, 6% of lower) at a ceiling edge, else
+    #     max(256, 6% of best). Typically one to three probes.
+    # Warm-up + median-of-3 stay on in every mode (they are a measurement rule,
     # not a resolution choice).
     local WSTOP=64 NOISE_GATE=0
     if [ "$REFINE_MODE" = "coarse" ]; then
@@ -5260,7 +5259,7 @@ print(' '.join(out))
         STEP_BETTER=$FGB
       fi
       log "  golden: GA=$GA=${FGA} t/s GB=$GB=${FGB} t/s → bracket [$GS_LO, $GS_HI]" >&2
-      # Coarse noise gate (§42 / Change E): keep refining only while the better
+      # Coarse noise gate: keep refining only while the better
       # interior point this step beats the pre-step best by PREFILL_NOISE.
       if [ "$NOISE_GATE" -eq 1 ]; then
         if ! python3 -c "exit(0 if float('$STEP_BETTER') > float('$STEP_BEST') * (1 + $PREFILL_NOISE) else 1)" 2>/dev/null; then
@@ -5276,7 +5275,7 @@ print(' '.join(out))
 
   local CONFIRM_STATUS=passed
 
-  # Change E rule 3: on a confirm failure, step down through the measured points
+  # On a confirm failure, step down through the measured points
   # (refinement points first, largest below PICK, then ladder rungs). Echoes the
   # largest measured PASS point strictly below $1, or empty if none.
   discover_stepdown_candidate() {
@@ -5298,7 +5297,7 @@ print(' '.join(out))
     log "  Confirm restart @ pick=$PICK..."
     set_batch "$PICK"; restart
 
-    # Residency at the pick (simple non-MTP, GPU mode). Change A probes these only
+    # Residency at the pick (simple non-MTP, GPU mode). The ladder probes these only
     # at rung 256, but -fit budgets the compute buffer too, which grows with batch:
     # past fit's 1 GiB free-memory target it moves a whole layer to CPU, with no
     # OOM. dirk-qwen3.8-27b @ 90112 was GPU at 256 and 65/66 layers at the pick
@@ -5381,7 +5380,7 @@ print(' '.join(out))
 
     # Decode-cliff check (GPU mode only). CPU placement → step down (definitive);
     # SHORT either side → keep; <0.70 → re-sample once then decide; <0.90 → WARN.
-    # Change A: skipped for simple non-MTP models (decode is batch-independent;
+    # skipped for simple non-MTP models (decode is batch-independent;
     # the cliff check only guards MTP draft / KV spill, which these cannot have).
     local CONFIRM_OK=1
     if [ "$MODE" = "GPU" ] && [ "$SIMPLE_NONMTP" -eq 0 ]; then
@@ -5446,7 +5445,7 @@ print(' '.join(out))
     break   # pick confirmed
   done
 
-  # ── Result block (§4.5) ──
+  # ── Result block ──
   set_batch "$PICK"
   log ""; log "=== RESULT ==="
   log "  batch=$PICK ubatch=$PICK ctx=$CTX"
@@ -5476,7 +5475,7 @@ print(' '.join(out))
   fi
   log "=== DONE ==="
 
-  # Write the discover JSON for cmd_bench to merge (§4.5). §40.2#1: the refine
+  # Write the discover JSON for cmd_bench to merge. The refine
   # batch list is passed through an env var, NOT embedded as "${REFINE_B[@]}"
   # inside this double-quoted python -c string — once there are two or more
   # points, [@] expands to separate shell words, splitting the program across
@@ -5721,7 +5720,7 @@ except: print(0)
   # ── Phase A: PREFILL (75%-ctx prompt, max_tokens=1) ─────────
   # Phase B decode uses the natural-stop DECODE_PROMPT (see below); max_tokens is
   # only a safety cap so the decode window fits even on small-ctx models. Match
-  # decode_sample's formula max(256, min(4000, ctx-256)) (plan §25#4).
+  # decode_sample's formula max(256, min(4000, ctx-256)).
   local DECODE_MAX_TOKENS
   DECODE_MAX_TOKENS=$(python3 -c "print(max(256, min(4000, $CTX - 256)))")
 
@@ -5747,7 +5746,7 @@ print(f'  Prefill payload: {len(prompt)} chars, ~{$PROMPT_TOKENS} tokens (max_to
   wait "$FIRE_PID" 2>/dev/null || true
 
   # ── Phase B: DECODE (natural-stop prompt, placement polling) ───────
-  # §5.2 / plan §23.2#1: the bench decode must NOT force tokens (ignore_eos
+  # The bench decode must NOT force tokens (ignore_eos
   # would loop-inflate decode t/s and draft acceptance). Use DECODE_PROMPT
   # (natural stop) so the recorded decode_t_s is the real figure. cmd_bench's own
   # placement / hardware polling below is unchanged.
@@ -5855,7 +5854,7 @@ print(f'{statistics.stdev(vals):.1f}')
   RAM=$(free -m | awk '/Mem:/ {print $3}')
   RSS=$(ps aux 2>/dev/null | grep llama-server | grep -v grep | grep -v models-preset | awk '{print int($6/1024)}' | head -1)
 
-  # Classify placement (shared binary classifier, plan §37 Change F)
+  # Classify placement (shared binary classifier)
   local PLACEMENT
   PLACEMENT=$(classify_placement "$AVG_CPU" "$AVG_GPU")
 
@@ -5915,7 +5914,7 @@ if dd:
         'finish_reason': dd['choices'][0].get('finish_reason'),
         'truncated': bool(dd['choices'][0].get('finish_reason') == 'length'),
     })
-    # 8-gram degeneracy on the natural-stop output (§5.2), heading lines stripped.
+    # 8-gram degeneracy on the natural-stop output, heading lines stripped.
     try:
         _text = dd['choices'][0]['message']['content']
         _lines = [ln for ln in _text.split('\n') if not ln.lstrip().startswith('#')]
@@ -5953,7 +5952,7 @@ def load_val(flag):
     # find the LAST --alias <MODEL> load block (the bench's own fresh load), then
     # look backward for the flag/value pair. Using the last block avoids grabbing a
     # stale earlier load (e.g. from the bisect/mtp phase at a different n_max) that
-    # a 2000-char backscan from the FIRST match would hit (plan §31 finding 2).
+    # a 2000-char backscan from the FIRST match would hit.
     matches = list(re.finditer(r'--alias\s*\n[^\n]*' + re.escape('$MODEL'), load_logs))
     if not matches:
         return None
@@ -5963,7 +5962,7 @@ def load_val(flag):
     return m2.group(1) if m2 else None
 def _num(x):
     # load_val returns the raw string; coerce to int/float so n_max_loaded and
-    # p_min_loaded match the numeric configured_n_max/p_min types (plan §25#6).
+    # p_min_loaded match the numeric configured_n_max/p_min types.
     if x is None: return None
     try: return int(x)
     except ValueError: pass
@@ -5981,8 +5980,8 @@ print(json.dumps({
 
   log ""
   log "=== RESULTS ==="
-  # Write the speed/request summary to BOTH the log file and stdout (plan §25#5:
-  # previously it went to stdout only, so a run's published figures were absent
+  # Write the speed/request summary to BOTH the log file and stdout
+  # (previously it went to stdout only, so a run's published figures were absent
   # from the log). Single python appends to $LOG_FILE and echoes to stdout.
   python3 -c "
 import json
@@ -6004,7 +6003,7 @@ meta = json.loads('''$META''')
 mtp = json.loads('''$MTP''')
 env = json.loads('''$ENV_JSON''')
 
-# Merge the §6.4 MTP tuning status file (/tmp/mtp_status_<model>.json) if present
+# Merge the MTP tuning status file (/tmp/mtp_status_<model>.json) if present
 # (ok / failed / stall / not_mtp). tuning_status defaults to not_run when absent
 # (mtp tuning never ran for this bench, e.g. a direct 'bench.sh bench' run).
 status = {}
@@ -6027,7 +6026,7 @@ _mtp_tuning = {
     'ab': status.get('ab') if status else None,
 }
 
-# Stale-status guard (plan §25#1 + §31 finding 3): if the status file says "ok"
+# Stale-status guard: if the status file says "ok"
 # but the tuned values do not match what the ini/config says (configured_n_max /
 # p_min) OR what the server actually loaded for this bench (mtp.n_max_loaded /
 # p_min_loaded), the tune is not in effect for this record. Relabel it "stale"
@@ -6053,7 +6052,7 @@ if _mtp_tuning['tuning_status'] == 'ok' and (_mtp_tuning.get('ab') or {}).get('d
         except Exception:
             pass
 
-# Merge the §4.5 discover-ladder result (/tmp/discover_<model>.json) if present.
+# Merge the discover-ladder result (/tmp/discover_<model>.json) if present.
 # cmd_bisect_discover writes it; a thorough or bench-only run has none → discover={}.
 discover = {}
 _disc_path = '/tmp/discover_${MODEL}.json'
@@ -6126,8 +6125,8 @@ with open('$JSON_FILE', 'w') as f:
     json.dump(data, f, indent=2)
 PYEOF
 
-  # Verify the JSON was actually written and is newer than this run's start
-  # (plan §25#5): a failed/partial write must not reach '=== DONE ===' as a pass.
+  # Verify the JSON was actually written and is newer than this run's start:
+  # a failed/partial write must not reach '=== DONE ===' as a pass.
   if [ ! -f "$JSON_FILE" ] || [ ! -s "$JSON_FILE" ] \
      || [ "$(stat -c %Y "$JSON_FILE" 2>/dev/null || echo 0)" -lt "$REQUEST_START" ]; then
     log "  ERROR: JSON not written or stale at $JSON_FILE — failing bench"
@@ -6146,7 +6145,7 @@ reset_parent_full() {
   log ""
   lshow "=============== RESET PARENT: $P ==============="
 
-  # Change O (§56): wait for weights to be cached before any timed work.
+  # wait for weights to be cached before any timed work.
   ensure_model_cached "$MODEL" || {
     log "  $(date +%H:%M:%S) $P: download stall — skipping model"
     return 2
@@ -6163,8 +6162,8 @@ reset_parent_full() {
       log "  $(date +%H:%M:%S) early MTP A/B: MTP off for $P — skipping MTP tuning"
     fi
   else
-    # Change N (§55.3): check if mtpcheck wrote a stall status.
-    local MTP_SF; MTP_SF=$(mtp_status_file)   # §58.3: MODEL=$P here
+    # check if mtpcheck wrote a stall status.
+    local MTP_SF; MTP_SF=$(mtp_status_file)   # MODEL=$P here
     if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
       log "  $(date +%H:%M:%S) mtpcheck STALL for $P — skipping model (weights never served)"
       return 2
@@ -6194,7 +6193,7 @@ reset_parent_full() {
     fi
   fi
 
-  # step 4: bench. With --strict, a failed mtp tune skips bench (§6.4 part 3);
+  # step 4: bench. With --strict, a failed mtp tune skips bench;
   # the JSON would otherwise carry tuning_status:failed.
   if [ "$MTP_OK" -eq 0 ] && [ "$STRICT" -eq 1 ]; then
     log "  $(date +%H:%M:%S) bench: SKIPPED (mtp failed, --strict)"
@@ -6264,7 +6263,7 @@ run_full_suite() {
       continue
     fi
 
-    # Change O (§56): wait for weights to be cached before any timed work.
+    # wait for weights to be cached before any timed work.
     ensure_model_cached "$NAME" || {
       lshow "  $(date +%H:%M:%S) $NAME: download stall — skipping model"
       for s in mtpcheck bisect mtp bench; do
@@ -6285,11 +6284,10 @@ run_full_suite() {
       fi
     else
       IS_MTP=0
-      # Change N (§55.3): detect_mtp writes a stall status file when it aborts
+      # detect_mtp writes a stall status file when it aborts
       # on STALL. Check it to report the true reason, and skip the model entirely
-      # — a model whose weights will not load must not produce a record at all
-      # (§55.3 item 1).
-      local MTP_SF; MTP_SF=$(mtp_status_file)   # §58.3: MODEL=$NAME here
+      # — a model whose weights will not load must not produce a record at all.
+      local MTP_SF; MTP_SF=$(mtp_status_file)   # MODEL=$NAME here
       if [ -f "$MTP_SF" ] && grep -q '"stall"' "$MTP_SF" 2>/dev/null; then
         lshow "  $NAME: mtpcheck STALL — skipping model (weights never served)"
         for s in mtpcheck bisect mtp bench; do
@@ -6334,7 +6332,7 @@ run_full_suite() {
       lshow "  $(date +%H:%M:%S) finished mtp for $NAME"
     fi
 
-    # step 4: bench. With --strict, a failed mtp tune skips bench (§6.4 part 3);
+    # step 4: bench. With --strict, a failed mtp tune skips bench;
     # otherwise bench still runs and its JSON records tuning_status:failed.
     if [ "$BISECT_FAILED" -eq 1 ]; then
       lshow "  bench: SKIPPED (bisect failed — models.ini batch unreliable)"
@@ -6353,9 +6351,9 @@ run_full_suite() {
           VERDICTS["$NAME|bench"]="WARN (placement CPU at bench)"
           rm -f "/tmp/bench_placement_warn_${NAME}"
         fi
-        # §51.2: a head re-run here after a failed pre-pass is a valid fresh source
+        # a head re-run here after a failed pre-pass is a valid fresh source
         # for its siblings, which are processed later in this same loop. Mark it
-        # done so Change L's sibling guard (which requires RESET_DONE[$parent]) does
+        # done so the reset-parent sibling guard (which requires RESET_DONE[$parent]) does
         # not wrongly skip them. Siblings always carry a higher index than their
         # head (family_of returns the first matching section), so this is always set
         # before any sibling reads it.
@@ -6386,7 +6384,7 @@ run_full_suite() {
 # ── MAIN ────────────────────────────────────────────────────
 # ── Inheritance flags (global, apply to whole selection) ──
 declare -A RESET_DONE
-INHERIT_PARENT_FAILED=0     # §50.2 Change L: set by maybe_inherit when a sibling was
+INHERIT_PARENT_FAILED=0     # set by maybe_inherit when a sibling was
                             # skipped because its parent was not benched this run
 INHERIT_MODE=1
 RESET_PARENT=0
@@ -6407,7 +6405,7 @@ for arg in "$@"; do
 done
 # Env fallbacks: BENCH_THOROUGH=1 (and BENCH_DISCOVER, deprecated, is the old
 # discover selector and is now the default, so it is ignored); BENCH_REFINE sets
-# the discover refinement depth (§42 Change H) unless --refine= was given.
+# the discover refinement depth unless --refine= was given.
 if [ "${THOROUGH:-0}" -eq 0 ] && [ "${BENCH_THOROUGH:-0}" -eq 1 ]; then
   THOROUGH=1
 fi
@@ -6614,13 +6612,13 @@ if [ "$#" -eq 0 ]; then
     *)                                      THOROUGH=0; log "  Search depth: discover (fast)" ;;
   esac
 
-  # Discover refinement depth (§42 Change H): [6]4 / [c]oarse / [o]ff.
+  # Discover refinement depth: [6]4 / [c]oarse / [o]ff.
   if [ "$THOROUGH" -eq 0 ]; then
     read -r -p "Discover refinement? [6]4-token / [c]oarse / [o]ff (default 64): " REFINE_INPUT
     case "${REFINE_INPUT:-64}" in
-      [cC]|[cC][oO][aA][rR][sS][eE]) REFINE_MODE=coarse; log "  Discover refinement: coarse (Change E)" ;;
+      [cC]|[cC][oO][aA][rR][sS][eE]) REFINE_MODE=coarse; log "  Discover refinement: coarse" ;;
       [oO]|[oO][fF][fF])              REFINE_MODE=off;    log "  Discover refinement: off (ladder only)" ;;
-      *)                              REFINE_MODE=64;     log "  Discover refinement: 64-token (Change G)" ;;
+      *)                              REFINE_MODE=64;     log "  Discover refinement: 64-token" ;;
     esac
   fi
 
@@ -6656,7 +6654,7 @@ case "$CMD" in
   mtpcheck)
     for m in "$@"; do
       MODEL=$m
-      # Change O (§56): wait for weights before mtpcheck.
+      # wait for weights before mtpcheck.
       if ! ensure_model_cached "$m"; then
         echo "  $m: STALL (download failed — skipping)"; continue
       fi
