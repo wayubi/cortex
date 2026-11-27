@@ -128,7 +128,7 @@ PREFILL_NOISE=0.03        # discover refinement (§30.2b Change E): keep refinin
 DECODE_CLIFF=0.70         # discover: decode at pick below this fraction of the 256 baseline = spill cliff
 DECODE_WARN=0.90          # discover: below this: WARN only
 MTP_TIE=0.02              # MTP tuning: candidates within 2% of the best mean are a tie → smallest n_max wins (plan §44; was 0.05)
-MTP_AB_SAMPLES=2          # MTP A/B (md/plan-mtp-ab-decision.md): max valid decode samples per side
+MTP_AB_SAMPLES=2          # MTP A/B (tracker/plans/resolved/plan-000009-mtp-ab-decision.md): max valid decode samples per side
 MTP_AB_CLEAR=0.05         # MTP A/B: a first-round on/off gap beyond this (above the ~2–4% spread of one
                           # sample) decides at once; a closer result takes a second round
 MTP_AB_TIE=0.02           # MTP A/B: MTP kept only if its mean beats MTP-off by MORE than this fraction;
@@ -583,7 +583,7 @@ except Exception:
 ts = (d.get('mtp') or {}).get('tuning_status')
 print(ts if ts else 'unknown')
 ")
-  # MTP A/B (md/plan-mtp-ab-decision.md): a parent that measured MTP slower than
+  # MTP A/B (tracker/plans/resolved/plan-000009-mtp-ab-decision.md): a parent that measured MTP slower than
   # MTP off has no spec-* keys; the child shares its weights and ctx, so it must
   # drop any spec-* it still carries from an earlier run.
   local PARENT_AB
@@ -2719,7 +2719,7 @@ out = {
     "samples": samples,
     "ab": None,
 }
-# MTP A/B (md/plan-mtp-ab-decision.md): decision + both means + raw samples.
+# MTP A/B (tracker/plans/resolved/plan-000009-mtp-ab-decision.md): decision + both means + raw samples.
 def fnum(x):
     try: return float(x)
     except (TypeError, ValueError): return None
@@ -3951,7 +3951,7 @@ print(rank[0] if rank else '')
   log "=== DONE ==="
 }
 
-# ── MTP A/B: keep MTP only where it measures faster (md/plan-mtp-ab-decision.md) ──
+# ── MTP A/B: keep MTP only where it measures faster (tracker/plans/resolved/plan-000009-mtp-ab-decision.md) ──
 # Supporting MTP is not the same as gaining from it. On a CPU-resident MoE the
 # target's verify pass routes each drafted token to its own experts, so a step
 # reads several times the expert weights over the RAM bus and costs more than
@@ -6022,7 +6022,7 @@ _mtp_tuning = {
     'placement_baseline': status.get('placement_baseline') if status else None,
     'tuning_samples': status.get('samples') if status and status.get('samples') is not None else [],
     'tuning_written_at': status.get('written_at') if status else None,
-    # MTP A/B (md/plan-mtp-ab-decision.md): decode with the tuned MTP config vs
+    # MTP A/B (tracker/plans/resolved/plan-000009-mtp-ab-decision.md): decode with the tuned MTP config vs
     # MTP off on this same entry; decision off means spec-* were removed.
     'ab': status.get('ab') if status else None,
 }

@@ -447,7 +447,7 @@ Each needs its own decision; listed so they are not lost.
   prompt-cache activity shows in the logs. Check whether it engages with `parallel = 1`, and try a
   larger value. Separately, `parallel = N` on a dedicated entry gives real concurrency (llama.cpp
   splits `ctx-size` across the slots; needs re-tuning and a bench).
-- **Pinning model files in RAM: rejected** (the user, 2026-11-26; also `md/plan-model-load-speed.md`).
+- **Pinning model files in RAM: rejected** (the user, 2026-11-26; also `tracker/plans/resolved/plan-000010-model-load-speed.md`).
   Model files would exhaust host RAM. Warm loads are already 3.5–12.5 s from the page cache.
 - **A CPU-only resident router** for one role (no swaps at all). CPU prefill would be far slower,
   and it would compete with CPU-placed models for cores. Unmeasured; a separate plan.

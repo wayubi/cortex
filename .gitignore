@@ -22,3 +22,6 @@ openresty/local.d/
 
 # Local SSH credentials for agent containers
 .ssh/
+
+# Session states and handoffs: often hold private details
+docs/sessions/

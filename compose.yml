@@ -30,7 +30,7 @@ services:
       - ./llama-cpp/models.ini:/models.ini
       # NVMe copies of the models loaded most (model-cache); same path everywhere
       - /opt/cortex-models:/opt/cortex-models:ro
-      # slot-cache pruner, then llama-server (md/plan-slot-cache-across-swaps.md)
+      # slot-cache pruner, then llama-server (tracker/plans/resolved/plan-000013-slot-cache-across-swaps.md)
       - ./llama-cpp/slot-cache-entrypoint.sh:/usr/local/bin/slot-cache-entrypoint.sh:ro
     # Saved slots (KV cache + context checkpoints) of unloaded models, RAM only,
     # capped; emptied on every container start. Model weights never go here.
@@ -90,7 +90,7 @@ services:
       - llama-cpp_data:/root/.cache/huggingface
       - ./prism-llama-cpp/models.ini:/models.ini
       - /opt/cortex-models:/opt/cortex-models:ro
-      # slot-cache pruner, then llama-server (md/plan-slot-cache-across-swaps.md)
+      # slot-cache pruner, then llama-server (tracker/plans/resolved/plan-000013-slot-cache-across-swaps.md)
       - ./llama-cpp/slot-cache-entrypoint.sh:/usr/local/bin/slot-cache-entrypoint.sh:ro
     # Saved slots (KV cache + context checkpoints) of unloaded models, RAM only,
     # capped; emptied on every container start. Model weights never go here.
@@ -150,7 +150,7 @@ services:
       - llama-cpp_data:/root/.cache/huggingface
       - ./raon-llama-cpp/models.ini:/models.ini
       - /opt/cortex-models:/opt/cortex-models:ro
-      # slot-cache pruner, then llama-server (md/plan-slot-cache-across-swaps.md)
+      # slot-cache pruner, then llama-server (tracker/plans/resolved/plan-000013-slot-cache-across-swaps.md)
       - ./llama-cpp/slot-cache-entrypoint.sh:/usr/local/bin/slot-cache-entrypoint.sh:ro
     # Saved slots (KV cache + context checkpoints) of unloaded models, RAM only,
     # capped; emptied on every container start. Model weights never go here.
@@ -214,7 +214,7 @@ services:
       - llama-cpp_data:/root/.cache/huggingface
       - ./inkling-llama-cpp/models.ini:/models.ini
       - /opt/cortex-models:/opt/cortex-models:ro
-      # slot-cache pruner, then llama-server (md/plan-slot-cache-across-swaps.md)
+      # slot-cache pruner, then llama-server (tracker/plans/resolved/plan-000013-slot-cache-across-swaps.md)
       - ./llama-cpp/slot-cache-entrypoint.sh:/usr/local/bin/slot-cache-entrypoint.sh:ro
     # Saved slots (KV cache + context checkpoints) of unloaded models, RAM only,
     # capped; emptied on every container start. Model weights never go here.

@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-22
 **Status:** Research note (2026-11-22). Update 2026-11-26: the `llama-cpp` router was moved from
-`b10622` to `b12785`; see `md/llama-cpp-b12785-quick-ab.md` for the quick A/B, smoke test and
+`b10622` to `b12785`; see `docs/reference/llama-cpp-b12785-quick-ab.md` for the quick A/B, smoke test and
 which other routers the new build can replace. The rest of this note is as written on 2026-11-22.
 **Audience:** a future agent or maintainer picking this up.
 
@@ -13,7 +13,7 @@ need to know. Potential improvements are estimates and are labelled as such; the
 are not measurements on this hardware.
 
 It intentionally contains no personal names, client/project identifiers, hostnames
-or filesystem paths, because `md/` is committed to a public repository.
+or filesystem paths, because `docs/` is committed to a public repository.
 
 ---
 

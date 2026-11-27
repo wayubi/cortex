@@ -57,7 +57,7 @@ the same config; prefill on a short prompt can vary more. Treat changes under ~1
 ## Why it got faster: candidate causes (not verified)
 
 Nothing here was profiled; these are upstream changes merged between the two builds (from
-`md/llama-cpp-tuning-and-version-gap.md` §4) that match the pattern, not established causes.
+`docs/reference/llama-cpp-tuning-and-version-gap.md` §4) that match the pattern, not established causes.
 
 - **MoE models, prefill (qwen-3.6-35B family, groot):** CUDA MoE matrix-multiply data-layout work
   (#31047) and backend-scheduler reuse / skipping unused inputs (#32009, #31419). The largest gains

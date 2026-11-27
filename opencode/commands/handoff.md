@@ -6,7 +6,7 @@ Write or update a handoff document for the work in this session, so that a new s
 
 Where:
 - If a handoff document for this topic already exists, update it in place; do not start a second one. Search the project's planning and docs folders for it.
-- Otherwise put it where the project keeps planning documents (look for an existing folder such as `md/`, `docs/`, `plans/` or `notes/`), named `handoff-<topic>.md`. If the project has no such folder, ask the user where it should go.
+- Otherwise put it in the project's `docs/sessions/` folder if it has one, named `YYYY-MM-DD-handoff-<topic>.md`; else where the project keeps planning documents (an existing folder such as `docs/`, `plans/` or `notes/`), named `handoff-<topic>.md`. If the project has no such folder, ask the user where it should go.
 
 Contents, in this order:
 1. **Title, Started, Last updated (today's date), Status:** one line on where the work stands, and anything the user asked you not to do yet.

@@ -216,7 +216,7 @@ The consolidated table lives in `full-metrics.md`:
 ./tools/gen_metrics.sh    # regenerates full-metrics.md from both backends' models/*.json
 ```
 
-Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The design history and rationale behind the current pipeline: see `md/plan-bench-discover-mode.md`.
+Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The design history and rationale behind the current pipeline: see `tracker/plans/resolved/plan-000006-bench-discover-mode.md`.
 
 ## File layout
 
@@ -226,7 +226,6 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 ├── LICENSE
 ├── compose.yml               # Docker Compose — openresty, ollama, llama.cpp routers, nllb, pi, opencode
 ├── compose.override.yml      # local volume mounts (model caches, models.ini)
-├── CPU_POLLING.md            # CPU/GPU placement verification methodology
 ├── full-metrics.md           # benchmark table for all models (regenerate via tools/gen_metrics.sh)
 ├── logs/                     # bench.sh run logs, one per invocation
 ├── tools/
@@ -273,11 +272,11 @@ Full methodology, gotchas and stress-test procedures: see `AGENTS.md`. The desig
 │       ├── install-opencode.sh
 │       ├── generate-models-pi.sh
 │       └── generate-models-opencode.sh
-└── md/                       # planning and design docs (each states its status at the top)
-    ├── plan-bench-discover-mode.md   # current benchmarking pipeline: design, reviews, decisions
-    ├── plan-mtp-ab-decision.md       # MTP on/off A/B
-    ├── nllb-translation-service.md   # NLLB service usage
-    └── plan-*.md                     # earlier plans, kept as history
+├── docs/
+│   ├── reference/            # design and findings (CPU_POLLING.md: CPU/GPU placement methodology)
+│   └── sessions/             # session states and handoffs (git-ignored)
+└── tracker/                  # plans, issues and work orders: {open,resolved,closed}/ each
+    └── plans/resolved/plan-000006-bench-discover-mode.md   # current benchmarking pipeline: design, reviews, decisions
 ```
 
 ## Debugging
