@@ -24,4 +24,19 @@ if [ "${OPENCODE_SYNC_MODELS:-1}" = "1" ]; then
     fi
 fi
 
+# Start OpenCode's background server (opencode serve --service) at container start, so
+# `opencode pair` and browser/app clients can connect without a TUI having started it.
+# Its settings (hostname, port, password, the --remote relay route) are in
+# /root/.config/opencode/service.json; `opencode service set` changes them.
+# OPENCODE_HOSTNAME, if set, is written there first: 0.0.0.0 makes the server reachable
+# through a published port (the default, 127.0.0.1, serves only this container).
+# A failure here is logged and does not stop the container.
+if [ -n "${OPENCODE_HOSTNAME:-}" ]; then
+    opencode service set hostname "$OPENCODE_HOSTNAME" >/dev/null \
+        || echo "opencode-entrypoint: could not set hostname $OPENCODE_HOSTNAME" >&2
+fi
+if [ "${OPENCODE_SERVICE:-0}" = "1" ]; then
+    opencode service start || echo "opencode-entrypoint: background server did not start" >&2
+fi
+
 exec "$@"

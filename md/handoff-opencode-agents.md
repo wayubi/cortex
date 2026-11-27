@@ -91,6 +91,10 @@ after running project code and report any change a command made.
   (qwen-35B 38-64 s). Copies are evicted by a **use score** (each load in the last 7 days counts
   `0.5 ** (age / 24 h)`), so a one-off load cannot push out a model in daily use and a model no
   longer used fades out within days.
+- **Background server:** starts with the opencode container (`OPENCODE_SERVICE=1`); direct
+  access with `OPENCODE_HOSTNAME=0.0.0.0` plus a published port 49374/tcp, or the relay with
+  `opencode pair --remote` (AGENTS.md, "Client agents"). A recreate starts with no session
+  history: `/root/.local/share/opencode` (the session database) is not a volume.
 - **Measured loads (warm):** groot ~4-7 s, mellum 2-3 s, qwen-35B 128k 8 s (NVMe), gemma vision
   ~5 s.
 
@@ -541,3 +545,6 @@ OpenCode.
   agents told to avoid `>`, `<`, backticks and `$(` in command text. Not committed yet.
 - **2026-11-26** — permissions simplified for all subagents (see Permissions); the workaround text
   about refused characters and redirects removed from the instructions. Not committed yet.
+- **2026-11-27** — the opencode container starts OpenCode's background server
+  (`OPENCODE_SERVICE=1`); `OPENCODE_HOSTNAME` sets the address it listens on; direct access and the
+  relay documented in AGENTS.md.

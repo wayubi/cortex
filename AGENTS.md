@@ -95,6 +95,19 @@ container start; their config volumes are `pi_data:/root/.pi/agent` and
 - **Entrypoints** retry the model sync (`PI_SYNC_MODELS=1`,
   `OPENCODE_SYNC_MODELS=1`, 10 tries, 3s apart) before `exec`ing the container
   command.
+- **OpenCode's background server** (`opencode serve --service`, port 49374) starts with the
+  container (`OPENCODE_SERVICE=1` in compose.yml; `opencode/entrypoint.sh` runs `opencode service
+  start`), so `opencode pair` and browser or app clients can connect without a TUI open. Its
+  settings live in the config volume's `service.json` (`opencode service get|set`); the runtime
+  record in `/root/.local/state/opencode/service.json` is rewritten at every start. It listens on
+  127.0.0.1 by default, reachable only inside the container. **Direct access:** set
+  `OPENCODE_HOSTNAME=0.0.0.0` (the entrypoint writes it to `service.json` before the start) and
+  publish 49374/tcp, both in `compose.override.yml`, then `opencode pair --url
+  http://<host>:49374`. That is plain HTTP guarded only by the server password: keep it on a LAN or
+  VPN, or put HTTPS in front before forwarding it to the internet (Docker's published ports bypass
+  host firewalls such as ufw). `opencode pair --remote` uses OpenCode's OpenTunnel relay instead;
+  it stores a route in `service.json` (`opencode service unset remote` removes it). Session history
+  (`/root/.local/share/opencode`) is not a volume, so a recreate starts with none.
 - The openresty scripts are a directory mount, so the first deploy needs
   `docker compose up -d openresty` (recreate); later edits are seen without a
   restart. Create the new clients with `docker compose up -d pi opencode`.
