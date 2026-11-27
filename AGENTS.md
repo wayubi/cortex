@@ -45,7 +45,7 @@ container start; their config volumes are `pi_data:/root/.pi/agent` and
   volume. Edit them here or from inside OpenCode (its edits land in this working tree; review them with
   git); the container sees changes at once (directory mounts), and a running
   OpenCode session may need a restart to reload them. Design, evidence and open items:
-  `md/handoff-opencode-agents.md`. They are OpenCode-specific: Pi has no built-in agents or
+  `md/opencode-agents.md`. They are OpenCode-specific: Pi has no built-in agents or
   subagents, and its prompt templates lack OpenCode's `agent:` / `subagent:` fields. Machine-specific
   skills (e.g. a browser skill) stay in the config volume, not here.
 
