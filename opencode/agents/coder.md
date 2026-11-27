@@ -9,13 +9,10 @@ permissions:
   - action: subagent
     resource: "*"
     effect: deny
-  - action: webfetch
-    resource: "*"
-    effect: deny
-  - action: external_directory
-    resource: "*"
-    effect: deny
   - action: question
+    resource: "*"
+    effect: deny
+  - action: doom_loop
     resource: "*"
     effect: deny
 ---

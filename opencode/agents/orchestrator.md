@@ -59,7 +59,7 @@ Scripts that mark themselves as bots (`X-Cortex-Client: bot`) are held for up to
       - the paths of the governing documents from step 1;
       - the changed files or the diff;
       - when the work changes data (labels, records, values checked against a rule or contract): the paths of the data and of the source each changed item comes from, so the advisor can check every item against the rule itself;
-      - the output of the commands you ran in step 6 (it cannot run them);
+      - the full output of the commands you ran in step 6, and of every script, scorer or test the governing documents name for this work (the advisor cannot run them; without that output it can only answer "can't verify");
       - your list of requirements, each with what you claim was done.
 
       Its first line is its verdict. Until it is `PASS`, fix every finding (by batch or yourself) and supply anything it could not verify (run the commands it names, following "Commands that use the inference engine" if they call cortex, and send the output), re-verify as in step 6, and call the advisor again with what changed and the new command output. A finding is resolved by fixing it or by showing, with evidence, that it is wrong. At most three advisor rounds; if it has still not passed, do not call the reviewer: report to the user with the open findings.

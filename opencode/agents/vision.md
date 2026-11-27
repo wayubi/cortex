@@ -12,10 +12,7 @@ permissions:
   - action: subagent
     resource: "*"
     effect: deny
-  - action: webfetch
-    resource: "*"
-    effect: deny
-  - action: question
+  - action: doom_loop
     resource: "*"
     effect: deny
 ---

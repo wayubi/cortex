@@ -1,7 +1,7 @@
 # Handoff: OpenCode agents, commands and skills
 
 **Started:** 2026-11-26
-**Last updated:** 2026-11-26
+**Last updated:** 2026-11-26 (late)
 **Status:** In testing. First finding (2026-11-26): calling advisor and reviewer together was
 slow; changed to advisor until `PASS`, then reviewer. The cortex side changed the same day (new
 llama.cpp builds, the slot cache, NVMe-cache eviction): see "Infrastructure the agents run on".
@@ -57,23 +57,21 @@ container: **v2.2.5**.
 
 ### Permissions (what each subagent can do)
 
-| Agent | Read/search files | Edit/write | Shell | Other denied |
-|---|---|---|---|---|
-| coder | yes | yes | none | subagent, webfetch, external_directory, question |
-| scout | yes | no | read-only git: status, log, show, ls-files, grep | subagent, webfetch, question |
-| vision | yes | no | none | subagent, webfetch, question |
-| advisor | yes | no | read-only git: status, diff, log, show, ls-files, blame | subagent |
-| reviewer | yes | no | read-only git: status, diff, log, show, blame, merge-base, ls-files | subagent |
-| orchestrator | OpenCode defaults (no permissions block) | | | |
+Simplified 2026-11-26: the earlier pattern lists (read-only git allow-lists, `git -C` variants,
+anchored deny lists, special-character denies) kept blocking the agents' real work, so they were
+replaced by short rules. Safety rests on the instructions ("change nothing") plus git, which shows
+any change.
 
-Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(` and `--output`
-(`git diff --output=FILE` writes a file), so the allowed git commands stay read-only. The same
-read-only commands are allowed as `git -C <folder> <cmd>` (a project's repository can sit in a
-subfolder of the session directory). Because `*` matches spaces, `git -C * status*` would also match
-`git -C x commit -m 'fix status'`, so git's write subcommands (`commit`, `push`, `reset`,
-`checkout`, `add `, `rm `, `config`, `-c `, …) are denied anywhere in the line after the allows (last
-rule wins). Checked by simulating the rules with glob matching (OpenCode's own matcher not tested);
-a read command whose path or pattern contains one of those words is refused too.
+| Agent | Edit tool | Shell | Other denied |
+|---|---|---|---|
+| advisor, reviewer, scout | no | **allowed**, except `rm`, `git push`, `git reset --hard`, `git clean`, `sudo`, `docker` | subagent; repeated failing calls (`doom_loop`) |
+| coder | yes | none (it edits to a brief; the orchestrator runs the checks) | subagent, question (would block a batch), `doom_loop` |
+| vision | no | none | subagent, `doom_loop` |
+| orchestrator | OpenCode defaults (no rules) | | |
+
+OpenCode checks each part of a chained command (`a && b`, `a | b`, `a; b`) on its own, and the last
+matching rule wins. The advisor and reviewer record `git -C <repo> status --porcelain` before and
+after running project code and report any change a command made.
 
 ## Infrastructure the agents run on (cortex, as of 2026-11-26)
 
@@ -156,6 +154,19 @@ a read command whose path or pattern contains one of those words is refused too.
   any file change (code, data, documents) from a brief, and groot does a quick check of the coders'
   work (fixing small gaps itself) instead of a second full review. Start orchestrated work in a
   fresh session rather than switching agents mid-way.
+- **Advisor and reviewer may run checks (option A, 2026-11-26).** Read-only, the advisor answered
+  "can't verify" for every criterion that needs a script's or test's output, the claims an
+  independent check matters most for, and contradicted its own rule never to accept "tests pass" on
+  the caller's word. It now runs them itself, without changing anything (see Permissions); the
+  orchestrator still sends its own output, and a difference between the two runs is a finding.
+- **Refused commands and model-independent file access** (2026-11-26). With every route to a
+  git-ignored folder closed (relative paths, search skipping ignored folders, `ls`/`find` refused,
+  `git ls-files` outside the repository), qwen reported the files missing; later nail, given absolute
+  paths, kept trying to *run* scripts and repeated one refused command ~60 times. Fixed so it does
+  not depend on the model: read-only file commands allowed (they see ignored folders), "a refused
+  command will be refused again: never retry it" in advisor, reviewer and scout, `doom_loop: deny`
+  on all subagents as a backstop (exact trigger unverified), and the orchestrator sends the full
+  output of every script, scorer or test the documents name.
 - **Search is not proof of absence** (2026-11-26). An advisor declared a tracked file "does not
   exist": the project's `.gitignore` ignores the folder (its files were force-added), OpenCode's file
   search honours `.gitignore`, and the repository sat in a subfolder, so `git ls-files` (allowed only
@@ -283,6 +294,16 @@ a read command whose path or pattern contains one of those words is refused too.
 - The OpenCode v2 shell tool's maximum timeout (the orchestrator's foreground-wait rule depends on
   it; each re-issued wait call is one short request to the orchestrator's model, i.e. a swap under a
   running cortex job).
+- Whether `doom_loop: deny` stops a subagent that repeats a failing call, and after how many.
+- Whether OpenCode's permission matcher treats `*` as the simulation did (glob matching, `*` across
+  spaces): the first advisor `git -C <folder> ls-files …` should run, and a `git -C … commit` be
+  refused. If the matcher differs, the `git -C` allows or the write-subcommand denies may not apply
+  as intended.
+- Whether the orchestrator now fans out independent fixes to coders (look for `switch:` lines to
+  mellum during a multi-fix round), and gives subagents absolute paths (advisor sessions should no
+  longer open with `File not found` reads). Read-only check: copy
+  `/root/.local/share/opencode/opencode.db*` out of the container and inspect `session_v2`
+  (subagent sessions by `agent`) and `session_message` (tool calls and their status).
 
 ## Next steps (end of 2026-11-26)
 
@@ -290,9 +311,11 @@ In order of what unblocks the most:
 
 1. **Recreate the `opencode` container** (`docker compose up -d opencode`) when convenient, so it
    reads the tracked agents and commands in `opencode/` instead of the older `.local/` copies.
-2. **Test the agents in real OpenCode sessions** and settle the "Unverified" list: batched subagent
-   calls (one `switch:` to mellum per batch), images reaching `vision`, mellum's tool calls inside
-   OpenCode, the shell tool's maximum timeout. Record each result here.
+2. **Test the agents in real OpenCode sessions** (start a fresh session as `orchestrator`; do not
+   switch an existing `build` session) and settle the "Unverified" list: fan-out to coders, batched
+   subagent calls (one `switch:` to mellum per batch), absolute paths, `git -C` in the advisor,
+   images reaching `vision`, mellum's tool calls inside OpenCode, the shell tool's maximum timeout.
+   Record each result here.
 3. **Bench the checkers' model first:** `qwen-3.6-35b-a3b-q4-mtp-128k-*` (untuned, `batch 4096`), then
    the models the b12785 quick A/B flagged (qwen-3.6-35B family, groot, gemma-4-12B); then raon on
    b12785, which decides whether the raon router can go.
@@ -506,3 +529,15 @@ OpenCode.
 - **2026-11-26** — `advisor.md`, `scout.md`, `reviewer.md`: a failed search is not proof of absence
   (search skips git-ignored folders), `git -C <folder>` read-only commands allowed, git write
   subcommands denied anywhere in the line; `coder.md`: a file not found is reported, not created.
+- **2026-11-26** — handoff: permissions table shows `git -C` and the write-subcommand denies;
+  unverified items for the permission matcher, fan-out and absolute paths (with how to check from the
+  session database); next step 2 asks for a fresh orchestrator session.
+- **2026-11-26** — advisor, reviewer, scout: read-only file commands allowed, never retry a refused
+  command, `doom_loop: deny` (also coder, vision); orchestrator sends the full output of every named
+  script; advisor and reviewer switched to nail-qwen 128k-think-coder. Not committed yet.
+- **2026-11-26** — advisor and reviewer may run checks (option A) with file-changing commands denied
+  (anchored); git-write denies scoped to git in advisor, reviewer and scout. Not committed yet.
+- **2026-11-26** — removed the `;` `&` `|` deny patterns (they refused `python3 -c "import json;…"`);
+  agents told to avoid `>`, `<`, backticks and `$(` in command text. Not committed yet.
+- **2026-11-26** — permissions simplified for all subagents (see Permissions); the workaround text
+  about refused characters and redirects removed from the instructions. Not committed yet.
