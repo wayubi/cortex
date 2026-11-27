@@ -67,7 +67,13 @@ container: **v2.2.5**.
 | orchestrator | OpenCode defaults (no permissions block) | | | |
 
 Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(` and `--output`
-(`git diff --output=FILE` writes a file), so the allowed git commands stay read-only.
+(`git diff --output=FILE` writes a file), so the allowed git commands stay read-only. The same
+read-only commands are allowed as `git -C <folder> <cmd>` (a project's repository can sit in a
+subfolder of the session directory). Because `*` matches spaces, `git -C * status*` would also match
+`git -C x commit -m 'fix status'`, so git's write subcommands (`commit`, `push`, `reset`,
+`checkout`, `add `, `rm `, `config`, `-c `, …) are denied anywhere in the line after the allows (last
+rule wins). Checked by simulating the rules with glob matching (OpenCode's own matcher not tested);
+a read command whose path or pattern contains one of those words is refused too.
 
 ## Infrastructure the agents run on (cortex, as of 2026-11-26)
 
@@ -150,6 +156,13 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
   any file change (code, data, documents) from a brief, and groot does a quick check of the coders'
   work (fixing small gaps itself) instead of a second full review. Start orchestrated work in a
   fresh session rather than switching agents mid-way.
+- **Search is not proof of absence** (2026-11-26). An advisor declared a tracked file "does not
+  exist": the project's `.gitignore` ignores the folder (its files were force-added), OpenCode's file
+  search honours `.gitignore`, and the repository sat in a subfolder, so `git ls-files` (allowed only
+  at the start of the command line) could not reach it. Now: absolute paths from the orchestrator;
+  advisor, scout and reviewer report "can't verify: not found at the given path, and search skips
+  ignored folders" and ask for the absolute path, never "does not exist"; `git -C <folder>` read
+  commands allowed.
 - **Absolute paths to subagents** (2026-11-26). Every advisor run opened with 3-6 `File not found`
   reads: groot had `cd`'d into a subfolder of the session's directory and wrote paths relative to
   it, while subagents start in the session's directory. The orchestrator now gives absolute paths in
@@ -490,3 +503,6 @@ OpenCode.
   code, data or document changes. Both copies.
 - **2026-11-26** — absolute paths in every subagent prompt (`orchestrator.md`); path-not-found fallback in
   `advisor.md`, `scout.md`, `reviewer.md`, `coder.md`. Both copies.
+- **2026-11-26** — `advisor.md`, `scout.md`, `reviewer.md`: a failed search is not proof of absence
+  (search skips git-ignored folders), `git -C <folder>` read-only commands allowed, git write
+  subcommands denied anywhere in the line; `coder.md`: a file not found is reported, not created.

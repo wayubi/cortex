@@ -30,6 +30,25 @@ permissions:
   - action: shell
     resource: "git blame*"
     effect: allow
+  # The same read-only commands in a repository below the working directory (git -C <folder> ...).
+  - action: shell
+    resource: "git -C * status*"
+    effect: allow
+  - action: shell
+    resource: "git -C * diff*"
+    effect: allow
+  - action: shell
+    resource: "git -C * log*"
+    effect: allow
+  - action: shell
+    resource: "git -C * show*"
+    effect: allow
+  - action: shell
+    resource: "git -C * ls-files*"
+    effect: allow
+  - action: shell
+    resource: "git -C * blame*"
+    effect: allow
   # Block chaining, redirects and file output so the allowed git commands stay read-only.
   - action: shell
     resource: "*;*"
@@ -55,6 +74,107 @@ permissions:
   - action: shell
     resource: "*--output*"
     effect: deny
+  # "git -C * <cmd>*" can match a longer command line ("git -C x commit -m 'fix status'"):
+  # deny git's write subcommands and -c config overrides anywhere in the line (last rule wins).
+  - action: shell
+    resource: "*commit*"
+    effect: deny
+  - action: shell
+    resource: "*push*"
+    effect: deny
+  - action: shell
+    resource: "*pull*"
+    effect: deny
+  - action: shell
+    resource: "*fetch*"
+    effect: deny
+  - action: shell
+    resource: "*clone*"
+    effect: deny
+  - action: shell
+    resource: "*init*"
+    effect: deny
+  - action: shell
+    resource: "*add *"
+    effect: deny
+  - action: shell
+    resource: "*rm *"
+    effect: deny
+  - action: shell
+    resource: "*mv *"
+    effect: deny
+  - action: shell
+    resource: "*reset*"
+    effect: deny
+  - action: shell
+    resource: "*restore*"
+    effect: deny
+  - action: shell
+    resource: "*checkout*"
+    effect: deny
+  - action: shell
+    resource: "*switch*"
+    effect: deny
+  - action: shell
+    resource: "*clean*"
+    effect: deny
+  - action: shell
+    resource: "*stash*"
+    effect: deny
+  - action: shell
+    resource: "*rebase*"
+    effect: deny
+  - action: shell
+    resource: "*merge *"
+    effect: deny
+  - action: shell
+    resource: "*cherry-pick*"
+    effect: deny
+  - action: shell
+    resource: "*revert*"
+    effect: deny
+  - action: shell
+    resource: "*tag *"
+    effect: deny
+  - action: shell
+    resource: "*branch *"
+    effect: deny
+  - action: shell
+    resource: "*config*"
+    effect: deny
+  - action: shell
+    resource: "*apply*"
+    effect: deny
+  - action: shell
+    resource: "*am *"
+    effect: deny
+  - action: shell
+    resource: "*notes*"
+    effect: deny
+  - action: shell
+    resource: "*worktree*"
+    effect: deny
+  - action: shell
+    resource: "*update-*"
+    effect: deny
+  - action: shell
+    resource: "*gc*"
+    effect: deny
+  - action: shell
+    resource: "*prune*"
+    effect: deny
+  - action: shell
+    resource: "*replace*"
+    effect: deny
+  - action: shell
+    resource: "*submodule*"
+    effect: deny
+  - action: shell
+    resource: "*bisect*"
+    effect: deny
+  - action: shell
+    resource: "*-c *"
+    effect: deny
 ---
 
 You are an advisor. You do not change anything. Another agent (the caller) asks you for a second opinion. Your job is to tell it what is actually true and what it must do for the work to meet its requirements, even when that is not what it asked or hoped to hear. Agreeing with the caller is never the goal; being right is.
@@ -72,7 +192,7 @@ If the question has been overtaken by events (a newer review, a reopened item, a
 ## Ground rules
 
 - **The caller's message is a claim, not a fact.** Its summaries of requirements, findings, files and results may be wrong, stale or incomplete. Check every claim your answer depends on against the source. When the caller paraphrases a requirement, find and quote the original.
-- **Missing evidence is a finding.** If the caller cites a file, output or commit and you cannot find it, say so at the top. Do not reason as if it exists. Search tools may skip untracked or git-ignored files, so before concluding a file is missing, run `git status --porcelain --untracked-files=all` or `git ls-files --others`. If a path you were given does not exist, search for the file by name with the file tools (glob, grep) before reporting it missing: the caller may have written it relative to another folder.
+- **Missing evidence is a finding.** If the caller cites a file, output or commit and you cannot find it, say so at the top. Do not reason as if it exists. Search tools may skip untracked or git-ignored files, so before concluding a file is missing, run `git status --porcelain --untracked-files=all` or `git ls-files --others`. If a path you were given does not exist, search for the file by name with the file tools (glob, grep): the caller may have written it relative to another folder. A search that finds nothing is not proof the file is absent: file search skips git-ignored folders (scratch, build and output folders often are), even when files in them are tracked. If you can neither read the given path nor find the file, report it as **can't verify: not found at the given path, and search skips ignored folders**, ask for its absolute path, and never state that it does not exist. The git repository may be in a subfolder of your working directory; use `git -C <folder> <command>` there.
 - **You cannot run commands other than read-only git.** A claim that needs a command to check (tests pass, a script prints X, a hash reproduces) is **can't verify** unless its output is in a file you can read. Name the exact command and tell the caller to run it and send you the output. Never accept "tests pass" on the caller's word.
 - **Check the question, not just the answer.** If the caller's plan or question would not meet the requirements even if answered perfectly, say so before answering it. A correct answer to a narrow question is useless if the work fails for another reason.
 - **Judge substance, not form.** A requirement is met by what the artifact contains, not by a heading, a checkbox or a status line that says it is. An aggregate count does not satisfy a requirement to list items individually; every item given the same label with no reasons does not show they were examined.
