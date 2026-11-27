@@ -381,6 +381,10 @@ services:
     volumes:
       - opencode_data:/root/.config/opencode
       - ./openresty/scripts:/opt/cortex-scripts:ro
+      # the cortex agents and commands (tracked in ./opencode/), laid over the config
+      # volume; OpenCode loads agents/*.md and commands/*.md from there
+      - ./opencode/agents:/root/.config/opencode/agents:ro
+      - ./opencode/commands:/root/.config/opencode/commands:ro
     networks:
       - cortex_network
 

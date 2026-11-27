@@ -40,6 +40,14 @@ Both client services live on `cortex_network` and have their model lists generat
 container start; their config volumes are `pi_data:/root/.pi/agent` and
 `opencode_data:/root/.config/opencode`.
 
+- **OpenCode agents and commands** are tracked in `opencode/agents/` and `opencode/commands/` and
+  bind-mounted read-only over `/root/.config/opencode/agents` and `/commands`, on top of the config
+  volume. Edit them here; the container sees changes at once (directory mounts), and a running
+  OpenCode session may need a restart to reload them. Design, evidence and open items:
+  `md/handoff-opencode-agents.md`. They are OpenCode-specific: Pi has no built-in agents or
+  subagents, and its prompt templates lack OpenCode's `agent:` / `subagent:` fields. Machine-specific
+  skills (e.g. a browser skill) stay in the config volume, not here.
+
 - **Shared scripts** are in `openresty/scripts/`, bind-mounted read-only at
   `/etc/nginx/scripts` (served on every port for `curl URL | sh`) and
   `/opt/cortex-scripts` (used by the entrypoints). `agent-common.sh` holds package /
@@ -142,7 +150,9 @@ container start; their config volumes are `pi_data:/root/.pi/agent` and
 │   └── entrypoint.sh      # auto-sync Pi models.json at start
 ├── opencode/
 │   ├── Dockerfile
-│   └── entrypoint.sh      # auto-sync OpenCode opencode.json at start
+│   ├── entrypoint.sh      # auto-sync OpenCode opencode.json at start
+│   ├── agents/            # OpenCode agents: orchestrator (primary), coder, scout, vision, advisor, reviewer
+│   └── commands/          # OpenCode commands: /orchestrate, /review, /verify, /handoff
 ├── md/                     # internal planning docs
 └── openresty/
     ├── Dockerfile           # FROM openresty/openresty:bookworm-fat, sed patches error_log

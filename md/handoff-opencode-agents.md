@@ -30,24 +30,29 @@ the open items whenever any of these files change.
 
 ## Where things are
 
-Global OpenCode config in `.local/opencode_data/`, which is machine-local and **not in this
-repository** (`.local/` is gitignored), mounted into the `opencode` container at
-`/root/.config/opencode`. OpenCode version in the container: **v2.2.5**.
+The agents and commands are **tracked in this repository** under `opencode/agents/` and
+`opencode/commands/` (moved 2026-11-26), and `compose.yml` bind-mounts them read-only over
+`/root/.config/opencode/agents` and `/commands` in the `opencode` container. The rest of the global
+config (`opencode.json`, the machine-specific `chrome-web` skill) stays in the machine-local config
+volume (`.local/opencode_data/`, gitignored), mounted at `/root/.config/opencode`. Until the
+`opencode` container is next recreated it still reads the older copies in `.local/opencode_data/`
+(identical at the time of the move); edit only the tracked copies. OpenCode version in the
+container: **v2.2.5**.
 
 | File | Kind | Model | What |
 |---|---|---|---|
-| `agents/orchestrator.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | plans, batches subagents, verifies, then advisor until PASS, then reviewer |
-| `agents/coder.md` | subagent | mellum-2.1-12b-a2.5b-q4-128k-think | writes code from a brief; only the named files |
-| `agents/scout.md` | subagent | mellum (same entry as coder) | read-only search, answers with `path:line` evidence |
-| `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
-| `agents/advisor.md` | subagent | qwen-3.6-35b-a3b-q4-mtp-128k-think-coder | checks work/plans against source documents |
-| `agents/reviewer.md` | subagent | qwen (same entry as advisor) | reviews the code changes for defects |
-| `commands/orchestrate.md` | `/orchestrate <task>` | — | runs the task as `orchestrator` |
-| `commands/review.md` | `/review [focus]` | — | `reviewer` as a subagent on uncommitted changes (else branch vs base) |
-| `commands/verify.md` | `/verify [doc paths / focus]` | — | `advisor` as a subagent against the source documents |
-| `commands/handoff.md` | `/handoff [topic or path]` | — | current agent writes/updates `handoff-<topic>.md` in the project's planning folder (no swap) |
-| `skills/chrome-web/SKILL.md` | skill | — | browser skill; independent of the agents |
-| `opencode.json` | config | — | providers (generated) + `mcp`; no `plugins` key any more |
+| `opencode/agents/orchestrator.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | plans, batches subagents, verifies, then advisor until PASS, then reviewer |
+| `opencode/agents/coder.md` | subagent | mellum-2.1-12b-a2.5b-q4-128k-think | writes code from a brief; only the named files |
+| `opencode/agents/scout.md` | subagent | mellum (same entry as coder) | read-only search, answers with `path:line` evidence |
+| `opencode/agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
+| `opencode/agents/advisor.md` | subagent | qwen-3.6-35b-a3b-q4-mtp-128k-think-coder | checks work/plans against source documents |
+| `opencode/agents/reviewer.md` | subagent | qwen (same entry as advisor) | reviews the code changes for defects |
+| `opencode/commands/orchestrate.md` | `/orchestrate <task>` | — | runs the task as `orchestrator` |
+| `opencode/commands/review.md` | `/review [focus]` | — | `reviewer` as a subagent on uncommitted changes (else branch vs base) |
+| `opencode/commands/verify.md` | `/verify [doc paths / focus]` | — | `advisor` as a subagent against the source documents |
+| `opencode/commands/handoff.md` | `/handoff [topic or path]` | — | current agent writes/updates `handoff-<topic>.md` in the project's planning folder (no swap) |
+| `.local/opencode_data/skills/chrome-web/SKILL.md` | skill | — | browser skill; machine-specific, not tracked; independent of the agents |
+| `.local/opencode_data/opencode.json` | config | — | providers (generated) + `mcp`; no `plugins` key any more |
 
 ### Permissions (what each subagent can do)
 
@@ -240,11 +245,8 @@ Every agent with git access also denies `;`, `&`, `|`, `>`, `<`, backticks, `$(`
 
 In order of what unblocks the most:
 
-1. **Commit the agent and command files.** `.local/opencode_data` is its own git repo (not this
-   one); the files changed this session are uncommitted there: `agents/orchestrator.md`, `coder.md`,
-   `scout.md`, `vision.md`, `advisor.md`, `reviewer.md`, `commands/orchestrate.md`, `review.md`,
-   `verify.md`, `handoff.md`, `opencode.json` (plugin removed), `WATCHDOG.yml` (deleted). The
-   maintainer commits these.
+1. **Recreate the `opencode` container** (`docker compose up -d opencode`) when convenient, so it
+   reads the tracked agents and commands in `opencode/` instead of the older `.local/` copies.
 2. **Test the agents in real OpenCode sessions** and settle the "Unverified" list: batched subagent
    calls (one `switch:` to mellum per batch), images reaching `vision`, mellum's tool calls inside
    OpenCode, the shell tool's maximum timeout. Record each result here.
@@ -445,3 +447,7 @@ OpenCode.
 - **2026-11-26** — `orchestrator.md`: the batching rationale no longer says the orchestrator re-reads
   its whole conversation on resume (the slot cache restores it); it now gives the swap cost and that
   subagents sharing a model keep their progress between turns. The batching rules are unchanged.
+
+- **2026-11-26** — agents and commands moved into the repository (`opencode/agents/`,
+  `opencode/commands/`), bind-mounted read-only by `compose.yml`; the `.local/` copies kept until the
+  container is recreated; the `chrome-web` skill stays machine-local.
