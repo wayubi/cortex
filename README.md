@@ -1,323 +1,180 @@
 # Cortex
 
-An OpenResty-based VRAM coordinator that lets you hot-swap between **Ollama**, **llama.cpp**, and **NLLB** on a single GPU without Docker container lifecycle management — just API-level model unloads.
+An OpenResty-based VRAM coordinator that lets several LLM backends (**Ollama**, four **llama.cpp**
+builds and **NLLB**) share a single GPU. Before a request for another model goes through, the
+coordinator unloads the resident model through its backend's API. No container is stopped or started.
 
-## Architecture
-
-Cortex runs its services in a shared Docker network. An `openresty` reverse proxy sits in front of all backends and routes each incoming request to the correct one. If a request targets a different backend than the one currently active, `coordinator.lua` tells the active backend to unload its model from VRAM before letting the request through.
+## How it works
 
 | Service | Port | Role |
 |---------|------|------|
-| **openresty** | 80 (client scripts, `/availability`, `/v1/models`), 11434 (ollama), 8080 (llama.cpp, prism, raon, inkling), 5002 (nllb) | Reverse proxy + VRAM coordinator |
-| **ollama** | 11434 | Ollama inference backend |
-| **llama-cpp** | 8080 | upstream llama.cpp, router mode (`llama-cpp/models.ini`) |
-| **prism-llama-cpp** | 8080 | PrismML's llama.cpp fork, router mode, for the ternary Bonsai models (`prism-llama-cpp/models.ini`) |
-| **raon-llama-cpp** | 8080 | KRAFTON's llama.cpp fork for Raon-1 mini, router mode (`raon-llama-cpp/models.ini`) |
-| **inkling-llama-cpp** | 8080 | Unsloth's llama.cpp build for Inkling 2 Mini (from their release's source tarball), router mode (`inkling-llama-cpp/models.ini`) |
+| **openresty** | 11434, 8080, 5002, 80 | Reverse proxy and VRAM coordinator (`:80` serves `/availability`, `/v1/models` and the client scripts) |
+| **ollama** | 11434 | Ollama |
+| **llama-cpp** | 8080 | Upstream llama.cpp, router mode (`llama-cpp/models.ini`) |
+| **prism-llama-cpp** | 8080 | PrismML's fork, for the ternary Bonsai models |
+| **raon-llama-cpp** | 8080 | KRAFTON's fork, for Raon-1 mini |
+| **inkling-llama-cpp** | 8080 | Unsloth's build, for Inkling 2 Mini |
 | **nllb** | 5002 | Hugging Face NLLB translation (FastAPI) |
-| **model-cache** | — | Keeps NVMe copies of the models loaded most (not in the request path) |
-| **pi** | — | Pi coding agent; auto-syncs its model list from Cortex |
-| **opencode** | — | OpenCode v2; auto-syncs its provider config from Cortex |
+| **model-cache** | — | Keeps NVMe copies of the models loaded most |
+| **pi**, **opencode** | — | Coding agents whose model lists are generated from Cortex |
 
-`:8080` serves all four llama.cpp routers: a request for a model named in `prism-llama-cpp/models.ini`, `raon-llama-cpp/models.ini` or `inkling-llama-cpp/models.ini` goes to that router, everything else to llama-cpp, and `GET /v1/models` lists them all. Model names are unique across the files. A model that needs a build the others lack gets its own router, named for the model, so llama-cpp's benched build never moves for it.
+- **One port for every llama.cpp build.** A request for a model named in a router's `models.ini` goes
+  to that router; `GET /v1/models` on `:8080` lists them all. Model names are unique across the files.
+  A model that needs a build the others lack gets its own router, so the other routers' builds never
+  move for it.
+- **Switching.** Every inference POST is checked against the resident backend and model; polling GETs
+  pass through. A switch drains the requests running on the current backend (up to 600 s, else 503),
+  unloads its model through the backend's API, and lets the new request through. One switch runs at a
+  time.
+- **People first.** Requests marked `X-Cortex-Client: bot` yield to everything else: while a person's
+  request waits, new bot requests are held, and a bot that would evict the resident model waits until
+  no person's request has finished for 120 s. `GET /availability`, on every port, reports whether the
+  GPU is busy, how long it has been idle and which model is resident, so a scheduler can wait for a
+  quiet GPU instead of forcing a switch.
+- **Prompts survive swaps.** When a llama.cpp model is unloaded, its last conversation's processed
+  prompt is saved (one per model, kept about two hours) and restored when the model is loaded again,
+  so that conversation resumes without reprocessing it.
+- **Fast loads.** `model-cache` copies a model to NVMe on its third load within seven days, up to
+  128 GB, evicting the copies used least recently and least often, and serves loads from there. The
+  original file is never touched; `CORTEX_NVME_CACHE=off` undoes everything.
 
-`llama-build`, `prism-llama-build`, `raon-llama-build` and `inkling-llama-build` profiles build the four images (build-only, not normally running).
-
-### Coordinator behaviour
-
-`coordinator.lua` runs in the access phase and tracks which backend and model are currently loaded. Every **POST** (inference) request is evaluated; GET/HEAD/OPTIONS probes (e.g. Open WebUI polling) pass through freely without triggering any state changes.
-
-When a switch is needed:
-1. The coordinator drains active requests on the current backend (polls the `request_counts` dict, up to `DRAIN_TIMEOUT` = 600s). If the backend is still busy when that expires, the incoming request gets a 503 rather than an unload under load.
-2. It calls the active backend's unload API. All three backends are full participants:
-   - ollama — `POST /api/generate` with `keep_alive=0`
-   - llama.cpp, prism-llama-cpp, raon-llama-cpp and inkling-llama-cpp — `POST /models/unload`
-   - nllb — `GET /v1/models` to find loaded models, then `POST /v1/models/unload` for each
-3. It updates `backend_state` to the new target.
-
-No containers are stopped or started — only the loaded model is evicted from VRAM.
-
-Only one switch runs at a time, and a request is counted in flight only once it is admitted. Requests marked `X-Cortex-Client: bot` yield to people: while a human request is waiting, new bot requests are held, and a bot request that would evict the resident model waits until no human request has finished for 120s (`openresty/cortex.lua`). `GET /availability`, on every port, reports whether the stack is busy, how long it has been idle and which model is resident, so a scheduler can wait for a quiet GPU instead of forcing a switch.
-
-### NVMe model cache
-
-The `model-cache` service keeps an NVMe copy (in `/opt/cortex-models`) of each model loaded three times within seven days, up to 128 GB, evicting the least recently loaded, and serves loads from it by repointing the model's Hugging Face snapshot link. The copy on the model disk is never touched. Settings and an on/off switch are in its `environment:` in `compose.yml`; `off` restores every link and deletes the copies. Details in `AGENTS.md`.
+Design, invariants and how to change things: [`AGENTS.md`](AGENTS.md).
 
 ## Requirements
 
 - Docker Compose V2
-- NVIDIA GPU with `nvidia-container-toolkit` installed
+- An NVIDIA GPU with `nvidia-container-toolkit`
 
 ## Quick start
 
 ```bash
-# Clone and start
 git clone <url> && cd cortex
+docker compose --profile build build     # build the images (llama.cpp builds pinned in compose.yml)
 docker compose up -d
 
-# Verify the endpoints
-curl http://localhost:8080/v1/models           # llama.cpp models
-curl http://localhost:11434/api/tags           # Ollama models
-curl http://localhost:5002/v1/models           # NLLB models
+curl http://localhost:8080/v1/models     # llama.cpp models, every router
+curl http://localhost:11434/api/tags     # Ollama models
+curl http://localhost:5002/v1/models     # NLLB models
+curl http://localhost/availability       # coordinator state
 ```
 
-All model pickers populate without triggering a backend switch. Inference requests automatically switch as needed.
+Model pickers populate without triggering a switch; inference requests switch as needed.
+Machine-specific settings (model cache paths, `HF_TOKEN`, shared networks) go in a
+`compose.override.yml`, which git ignores.
 
 ## Client agents
 
-`pi` and `opencode` are containers on the same network, and either can be installed on any
+`pi` and `opencode` run as containers on the same network, and either can be installed on any
 Debian/Ubuntu or Alpine client from Cortex itself:
 
 ```bash
-# Inside a container on cortex_network (the scripts are served on :80, and on
-# every other openresty port too):
+# Inside a container on cortex_network (the scripts are served on every openresty port):
 curl -fsSL http://openresty/install-pi.sh | sh
 curl -fsSL http://openresty/install-pi.sh | sh -s -- --all
 curl -fsSL http://openresty/install-opencode.sh | sh
 
-# From the host or another machine, point both URLs at the Cortex host; the
-# defaults (openresty:8080 and openresty:11434) only resolve on cortex_network:
+# From another machine, point both URLs at the Cortex host; the defaults
+# (openresty:8080 and openresty:11434) only resolve on cortex_network:
 curl -fsSL http://<cortex-host>/install-pi.sh \
   | CORTEX_URL=http://<cortex-host>:8080 OLLAMA_URL=http://<cortex-host>:11434 sh
 ```
 
-Ollama models are listed at the context Ollama serves them with: the model's own
-`num_ctx` if set, else `CORTEX_OLLAMA_CTX` (default 4096, Ollama's automatic default on
-a GPU under 23 GiB). If the Ollama server sets `OLLAMA_CONTEXT_LENGTH` or runs on a
-larger GPU, pass the same value, e.g. `CORTEX_OLLAMA_CTX=32768 sh`.
+With no flags each installer adds the agent and generates its model list from `:8080` and `:11434`.
+`--all` adds every language toolkit, `--models-only` only refreshes the list, `--strict` stops at the
+first failure, and `--help` lists the rest.
 
-With no flags each installer adds the agent and regenerates its model list from
-`GET /v1/models` on `:8080` and `/api/tags` on `:11434`. `--all` adds every language
-toolkit; `--models-only` only refreshes the list; `--help` lists the rest. The
-installers are best-effort by default and `--strict` aborts on the first failure.
+Ollama models are listed at the context Ollama serves them with: the model's own `num_ctx` if set,
+else `CORTEX_OLLAMA_CTX` (default 4096, Ollama's automatic default on a GPU under 23 GiB). If your
+Ollama sets `OLLAMA_CONTEXT_LENGTH` or runs on a larger GPU, pass the same value, e.g.
+`CORTEX_OLLAMA_CTX=32768 sh`.
 
-The `pi` container writes `models.json`; the `opencode` container writes
-`opencode.json` under `~/.config/opencode/`, in OpenCode v2's format (`providers`,
-`package` + `settings.baseURL`), which is what the image and `install-opencode.sh`
-install. OpenCode v1 (the `opencode-ai` package) ignores that block. Both
-containers retry the model sync at start (`PI_SYNC_MODELS`, `OPENCODE_SYNC_MODELS`).
-Updating an existing deployment? Recreate openresty once so the scripts directory
-mount appears: `docker compose up -d openresty` (later edits need no restart).
+OpenCode's config is written in OpenCode v2's format (`providers`, `package` + `settings.baseURL`);
+OpenCode v1 ignores it. The `opencode` container also starts OpenCode's background server for
+`opencode pair` and the app; `AGENTS.md` covers exposing it beyond the container.
 
 ## Rebuilding
 
-**llama.cpp from source** (with CUDA + flash attention). All builders share `llama-cpp/Dockerfile` and are pinned in `compose.yml`: to a release tag (`LLAMA_REF`), a commit (`LLAMA_COMMIT`), or a source archive and its sha256 (`LLAMA_TARBALL`, `LLAMA_TARBALL_SHA256`) when a distributor publishes the build only as a tarball. Bump a pin deliberately and re-bench:
-
 ```bash
-docker compose --profile build build llama-build          # upstream → llama-cpp:latest
-docker compose --profile build build prism-llama-build    # PrismML fork → prism-llama-cpp:latest
-docker compose --profile build build raon-llama-build     # KRAFTON's Raon fork → raon-llama-cpp:latest
-docker compose --profile build build inkling-llama-build  # Unsloth's Inkling build (tarball) → inkling-llama-cpp:latest
+# llama.cpp builds: pinned in compose.yml (tag, commit, or source archive + sha256).
+# Bump a pin deliberately; the previous image stays tagged for rollback. Re-bench afterwards.
+docker compose --profile build build llama-build          # upstream
+docker compose --profile build build prism-llama-build    # PrismML fork
+docker compose --profile build build raon-llama-build     # KRAFTON's Raon fork
+docker compose --profile build build inkling-llama-build  # Unsloth's Inkling build
 docker compose up -d llama-cpp prism-llama-cpp raon-llama-cpp inkling-llama-cpp
-```
 
-**After Lua or nginx changes** (rebuilds the openresty image):
+# Lua or nginx.conf edits (bind-mounted): a restart, not a rebuild
+docker compose restart openresty
 
-```bash
-docker compose build openresty
-docker compose up -d
-```
-
-**Client agents** (`pi`, `opencode`). Neither is pinned; a new `CACHEBUST` value
-re-runs only the agent install, so the build fetches the latest release:
-
-```bash
+# Client agents (not pinned): a new CACHEBUST re-runs only the agent install
 CACHEBUST=$(date +%s) docker compose build pi opencode
 docker compose up -d pi opencode
 ```
 
 ## Benchmarking
 
-The benchmarking pipeline is a single script: `tools/bench.sh`. It finds and validates a practical `batch-size` / `ubatch-size` and, for MTP models, `spec-draft-n-max` / `spec-draft-p-min`, then records a benchmark for each entry in `llama-cpp/models.ini`.
-
-### Running it
+`tools/bench.sh` tunes each llama.cpp entry (`batch-size` / `ubatch-size`, and for MTP models
+`spec-draft-n-max` / `spec-draft-p-min`), validates it, and records a benchmark. Never set those values
+by hand: `-fit` leaves almost no VRAM headroom, so a value that survives a short probe can still run
+out of memory at full context or silently push work onto the CPU.
 
 ```bash
 ./tools/bench.sh                          # interactive: pick models, then the full suite
-./tools/bench.sh all <models...>          # non-interactive full suite
-./tools/bench.sh bisect <model>           # batch tuning only
-./tools/bench.sh mtp <model>              # MTP tuning only
-./tools/bench.sh bench <model>            # benchmark record only
-./tools/bench.sh mtpcheck <model>         # MTP capability check only
-./tools/bench.sh mtpverify <model>        # diagnostic: MTP-on vs off output check
-./tools/bench.sh residency <model>        # fast GPU/CPU pre-check (no bench record)
+./tools/bench.sh all <models...>          # full suite: mtpcheck → bisect → mtp → bench
+./tools/bench.sh bisect <model>           # batch tuning with full validation
+./tools/bench.sh batch <models...>        # batch tuning only, no full-context validation
+./tools/bench.sh mtpcheck <models...>     # MTP capability check
+./tools/bench.sh mtp <models...>          # MTP tuning, ending in an MTP on/off A/B
 ./tools/bench.sh mtpab <heads...>         # MTP on/off A/B on an already-tuned entry, then bench
-./tools/bench.sh ctxmax <model>           # largest GPU-resident ctx → new entry
-./tools/bench.sh vision <models...>       # add <model>-vision when the repo ships an mmproj
+./tools/bench.sh mtpverify <models...>    # check that MTP leaves the output unchanged
+./tools/bench.sh bench <models...>        # benchmark record only
+./tools/bench.sh residency <model>        # quick GPU/CPU placement check, no record
+./tools/bench.sh ctxmax <model>           # largest GPU-resident context → a new entry
+./tools/bench.sh vision <models...>       # add <model>-vision when the repo ships a projector
 ./tools/bench.sh fetch <models...>        # download an entry's files (the routers run offline)
+./tools/gen_metrics.sh                    # rebuild full-metrics.md from every record
 ```
 
-The routers run with `offline = true`, so a load never waits on Hugging Face; `fetch` (and the suite, when weights are missing) downloads through a one-off online load. The model names choose the backend (`llama-cpp`, `prism-llama-cpp`, `raon-llama-cpp` or `inkling-llama-cpp`); `--backend=<name>` forces one.
-
-Global flags go before the subcommand:
+Flags go before the subcommand:
 
 | Flag | Effect |
 |------|--------|
-| `--no-inherit` | Bench every selected model independently; no family inheritance |
+| `--backend=<name>` | Force the router (normally chosen from the model names) |
+| `--no-inherit` | Bench every model on its own, without family inheritance |
 | `--reset-parent` | Re-bench each family head first, so siblings inherit fresh data |
-| `--strict` | Skip `bench` for a model whose MTP tuning failed (for publishable records) |
-| `--refine=64\|coarse\|off` | Batch refinement depth; default `64` |
-| `--thorough` | Use the legacy exhaustive search instead of discover mode |
+| `--strict` | Skip `bench` for a model whose MTP tuning failed |
+| `--no-confirm` | `bisect` stops after the pick (as `batch`) |
+| `--refine=64\|coarse\|off` | Batch refinement depth (default `64`; env `BENCH_REFINE`) |
+| `--thorough` | The older exhaustive search (env `BENCH_THOROUGH=1`) |
 
-Environment equivalents: `BENCH_THOROUGH=1`, `BENCH_REFINE=64|coarse|off`.
+Entries that differ only in sampling, reasoning or chat template form a family: only its head is
+benched, and the others copy its record in seconds. Rough times per head on an RTX 3060: 5–10 min for
+a small GPU-resident model, 25–30 for a dense MTP model, 40–100 for a large MoE with its experts on
+the CPU. Only one `bench.sh` runs at a time.
 
-`residency` is the fast pre-check for choosing a quant: it loads the model once at the batch ladder's residency rung (`batch 256`) and reports whether it runs `GPU`- or `CPU`-resident, then restores `models.ini` unchanged. A quant that does not fit never OOMs — `-fit` silently spills it to CPU — so this is how to tell before committing to a full `bisect` + `bench`. It is also reachable from the interactive menu (`[r]esidency` after picking models).
-
-### Pipeline
-
-Each family head goes through four steps in order:
-
-| Step | What it does |
-|------|-------------|
-| mtpcheck | Empirically determines MTP capability; sets or clears `spec-type` in models.ini |
-| bisect | Finds and validates the batch size (see below) |
-| mtp | Tunes `n_max` / `p_min` (MTP-capable models only) |
-| bench | Writes the benchmark record: prefill, decode, placement, hardware |
-
-### Batch tuning (discover mode, the default)
-
-Batch is a **prefill** knob. Single-stream decode does not change with batch unless something spills off the GPU, so the search optimises prefill and guards residency:
-
-1. **Coarse ladder** of powers of two from 256 up to `min(ctx-size, 16384)`. Each rung restarts the server once and takes three cheap measurements: a tiny probe (OOM at load or first decode), a residency probe (binary GPU or CPU verdict), and a sized prefill probe using the same prompt length on every rung so rungs rank on identical work. Every prefill probe runs an untimed warm-up first, and fast probes take the median of three.
-2. **Pick** the best-measured point, then a **golden-section refinement** down to 64-token granularity. Refinement skips residency inside a bracket where both ends passed, since memory use is monotonic in batch.
-3. **Confirm at the pick, one restart**: full-context saturation at 99% of ctx, a sustained long-decode, and on MTP GPU models a decode-cliff check against a batch-256 baseline. On failure it steps down to the next lower measured point, at most twice, then fails the model with models.ini restored.
-
-`--refine=coarse` stops refinement once a step no longer beats the noise floor; `--refine=off` picks the best ladder rung. `--thorough` restores the original exhaustive search (golden-section prefill sweep, 64-token ceiling bisect, top-5 shortlist decode gate).
-
-### MTP tuning
-
-`n_max` and `p_min` are **speed-only** knobs. llama.cpp's speculative decoding samples every position from the target model and keeps a draft token only when it matches, so the output distribution is unchanged. The tuner therefore ranks configurations on decode speed measured on natural-stop output, and the only hard rejections are OOM, a too-short sample, and — on GPU-resident models — a draft that spills to CPU. An 8-gram degeneracy ratio is recorded as a diagnostic and never gates anything. `bench.sh mtpverify` checks the speed-only claim empirically for a given model.
-
-Supporting MTP is not the same as gaining from it. After tuning, an **A/B** decodes with the tuned MTP config and with MTP off on the same entry, and MTP is kept only if it is more than 2% faster; a tie goes to off. On CPU-resident MoE models MTP usually loses, because verifying each drafted token reads extra expert weights over the RAM bus. When MTP is turned off and the batch was limited by memory, the bisect runs again without the draft buffer. The decision is recorded as `mtp.ab`. `-mtp` in an entry name marks an MTP-capable model, not whether MTP is enabled.
-
-### Family inheritance
-
-Two entries are in the same family when they share `hf`, `ctx-size` and every other setting that can change memory or speed. Only sampling, reasoning and chat-template keys, plus the tuned batch and MTP values, may differ. So the plain, `-coder`, `-think` and `-think-coder` variants of one weights-and-context pair form one family, while a `-vision` entry (which loads the image projector) is its own head. The head (the family's first section in models.ini) is benched; siblings copy its record in seconds and get their own `config` block rebuilt from their own models.ini section. Cost therefore scales with distinct weight-and-context combinations, not with the number of entries. A head whose bench fails does not feed its record to siblings; they are skipped and reported.
-
-Rough per-head times on an RTX 3060: 5 to 10 minutes for a small GPU-resident model, 25 to 30 for a dense MTP head, and 40 to 100 for a large CPU-offloaded MoE at long context. Siblings are free.
-
-### Results
-
-Results are written to `<backend>/models/<model>.json` (`llama-cpp/models/`, `prism-llama-cpp/models/`, `raon-llama-cpp/models/` or `inkling-llama-cpp/models/`), one file per model, with these top-level keys:
-
-| Key | Contents |
-|-----|----------|
-| `config` | The model's own models.ini settings |
-| `bench` | Prompt sizes, model file size, build info, wall time |
-| `speed` | Prefill and decode throughput |
-| `request` | Token counts, finish reason, degeneracy |
-| `mtp` | Acceptance, loaded vs tuned values, `tuning_status`, every tuning sample, the on/off A/B (`ab`) |
-| `discover` | The full batch ladder, refinement points, pick and pick rule |
-| `hardware` | GPU, CPU, RAM, and the run's power, thermal and VRAM peaks |
-
-The consolidated table lives in `full-metrics.md`:
-
-```bash
-./tools/gen_metrics.sh    # regenerates full-metrics.md from both backends' models/*.json
-```
-
-Full methodology, gotchas and stress-test procedures: see `AGENTS.md`.
-
-## File layout
-
-```
-├── AGENTS.md                 # developer instructions / benchmarking methodology
-├── README.md
-├── LICENSE
-├── compose.yml               # Docker Compose — openresty, ollama, llama.cpp routers, nllb, pi, opencode
-├── compose.override.yml      # local volume mounts (model caches, models.ini)
-├── full-metrics.md           # benchmark table for all models (regenerate via tools/gen_metrics.sh)
-├── logs/                     # bench.sh run logs, one per invocation
-├── tools/
-│   ├── bench.sh              # canonical pipeline: mtpcheck → bisect → mtp → bench
-│   ├── gen_metrics.sh        # regenerate full-metrics.md from <backend>/models/*.json
-│   ├── model_cache.py        # model-cache service: NVMe copies of the models loaded most
-│   ├── test_coordinator.py   # offline test of the human/bot policy (docker, no GPU)
-│   └── coord_mock.py         # stand-in for the backends, used by that test
-├── llama-cpp/
-│   ├── models.ini            # llama.cpp model presets
-│   ├── models/               # per-model benchmark JSONs
-│   └── Dockerfile            # CUDA build from source (every llama.cpp backend)
-├── prism-llama-cpp/
-│   ├── models.ini            # PrismML fork presets (Bonsai)
-│   └── models/               # its benchmark JSONs
-├── raon-llama-cpp/
-│   ├── models.ini            # Raon-1 mini presets (KRAFTON's fork)
-│   └── models/               # its benchmark JSONs
-├── inkling-llama-cpp/
-│   ├── models.ini            # Inkling 2 Mini presets (Unsloth's build)
-│   └── models/               # its benchmark JSONs
-├── nllb/
-│   ├── Dockerfile
-│   ├── entrypoint.sh
-│   └── server.py             # HF translation (NLLB) FastAPI service
-├── pi/
-│   ├── Dockerfile
-│   └── entrypoint.sh         # auto-sync Pi models.json at start
-├── opencode/
-│   ├── Dockerfile
-│   └── entrypoint.sh         # auto-sync OpenCode opencode.json at start
-├── openresty/
-│   ├── Dockerfile
-│   ├── nginx.conf            # 4 server blocks + lua_shared_dict
-│   ├── coordinator.lua       # VRAM coordinator — API-based model unload, :8080 routing
-│   ├── cortex.lua            # human/bot policy and constants
-│   ├── availability.lua      # GET /availability on every port
-│   ├── log.lua               # log phase: releases in-flight counts, stamps idle times
-│   ├── models_list.lua       # GET /v1/models on :8080 — every llama.cpp router merged
-│   └── scripts/              # raw client tooling (`curl URL | sh`)
-│       ├── agent-common.sh
-│       ├── models-common.sh
-│       ├── install-pi.sh
-│       ├── install-opencode.sh
-│       ├── generate-models-pi.sh
-│       └── generate-models-opencode.sh
-├── docs/
-│   ├── reference/            # design and findings (CPU_POLLING.md: CPU/GPU placement methodology)
-│   └── sessions/             # session states and handoffs (git-ignored)
-└── tracker/                  # plans, issues and work orders: {open,resolved,closed}/ each
-```
+Records are `<router>/models/<model>.json` (keys `config`, `bench`, `speed`, `request`, `mtp`,
+`discover`, `hardware`); `full-metrics.md` is the table of all of them. The largest models run their
+experts on the CPU by design and are recorded as `placement: CPU`. Method and evidence:
+[`docs/reference/benchmarking.md`](docs/reference/benchmarking.md).
 
 ## Debugging
 
-View coordinator decisions in real time:
-
 ```bash
-docker logs -f cortex-openresty-1 | grep -E "request:|skip:|switch:|drain|state:|ollama:|llama-cpp:|nllb:"
+docker logs -f cortex-openresty-1 | grep '\[lua\]'      # coordinator decisions
+docker logs -f cortex-model-cache-1                     # NVMe copies and evictions
+ls logs/                                                # bench.sh, one log per run
 ```
 
-Example output:
+A switch, from the coordinator's log (log prefixes and client details trimmed):
 
 ```
-request: POST llama_cpp current=ollama
-drain ollama (1 active)
-drain: ollama waited 3.2s
-ollama: unloading gemma3:4b
-ollama: unloaded gemma3:4b
-state: backend=llama_cpp
-request: GET llama_cpp current=llama_cpp
-request: GET ollama current=llama_cpp
-skip: GET ollama — only POST triggers switch
+coordinate(): POST inkling_llama_cpp (human) backend=ollama model: gemma3:12b -> inkling-2-mini-q4-96k-think-loopgpu
+switch_to(): drain ollama (0 active)
+switch_to(): switch: ollama -> inkling_llama_cpp (gemma3:12b -> inkling-2-mini-q4-96k-think-loopgpu)
+switch_to(): state: backend=inkling_llama_cpp model=inkling-2-mini-q4-96k-think-loopgpu
+restore_slot(): slot-cache: restored inkling-2-mini-q4-96k-think-loopgpu (38522 tokens, 821 ms)
 ```
 
-Benchmarking runs log to `logs/bench_<timestamp>.log`, one file per invocation, containing every probe and decision.
+## License
 
-## Known VRAM considerations
-
-- All containers run simultaneously but no model is loaded at boot.
-- Models only consume VRAM during active inference.
-- Ollama's `OLLAMA_KEEP_ALIVE` controls how long a model stays resident after the last request (default 5m).
-- llama.cpp keeps one model loaded at a time — the coordinator is the sole source of truth for unloads, so `models-max` must NOT be set (see `AGENTS.md`).
-- If a backend switch happens mid-inference, the drain waits up to 600s for completion before unloading, and returns 503 if the backend is still busy.
-- The largest models in this catalogue run their experts on the CPU rather than the GPU. That is expected and is recorded per model as `placement: CPU`; the tuner treats it as the model's baseline, not a fault.
-
-## Model tuning
-
-Each `[model]` entry in `llama-cpp/models.ini` can override `batch-size` / `ubatch-size` and, for MTP models, `spec-draft-n-max` / `spec-draft-p-min`. Do not set these by hand: `-fit on` leaves near-zero VRAM headroom, so a value that survives a short probe can still OOM at full context or silently push the MTP draft onto the CPU. Run the pipeline instead:
-
-```bash
-./tools/bench.sh all <model>    # tunes, validates and records in one pass
-./tools/gen_metrics.sh          # refresh the consolidated table
-```
-
-The validation gates that make a value trustworthy — the OOM log grep as source of truth, the residency check, full-context saturation, and the sustained long-decode — are documented in `AGENTS.md`.
+See [`LICENSE`](LICENSE).

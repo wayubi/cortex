@@ -196,6 +196,7 @@ services:
         BUILD_JOBS: "20"
         LLAMA_TARBALL: "https://github.com/unslothai/llama.cpp/releases/download/b12651-mix-c7059d6/llama.cpp-source-b12651-mix-c7059d6.tar.gz"
         LLAMA_TARBALL_SHA256: "dedb1c001a6d4af567d9ea152f7fdd0a467cc04486021aa0f126d7dbe2375bb0"
+        # web UI off: its download is outside the checksum, and cortex never serves the UI
         LLAMA_CMAKE_ARGS: "-DLLAMA_USE_PREBUILT_UI=OFF"
       tags:
         - "inkling-llama-cpp:b12651-mix-c7059d6"

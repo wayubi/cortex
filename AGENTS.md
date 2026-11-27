@@ -1,203 +1,295 @@
 # AGENTS.md
 
+Cortex runs several LLM backends on one GPU behind OpenResty. `openresty/coordinator.lua` makes sure
+only one model holds VRAM at a time: before a request for another model goes through, it unloads the
+resident one through the backend's API. No container is stopped or started for a switch.
+
+## Rules
+
+- **The GPU is in live use.** Loading a model, restarting a router or openresty, or running
+  `bench.sh` changes what the people using Cortex get. Ask first.
+- **Public repository.** No hostnames, IPs, accounts, personal names or private paths in tracked
+  files. Machine-specific values go in the git-ignored `compose.override.yml` (or
+  `openresty/local.d/`); tracked files keep neutral placeholders.
+- **Scripts go in `tools/`**, except the client-facing scripts in `openresty/scripts/`.
+- **Markdown goes in `docs/` or `tracker/`** (see "Docs and tracker").
+
 ## Architecture
 
-- **OpenResty** routes `:11434` → ollama, `:8080` → llama-cpp, **prism-llama-cpp, raon-llama-cpp or inkling-llama-cpp**, `:5002` → nllb (HF translation). `:80` serves `/availability`, `/v1/models` and the raw client scripts in `openresty/scripts/`. All seven backends run alongside openresty (no profiles).
-- **model-cache** keeps an NVMe copy of the GGUFs loaded most and serves them from there (see "NVMe model cache" below). It is not in the request path.
-- **`:8080` fronts several llama.cpp routers, chosen by model name** (`cortex.ROUTERS`, in order). `llama-cpp` (upstream at the benched pin) is the default. `prism-llama-cpp` is PrismML's llama.cpp fork (ternary `PQ2_0`/`PTQ1_0` types and the Hadamard runtime Bonsai needs; upstream cannot load those files). `raon-llama-cpp` is KRAFTON's fork for Raon-1 mini (arch `raon1`, not upstream yet; its repo is gated, so the router gets `HF_TOKEN` from `compose.override.yml`). `inkling-llama-cpp` is Unsloth's build for Inkling 2 Mini (the looped `inkling2` arch in Unsloth's GGUF layout; built from their release's source tarball, see the builders below). **A model that needs a build the others cannot provide gets its own router, named for that model**, rather than moving llama-cpp's pin: the benched catalogue keeps the build it was benched on, and bumping a model's router tag re-benches only that router's `models.ini`. A request whose `model` is a section of a non-default router's `models.ini` goes to that router, every other model to llama-cpp (`cortex.router_for`, re-reading each ini — bind-mounted into openresty at `/etc/nginx/<prism|raon|inkling>-models.ini` — at most every 5 s, so new entries route without a reload). Model names must therefore be **unique across all models.ini files**. To the coordinator each router is a separate backend (`llama_cpp`, `prism_llama_cpp`, `raon_llama_cpp`, `inkling_llama_cpp`): moving between them drains, unloads and switches like any other backend change. GETs are not coordinated but follow `?model=` (`/props?model=…`); a GET naming no model reaches llama-cpp. `GET /v1/models` (and `/models`) on :8080 is answered by `openresty/models_list.lua`: every router's list merged, each id once from the router that serves it (each also lists the GGUFs it finds in the shared HF cache, so the raw lists overlap); a router that is down only drops its models.
-- `coordinator.lua` runs in the access phase. It tracks both the active backend AND the last requested model name. On every POST request (inference), it extracts the `model` field from the request body. If either the backend OR the model differs from the current state, the coordinator unloads all models from the current backend via its API, then updates state. This prevents llama.cpp's leaky self-unload (which leaves residual VRAM) because all unloads are triggered externally by the coordinator.
-- **Only POST requests (inference) can trigger unload or state changes.** GET/HEAD/OPTIONS probes pass through without any action — this prevents Open WebUI polling from bouncing the state or reading bodies unnecessarily. ollama's management POSTs — `/api/show`, `/api/pull`, `/api/push`, `/api/create`, `/api/copy`, `/api/blobs/*` (`NON_INFERENCE` in `coordinator.lua`) — also pass through uncounted and switch nothing: they run no inference, and counting them made a model-info lookup unload whatever was resident and kept `busy` set through a whole model download. Inference-shaped calls stay coordinated, including an empty ollama `/api/generate` (how ollama loads a model) and llama.cpp's `/models/load`, `/tokenize`, `/detokenize` (router mode loads the model they name).
-- Unload flow: `POST /api/generate` with `keep_alive: 0` (ollama), `POST /models/unload` (every :8080 router — same router API, `unload_llamacpp(key)`), or `GET /v1/models` + `POST /v1/models/unload` (nllb). The backend is queried first to find exactly which model(s) are loaded. When switching away from nllb, a `/shutdown` is also sent. **When no backend is recorded** (openresty just restarted: the shared dicts start empty while a backend may still hold a model), the first switch unloads whatever every backend reports loaded instead of loading beside it.
-- The shared `backend_state` dict stores two keys: `"backend"` (which backend last handled inference) and `"model"` (which model name was last requested). Both are used to decide whether an unload is needed.
-- **One switch at a time; only proxied requests are counted.** A request is counted in flight (`request_counts`) only once it is admitted, i.e. about to be proxied to a resident model. A request that needs a different model takes the switch key (`backend_state` `switching`, holding its request id, TTL ≈ 710s, released by `log.lua` on every exit including aborts), drains the requests actually running on the current backend to **0** (up to `DRAIN_TIMEOUT` = **600s**, then 503), unloads, and sets state. Others wait while a switch is in progress; afterwards a waiter for the new model goes straight through and one for another model becomes the next switcher. This replaced counting a request before its drain and waiting for the count to fall to itself, which deadlocked concurrent switches: opencode sends requests for two or three models at once, and each waited on the others until the client gave up (2026-10-01, `drain llama_cpp (3 active, target 1)`).
-- Active requests are counted at access phase and released in the log phase (`openresty/log.lua`, `log_by_lua_file` in every server block) — the only place counts are released. A client that hangs up while held or draining is finalised via `ngx.on_abort` → `ngx.exit(499)`, which runs the log phase at once.
-- **Humans first, bots never interrupted** (`openresty/cortex.lua` holds the policy and constants). A request carrying `X-Cortex-Client: bot` (automated clients: batch pipelines, social-media bridges) is a bot; anything else is a human (Open WebUI, opencode), so an unmodified client gets priority. A human waits only for the bot calls already in flight: while one is waiting (`human_waiting`), every new bot request is held, including one for the resident model, which would otherwise skip the drain and keep the human out. Once a human request has run (`human_running`, then `human_last`), a bot request that would **evict** the resident model is held until no human request has finished for `HUMAN_HOLD` (**120s**); a bot sharing the resident model goes straight through. A held bot is not counted in flight (so the human's drain never waits for it) and does not stamp `idle_for`; after `BOT_HOLD_CAP` (**600s**) it gets `503` with `X-Cortex-Held: human` and `Retry-After`, which bots treat as "stand aside", not an error. A bot that finishes draining after a human arrived goes back to the hold before unloading anything. Offline test: `python3 tools/test_coordinator.py` (throwaway openresty + `tools/coord_mock.py` on a private docker network; `--ref HEAD` runs it against a commit).
-- **`GET /availability`**, on **every** openresty port (`:80`, `:11434`, `:5002`, `:8080`) so a client asks the port it already uses, reports `{busy, idle_for, human_pending, human_idle_for, in_flight, slots, backend, model}` straight from the two shared dicts, for schedulers that would rather wait than force a model switch. The logic is one file, `openresty/availability.lua` (`content_by_lua_file`); each server block has an exact-match `location = /availability`, so it never reaches `coordinator.lua` or a backend, plus its own internal `/__slots/<host>` (a subrequest stays within its server; one regex location admits every router hostname). `busy` is in-flight POSTs on any backend OR any llama.cpp slot reporting `processing` (via `/__slots/<host>` for each router in `cortex.ROUTERS`, summed, handling both the bare-array and `{"slots":[...]}` shapes; `slots: null` when no router's endpoint answers — absent, disabled (`--no-slots`) or slow). `idle_for` is seconds since the last inference POST finished on any backend (`log.lua` stamps `backend_state` key `last_done`), `0` while one is in flight, `null` when none has finished since openresty started — so a scheduler can tell a client merely between requests of a longer run from a GPU that is really free, and wait out the gap if it chooses. `human_pending` is a human request waiting or running; `human_idle_for` is seconds since the last human request finished (`0` while pending, `null` before the first) — bots stand aside at their own boundaries while it is recent. Bind-mounted config; adding `availability.lua` added a volume, so the first deploy needs `docker compose up -d openresty` (recreate), later edits only `docker compose restart openresty`.
-- **Slot cache: a model keeps its processed prompt across swaps**. Before `unload_llamacpp` unloads a model it `POST /slots/0?action=save`s slot 0 (KV cache + context checkpoints) to the router's `/slot-cache`; at the end of `switch_to`, while the switch key is held, `restore_slot` loads the target (`POST /models/load`, `wait_until_loaded`) and restores its file, so the first request processes only its new tokens (measured: groot 30 tokens instead of 51K; save/restore 0.1-0.4 s). The router takes the model from the JSON **body** (`{"model","filename"}`; a `?model=` query is refused) and answers chunked. Every failure (no file, failed save, load timeout) only logs `slot-cache: ...` and the request processes its full prompt, as before. Settings in `cortex.lua`: `SLOT_CACHE` (master switch), `SLOT_SAVE_TIMEOUT` / `SLOT_RESTORE_TIMEOUT` (30 s), `MODEL_LOAD_TIMEOUT` (300 s, added to `SWITCH_TTL`), `slot_cache = true` per router in `ROUTERS` (only for a build that writes checkpoints into slot files, upstream PR #26004: without them a restore is not reused), and `X-Cortex-No-Slot-Cache`, which `bench.sh` sends on every POST so a measurement never reads a restored cache. Each router has a capped tmpfs at `/slot-cache` (llama-cpp 8 GB, the others 2 GB; RAM only for files written, emptied on every container start, so a file never outlives a `models.ini` change) and `slot-save-path = /slot-cache` in its `[*]`; its entrypoint `llama-cpp/slot-cache-entrypoint.sh` prunes files 2 h after their save (`SLOT_CACHE_TTL_MIN`) and oldest-first above `SLOT_CACHE_KEEP_GB`, then `exec`s `llama-server`. One file per entry (`<entry>.bin`), holding the model's last conversation at unload. Model weights are never kept there. Watch with `docker logs cortex-openresty-1 | grep slot-cache` and `docker exec cortex-llama-cpp-1 ls -l /slot-cache`.
+| Service | Role |
+|---|---|
+| `openresty` | `:11434` → ollama, `:8080` → the llama.cpp routers, `:5002` → nllb, `:80` → `/availability`, `/v1/models` and the client scripts. Runs the coordinator. |
+| `ollama` | Ollama. `OLLAMA_MAX_LOADED_MODELS=1`; `OLLAMA_KEEP_ALIVE` unset (5 min). |
+| `llama-cpp` | Upstream llama.cpp in router mode, the default router. |
+| `prism-llama-cpp` | PrismML's fork: the ternary `PQ2_0`/`PTQ1_0` types and Hadamard runtime Bonsai needs. |
+| `raon-llama-cpp` | KRAFTON's fork for Raon-1 mini (arch `raon1`). Gated repo: `HF_TOKEN` in `compose.override.yml`. |
+| `inkling-llama-cpp` | Unsloth's build for Inkling 2 Mini (arch `inkling2`), from their release tarball. |
+| `nllb` | Hugging Face NLLB translation (FastAPI). |
+| `model-cache` | Keeps NVMe copies of the models loaded most. Not in the request path. |
+| `pi`, `opencode` | Client agents; their model lists are generated from Cortex at start. |
 
-## Critical naming
+**Routing on `:8080`.** A request whose `model` is a section of a non-default router's `models.ini`
+goes to that router; every other model goes to `llama-cpp` (`cortex.router_for`, re-reading each ini
+at most every 5 s, so new entries route without a reload). **Model names must be unique across all
+`models.ini` files.** A model that needs a build the others lack gets its own router, named for the
+model, rather than moving another router's pin: each router's catalogue keeps the build it was benched
+on. GETs are not coordinated but follow `?model=`; a GET naming no model reaches `llama-cpp`.
+`GET /v1/models` on `:8080` is `models_list.lua`: every router's list merged, each id once from the
+router that serves it; a router that is down only drops its own models.
 
-The compose services are `llama-cpp` / `prism-llama-cpp` / `raon-llama-cpp` / `inkling-llama-cpp` (hyphens), but the Lua internal keys are `llama_cpp` / `prism_llama_cpp` / `raon_llama_cpp` / `inkling_llama_cpp` (underscores). A router's name must be one word before `-llama-cpp`: nginx's internal locations match `(?:[a-z0-9]+-)?llama-cpp`. `cortex.ROUTERS` holds each router's key, host and ini; `coordinator.lua` builds its `HOST` table (key → DNS hostname for TCP calls) from it, plus `HOST["ollama"]` and `HOST["nllb"]`.
+**The coordinator** (`coordinator.lua`, access phase):
+- **Only inference POSTs switch or count.** GET/HEAD/OPTIONS pass through (Open WebUI polls
+  constantly). Ollama's management POSTs (`NON_INFERENCE`: `/api/show`, `/api/pull`, `/api/push`,
+  `/api/create`, `/api/copy`, `/api/blobs/*`) also pass uncounted: counting them made a model-info
+  lookup unload the resident model and kept `busy` set through a whole download. Inference-shaped
+  calls stay coordinated, including an empty ollama `/api/generate` (how ollama loads a model) and the
+  routers' `/models/load`, `/tokenize`, `/detokenize` (each loads the model it names).
+- **State** is the shared dict `backend_state`: `backend` and `model` (the last inference request's).
+  A request for a different backend or model switches.
+- **One switch at a time.** The switcher takes the `switching` key (released by `log.lua` on every
+  exit), drains the requests running on the current backend to zero (up to `DRAIN_TIMEOUT`, 600 s,
+  then 503), unloads, and sets state. Others wait; afterwards a waiter for the new model goes through
+  and one for another model becomes the next switcher. A request is counted in flight
+  (`request_counts`) only once admitted, so concurrent switches never wait on each other (OpenCode
+  sends requests for two or three models at once).
+- **Counts are released only in the log phase** (`log.lua`, `log_by_lua_file` in every server block).
+  A client that hangs up while held or draining is finished through `ngx.on_abort` → `ngx.exit(499)`.
+- **Unloading** asks the backend what is loaded, then: ollama `POST /api/generate` with
+  `keep_alive: 0`; every router `POST /models/unload` (`unload_llamacpp(key)`); nllb
+  `POST /v1/models/unload`, plus `/shutdown` when switching away from it. With no state recorded
+  (openresty just restarted), the first switch unloads whatever every backend reports loaded.
+  Unloading is best-effort: if a backend does not answer, the request still proceeds and may OOM.
+- **Humans first, bots never interrupted** (policy and constants in `cortex.lua`). A request with
+  `X-Cortex-Client: bot` is a bot; anything else is a human, so an unmodified client gets priority.
+  While a human waits, every new bot request is held, including one for the resident model. After a
+  human request, a bot that would **evict** the resident model is held until no human request has
+  finished for `HUMAN_HOLD` (120 s); a bot for the resident model goes through. A held bot is not
+  counted and does not stamp `idle_for`; after `BOT_HOLD_CAP` (600 s) it gets 503 with
+  `X-Cortex-Held: human` and `Retry-After`, which bots treat as "stand aside". Offline test:
+  `python3 tools/test_coordinator.py` (throwaway openresty + `tools/coord_mock.py` on a private docker
+  network, no GPU; `--ref HEAD` tests a commit).
+- **`GET /availability`**, on every port (`availability.lua`, an exact-match location that never
+  reaches the coordinator), reports `busy`, `idle_for`, `human_pending`, `human_idle_for`,
+  `in_flight`, `slots`, `backend` and `model`, for schedulers that would rather wait than force a
+  switch. `busy` is in-flight POSTs or any router slot `processing` (each server block's internal
+  `/__slots/<host>`); `slots` is null when no router answers. `idle_for` is seconds since the last
+  inference finished (`0` while one runs, `null` before the first).
+- **Slot cache: a model keeps its processed prompt across swaps.** Before unloading a router model the
+  coordinator saves slot 0 (`POST /slots/0?action=save`, KV cache and context checkpoints) to the
+  router's `/slot-cache`; after loading the target (`POST /models/load`, `wait_until_loaded`) it
+  restores that model's file while still holding the switch key, so the first request processes only
+  its new tokens (measured: 30 tokens instead of 51K; save/restore 0.1–0.4 s). The router takes the
+  model from the JSON body (`{"model","filename"}`) and answers chunked. Any failure only logs
+  `slot-cache: …` and the request processes its full prompt. Settings in `cortex.lua`: `SLOT_CACHE`,
+  the timeouts, and `slot_cache = true` per router, only for a build that writes context checkpoints
+  into slot files (without them a restored slot is not reused). `bench.sh` sends
+  `X-Cortex-No-Slot-Cache` so a measurement never reads a restored cache. Each router has a capped
+  tmpfs at `/slot-cache` (emptied on every container start, so a file never outlives a `models.ini`
+  change) and `slot-save-path = /slot-cache` in its `[*]`; `llama-cpp/slot-cache-entrypoint.sh`
+  prunes by age (`SLOT_CACHE_TTL_MIN`) and size (`SLOT_CACHE_KEEP_GB`), then `exec`s `llama-server`.
 
-**Adding another llama.cpp router on :8080** (a model whose provider needs its own build: name the router for the model, as `raon-llama-cpp`):
-- one line in `cortex.ROUTERS` (`key`, `host`, `ini = "/etc/nginx/<name>-models.ini"`); `BACKENDS`, `HOST`, routing, the unload sweep, `/availability` slots and the `/v1/models` merge all follow from it. The nginx internal locations match any `<name>-llama-cpp` host, so nginx.conf needs no edit
-- compose: a `<name>-llama-build` (profile `build`) and a `<name>-llama-cpp` service (copy inkling's, or raon's minus its `HF_TOKEN`), the ini mount into openresty, and the HF-cache volume in `compose.override.yml`. Pin the build to a tag (`LLAMA_REF`), a commit (`LLAMA_COMMIT`), or, when the provider publishes the build only as a source archive, `LLAMA_TARBALL` + `LLAMA_TARBALL_SHA256` (as inkling's). A git tag named like an archive release need not hold the same code: Unsloth's `b12588-mix-c0c3de8` tag is their PR-list state, without the `inkling2` arch the tarball carries, so compare before choosing git
-- `<name>-llama-cpp/models.ini` + `models/`; `BENCH_BACKENDS` in `tools/bench.sh`, `BACKENDS` in `tools/gen_metrics.sh`, `CORTEX_ROUTERS` default in `tools/model_cache.py`
+**Naming.** Compose services use hyphens (`prism-llama-cpp`), Lua keys underscores
+(`prism_llama_cpp`). A router's name is one word before `-llama-cpp`: nginx's internal locations
+match `(?:[a-z0-9]+-)?llama-cpp`. `cortex.ROUTERS` holds each router's key, host and ini;
+`coordinator.lua` builds its `HOST` table from it, plus `ollama` and `nllb`.
+
+**Adding a llama.cpp router** (a model whose provider needs its own build):
+- one line in `cortex.ROUTERS` (`key`, `host`, `ini = "/etc/nginx/<name>-models.ini"`); routing,
+  `BACKENDS`, `HOST`, the unload sweep, `/availability` slots and the `/v1/models` merge follow from it
+- compose: a `<name>-llama-build` (profile `build`) and a `<name>-llama-cpp` service (copy inkling's),
+  the ini mount into openresty, and the HF-cache volume in `compose.override.yml`
+- `<name>-llama-cpp/models.ini` and `models/`; `BENCH_BACKENDS` in `tools/bench.sh`, `BACKENDS` in
+  `tools/gen_metrics.sh`, the `CORTEX_ROUTERS` default in `tools/model_cache.py`
 - `EXTRA` in `tools/test_coordinator.py` (a mock and its models) and a scenario
-- slot cache: `slot_cache = true` on its `cortex.ROUTERS` line only if its build writes context checkpoints into slot files (look for `restored from a slot file` in `libllama-server-impl.so`); then the tmpfs, entrypoint, mount and `SLOT_CACHE_*` environment in its compose service (copy inkling's) and `slot-save-path = /slot-cache` in its `[*]`
-- first deploy: `docker compose up -d <name>-llama-cpp openresty model-cache` (openresty is recreated for the new mount)
+- slot cache: `slot_cache = true` only if the build writes checkpoints into slot files (look for
+  `restored from a slot file` in `libllama-server-impl.so`); then the tmpfs, entrypoint and
+  `SLOT_CACHE_*` environment (copy inkling's) and `slot-save-path` in its `[*]`
+- first deploy: `docker compose up -d <name>-llama-cpp openresty model-cache`
 
-**Adding a different kind of backend:**
-- `HOST` table (DNS hostname for TCP calls)
-- `TARGET` in `cortex.lua` (port → key mapping); `coordinator.lua` records the chosen key in `ngx.ctx.target` and `log.lua` releases that key
-- `BACKENDS` in `cortex.lua` (the in-flight counts `/availability` reports)
-- Unload function (API call to free VRAM on that backend), plus the no-state sweep in `switch_to`
-- `tools/coord_mock.py` / `tools/test_coordinator.py` (a mock for it, and a scenario)
+**Adding another kind of backend:** `HOST`; `TARGET` in `cortex.lua` (port → key; `log.lua` releases
+the key in `ngx.ctx.target`); `BACKENDS` in `cortex.lua`; an unload function and the no-state sweep
+in `switch_to`; a mock and a scenario in `tools/coord_mock.py` / `tools/test_coordinator.py`.
 
-## Client agents (`pi` / `opencode`)
+## Deploying changes
 
-Both client services live on `cortex_network` and have their model lists generated at
-container start; their config volumes are `pi_data:/root/.pi/agent` and
-`opencode_data:/root/.config/opencode`.
+| Change | Apply with |
+|---|---|
+| Lua file or `nginx.conf` | `docker compose restart openresty`. These are single-file mounts: an editor that saves by rename (most do, including Claude Code's Edit) leaves the container on the old file, and `openresty -s reload` keeps it. Check with `docker exec cortex-openresty-1 grep … /etc/nginx/lua/<file>`. |
+| `openresty/Dockerfile` | `docker compose build openresty && docker compose up -d openresty` |
+| a router's `models.ini` | `docker compose restart <router>` (read only at start) |
+| `openresty/scripts/`, `opencode/agents/`, `opencode/commands/` | nothing: directory mounts. A running OpenCode session may need a restart. |
+| a new mount or volume in `compose.yml` | `docker compose up -d <service>` (recreate) |
+| `model-cache` settings | `docker compose up -d model-cache` |
+| `pi` / `opencode` images | `CACHEBUST=$(date +%s) docker compose build pi opencode`. Neither agent is pinned; a new `CACHEBUST` re-runs only the agent-install layer. |
+| a llama.cpp build | `docker compose --profile build build <name>-llama-build`, then `docker compose up -d <router>` and re-bench |
 
-- **OpenCode agents and commands** are tracked in `opencode/agents/` and `opencode/commands/` and
-  bind-mounted read-write over `/root/.config/opencode/agents` and `/commands`, on top of the config
-  volume. Edit them here or from inside OpenCode (its edits land in this working tree; review them with
-  git); the container sees changes at once (directory mounts), and a running
-  OpenCode session may need a restart to reload them. Design, evidence and open items:
-  `docs/reference/opencode-agents.md`. They are OpenCode-specific: Pi has no built-in agents or
-  subagents, and its prompt templates lack OpenCode's `agent:` / `subagent:` fields. Machine-specific
-  skills (e.g. a browser skill) stay in the config volume, not here.
+**llama.cpp builds.** All builders share `llama-cpp/Dockerfile`. **`compose.yml` holds the pins**:
+a release tag (`LLAMA_REF`), a commit (`LLAMA_COMMIT`, for a branch without tags), or a source archive
+(`LLAMA_TARBALL` + `LLAMA_TARBALL_SHA256`, when a provider publishes the build only that way; the
+build fails on a checksum mismatch). Bump a pin deliberately: each build is tagged with its pin, so the
+previous image stays for rollback, and the router's records must be re-benched: a record keeps the
+`build_info` of the build it was benched on until then (`docs/reference/llama-cpp-b12785-quick-ab.md`
+has the last bump's A/B). A git tag named like an
+archive release need not hold the same code (Unsloth's PR-list tags lack the `inkling2` arch their
+tarballs carry): compare before choosing git. Build PrismML's fork from its `prism` branch release
+tags; its `master` is a stale upstream mirror. An archive has no `.git`, so `--version` shows what its
+`cmake/build-info.cmake` carries.
 
-- **Shared scripts** are in `openresty/scripts/`, bind-mounted read-only at
-  `/etc/nginx/scripts` (served on every port for `curl URL | sh`) and
-  `/opt/cortex-scripts` (used by the entrypoints). `agent-common.sh` holds package /
-  toolkit / release-install helpers; `models-common.sh` holds model discovery and the
-  Pi/OpenCode writers. The four entry scripts are thin wrappers.
-- **Installers** (`install-pi.sh`, `install-opencode.sh`): no flags installs the agent
-  and regenerates its model list; `--all` adds every toolkit; `--models-only` only
-  refreshes the list; `--no-pi` / `--no-opencode` / `--no-tools` / `--no-models` skip
-  parts; `--strict` aborts on the first failure. They support apt (Debian/Ubuntu) and
-  apk (Alpine), and the official OpenCode v2 installer is Bash-only, so `bash` is
-  installed first.
-- **Model discovery** queries `CORTEX_URL/v1/models` (default
-  `http://openresty:8080`) and `OLLAMA_URL/api/tags` + `/api/show` (default
-  `http://openresty:11434`). It filters llama.cpp IDs containing `/` or `#`, reads
-  context from `model-meta.json` / `meta.n_ctx` / `--ctx-size`; for Ollama, what it
-  serves: the model's Modelfile `num_ctx` if set, else `CORTEX_OLLAMA_CTX` (Ollama's
-  default, 4096 here: its automatic VRAM-tier value below 23 GiB, read from its log
-  line `vram-based default context`), capped at the trained `*.context_length`. Not
-  `OLLAMA_CONTEXT_LENGTH` on the ollama service: setting it disables Ollama's automatic
-  context shrink when a load runs out of memory. Pi/OpenCode use `/v1`, which cannot
-  pass `num_ctx` per request. It detects image input and tool support: for Ollama from
-  `/api/show` `capabilities` (Ollama derives `tools` from the template or parser and
-  refuses tool requests without it; `gemma3:12b` has none), for llama.cpp assumed `true`,
-  because only a loaded model reports it (`/props` `chat_template_caps`). `model-meta.json`
-  `tool_call` overrides both. It writes atomically; if both sources
-  return nothing it leaves the existing config unchanged, and if one returns nothing it
-  keeps that provider's existing block (a backend still starting does not empty the list). Both writers merge into an
-  existing file and drop the IDs earlier versions wrote (`cortex`, `ollama`, `llama`)
-  when they point at the same cortex URLs and their replacement is written on that sync;
-  other providers are kept.
-- **OpenCode** writes `~/.config/opencode/opencode.json` (or `OPENCODE_CONFIG`: the
-  generator honours it, but OpenCode v2's docs do not list it, so a custom path may not
-  be read; the containers set it to the default path) using
-  the v2 `providers` block with `package:
-  "@opencode/ai/providers/openai-compatible"`, `settings.baseURL`, and model
-  `limit` / `capabilities`. Provider IDs are `cortex-llama-cpp` and `cortex-ollama`, as in Pi (not `llama`: that is OpenCode's built-in Meta Llama provider and would merge its hosted models into cortex's).
-- **Pi** writes `~/.pi/agent/models.json` (or `PI_MODELS_FILE`) with providers
-  `cortex-llama-cpp` and `cortex-ollama`. Pi's schema has no tool-support field, so Pi sends
-  tools to every model and Ollama refuses them for a model without tool support
-  (`gemma3:12b`); such models stay listed by choice. The output limit (Pi `maxTokens`, OpenCode
-  `limit.output`) is `min(context/4, 16384)` unless `model-meta.json` sets `output`:
-  chosen 2026-11-04 from one day of logs (212 Pi replies on four 72K-160K thinking models,
-  all under 5K but one at 16,321), not measured as best; re-check with more data.
-- **Entrypoints** retry the model sync (`PI_SYNC_MODELS=1`,
-  `OPENCODE_SYNC_MODELS=1`, 10 tries, 3s apart) before `exec`ing the container
-  command.
-- **OpenCode's background server** (`opencode serve --service`, port 49374) starts with the
-  container (`OPENCODE_SERVICE=1` in compose.yml; `opencode/entrypoint.sh` runs `opencode service
-  start`), so `opencode pair` and browser or app clients can connect without a TUI open. Its
-  settings live in the config volume's `service.json` (`opencode service get|set`); the runtime
-  record in `/root/.local/state/opencode/service.json` is rewritten at every start. It listens on
-  127.0.0.1 by default, reachable only inside the container. **Direct access:** set
-  `OPENCODE_HOSTNAME=0.0.0.0` (the entrypoint writes it to `service.json` before the start) and
-  publish 49374/tcp (or put a reverse proxy on a shared network in front), both in
-  `compose.override.yml`, then `opencode pair --url http://<host>:49374`. Without `--url` the links
-  carry the container's own addresses, which other devices cannot reach; `OPENCODE_PAIR_URL` makes
-  a plain `opencode pair` add it (`opencode/opencode-pair-url.sh`, installed as
-  `/usr/local/sbin/opencode` ahead of the binary; `--url` or `--remote` on the command line wins). That is plain HTTP guarded only by the server password: keep it on a LAN or
-  VPN, or put HTTPS in front before forwarding it to the internet (Docker's published ports bypass
-  host firewalls such as ufw). `opencode pair --remote` uses OpenCode's OpenTunnel relay instead;
-  it stores a route in `service.json` (`opencode service unset remote` removes it). OpenCode's data
-  (session database, snapshots, tool output, logs) is kept in the config volume:
-  `XDG_DATA_HOME=/root/.config/opencode/share` puts it in `share/opencode/` there, so it survives a
-  recreate (git-ignore `share/` if the config folder is a git repo). `/root/.local/state/opencode`
-  holds only the running server's record (deleted when it stops) and is not kept.
-- The openresty scripts are a directory mount, so the first deploy needs
-  `docker compose up -d openresty` (recreate); later edits are seen without a
-  restart. Create the new clients with `docker compose up -d pi opencode`.
+**Networks.** `cortex_network` is the compose-managed bridge. A shared network that clients use to
+reach openresty is machine-specific: it goes in `compose.override.yml` (service `networks:` and a
+top-level `external: true`) and must exist before `up`.
 
-## Docker compose commands
+## Client agents (`pi`, `opencode`)
 
-- `docker compose up -d` — start the entire stack
-- `docker compose build openresty` — rebuild OpenResty after Lua/nginx changes
-- `docker compose build nllb` — rebuild nllb translation service after changes
-- `CACHEBUST=$(date +%s) docker compose build pi opencode` — rebuild the client-agent images with the latest agents. Neither is pinned: Pi installs npm `@latest`, OpenCode runs the official v2 installer. A new `CACHEBUST` value (build arg in compose.yml) re-runs only the agent-install layer, so the system packages stay cached; a plain `docker compose build pi opencode` reuses the cached install and only picks up Dockerfile/entrypoint changes. `--no-cache` also works but reinstalls everything
-- `docker compose --profile build build llama-build` — rebuild the upstream llama.cpp image (`llama-cpp:latest` + `llama-cpp:<tag>`; pinned at `b12785`)
-- `docker compose --profile build build prism-llama-build` — rebuild the PrismML fork image (`prism-llama-cpp:latest` + `prism-llama-cpp:<tag>`)
-- `docker compose --profile build build raon-llama-build` — rebuild KRAFTON's Raon fork (`raon-llama-cpp:latest` + `raon-llama-cpp:<short sha>`)
-- `docker compose --profile build build inkling-llama-build` — rebuild Unsloth's Inkling 2 build from its source tarball (`inkling-llama-cpp:latest` + `inkling-llama-cpp:<release>`)
-- All builders share `llama-cpp/Dockerfile` (args `LLAMA_REPO`, `LLAMA_REF`, `LLAMA_COMMIT`, `LLAMA_TARBALL` + `LLAMA_TARBALL_SHA256`, `LLAMA_CMAKE_ARGS`, `CUDA_ARCH`, default 86 = RTX 3060) and are **pinned** in compose.yml, to release tags where the repo has them: upstream `b12785` (2026-11-26, `1.1.0-dev`, commit `55d4828`; the previous pin `b10622`, 2026-08-25, stays as image `llama-cpp:b10622` for rollback; bench records from before the bump carry `build_info` 0.3.0-dev and are re-benched as needed, see `docs/reference/llama-cpp-b12785-quick-ab.md`), the fork `prism-b10777-e3de715`. KRAFTON's `raon-1-mini-preview` branch has no tags, so `LLAMA_COMMIT` pins it to `fb895662d` (2026-10-20, upstream ~b11729 + Raon); the clone fetches that exact commit. Unsloth's Inkling build `b12651-mix-c7059d6` (upstream b12651 + 43 merged PRs, source commit `d426a3774` in no git repo; the previous `b12588-mix-c0c3de8` stays as image `inkling-llama-cpp:b12588-mix-c0c3de8` for rollback) is published only as a release tarball, so `LLAMA_TARBALL` + `LLAMA_TARBALL_SHA256` pin it (the sha256 from the release's `llama-prebuilt-sha256.json`; the build fails on a mismatch); an archive has no `.git`, so `--version` shows the build number and commit its `cmake/build-info.cmake` carries. Its `LLAMA_CMAKE_ARGS` turn off the embedded web UI (`-DLLAMA_USE_PREBUILT_UI=OFF`): that download is outside the checksum and cortex never serves the UI. Build the fork from its `prism` branch's release tags — the fork's `master` is a stale upstream mirror. Bump a tag deliberately, then `docker compose up -d <service>` and re-bench; the previous image stays tagged for rollback.
-- `docker compose up -d prism-llama-cpp` (or `raon-llama-cpp`, `inkling-llama-cpp`) — (re)create only that backend; the router reads its models.ini at start, so a models.ini edit needs `docker compose restart <service>`
-- The internal network is `cortex_network` (compose-managed bridge). Any shared network that clients use to reach openresty is machine-specific: it goes in `compose.override.yml` (service `networks:` plus a top-level `external: true` entry) and must exist before `up`.
+- **Model lists.** `openresty/scripts/models-common.sh` queries `CORTEX_URL/v1/models` and
+  `OLLAMA_URL/api/tags` + `/api/show` (defaults `http://openresty:8080` and `:11434`) and writes Pi's
+  `models.json` and OpenCode's `opencode.json`, with providers `cortex-llama-cpp` and `cortex-ollama`
+  (not `llama`: that is OpenCode's built-in Meta Llama provider). It writes atomically, keeps a
+  provider's existing block when that backend returns nothing (a backend still starting does not empty
+  the list), and keeps other providers. The entrypoints retry the sync 10 times, 3 s apart.
+  - **Context:** llama.cpp from `model-meta.json` / `meta.n_ctx` / `--ctx-size`. Ollama: the
+    Modelfile's `num_ctx`, else `CORTEX_OLLAMA_CTX` (4096: Ollama's automatic default below 23 GiB of
+    VRAM, from its log line `vram-based default context`), capped at the trained context. Do not set
+    `OLLAMA_CONTEXT_LENGTH` on the ollama service: it disables Ollama's automatic context shrink when
+    a load runs out of memory.
+  - **Tools and images:** for Ollama from `/api/show` `capabilities`; for llama.cpp tools are assumed,
+    because only a loaded model reports them. `model-meta.json` `tool_call` overrides both. Pi has no
+    tool-support field and sends tools to every model.
+  - **Output limit** (Pi `maxTokens`, OpenCode `limit.output`): `min(context/4, 16384)` unless
+    `model-meta.json` sets `output`. Chosen 2026-11-04 from one day of logs, not measured as best.
+- **Installers** (`install-pi.sh`, `install-opencode.sh`, served on every openresty port for
+  `curl URL | sh`; apt or apk) install the agent and its model list; `--help` lists the flags. The
+  official OpenCode v2 installer needs bash.
+- **OpenCode agents and commands** are tracked in `opencode/agents/` and `opencode/commands/`,
+  mounted read-write over the config volume. Design and open items: `docs/reference/opencode-agents.md`.
+  They are OpenCode-specific (Pi has no agents or subagents). Machine-specific skills stay in the config
+  volume.
+- **OpenCode's background server** (`opencode serve --service`, port 49374) starts with the container
+  (`OPENCODE_SERVICE=1`; `opencode/entrypoint.sh`). Its settings are the config volume's
+  `service.json` (`opencode service get|set`). It listens on 127.0.0.1 unless `OPENCODE_HOSTNAME`
+  (e.g. `0.0.0.0`, written to `service.json` at start) is set in `compose.override.yml` with a
+  published port or a reverse proxy in front. `OPENCODE_PAIR_URL` makes a plain `opencode pair` add
+  `--url` (`opencode/opencode-pair-url.sh`, installed as `/usr/local/sbin/opencode`); `--url` or
+  `--remote` on the command line wins. Plain HTTP is guarded only by the server password: keep it on a
+  LAN or VPN, or put HTTPS in front (Docker's published ports bypass host firewalls). `--remote` uses
+  OpenCode's relay and stores a route in `service.json`.
+- **OpenCode's data** (sessions, snapshots, logs) is kept in the config volume:
+  `XDG_DATA_HOME=/root/.config/opencode/share`. `/root/.local/state/opencode` holds only the running
+  server's record and is not kept.
+
+## NVMe model cache (`model-cache`)
+
+The models live on a slow disk; a 17–22 GB model took 1–3.5 min to load cold. `tools/model_cache.py`
+copies the files loaded most to `/opt/cortex-models` on NVMe (measured: lfm-2.5-8b 46 s from the model
+disk, 4.1 s from its NVMe copy).
+- **Serving:** the HF cache stores each file as `snapshots/<rev>/<name>.gguf` → `../../blobs/<sha256>`.
+  Promoting copies the blob to `/opt/cortex-models/<sha256>` (sha256-checked) and repoints the snapshot
+  link; evicting repoints it back and deletes the copy. **The blob on the model disk is never touched.**
+  `/opt/cortex-models` is mounted read-only at the same path in every router. Each load starts a new
+  `llama-server`, which follows the link then; a loaded model keeps the file it opened.
+- **Choosing:** it polls every router's `/v1/models` every 5 s; a preset turning `loaded` is one load of
+  its `hf` file. On the 3rd load within 7 days the file is copied, with its `mtp-*.gguf` drafter and
+  mmproj. Copies stay under 128 GB. **Eviction takes the lowest use score:** each load in the window
+  counts `0.5 ** (age / 24 h)`. A model is copied only if it can make room from copies scoring below its
+  own, so a one-off pass that loads every model once cannot push out models in daily use.
+- **State:** `/opt/cortex-models/state.json`; on start and hourly it repairs dangling or unknown links,
+  stale copies and `*.part` files. Settings are `CORTEX_NVME_CACHE*` in its `compose.yml` environment.
+  `CORTEX_NVME_CACHE=off` points every link back, deletes the copies and exits.
+- **A slow load usually means the file is not on the NVMe:** `docker logs cortex-model-cache-1` shows
+  `evicted` and `SSD, load n/3`.
+
+## Benchmarking
+
+`tools/bench.sh` tunes and records llama.cpp router entries: batch, MTP settings, then a benchmark
+JSON in `<backend>/models/`. Usage is in its header. **Method and evidence:
+`docs/reference/benchmarking.md`.** What must not break:
+
+- **Never run an untuned entry.** The `[*]` `batch-size`/`ubatch-size = 4096` is a deliberate fallback
+  that OOMs on most entries. Tune first (`bench.sh all <model>`, or `bisect`); never set batch or MTP
+  values by hand.
+- **One `bench.sh` run at a time**, on any backend (it takes a `flock`; runs on different routers
+  still fight over the GPU and the inis).
+- **Families:** entries differing only in sampling, reasoning or chat-template keys share their
+  head's record; only the head is benched. `-vision` entries and entries differing on memory keys are
+  their own heads. Use `--no-inherit` when a pick sits within a factor of two of the spill ceiling.
+- **Safety gates, never relaxed:** an OOM is read from the router log, never from the HTTP code; a CPU
+  placement rejects a batch for a GPU-class model; a pick is validated only by saturation at ~99% ctx
+  and a real-text long decode. A record with `discover.confirm: skipped` (batch-only) is not validated.
+  Fast OOM grep: `docker logs --since 10s cortex-<router>-1 | grep -E "cudaMalloc failed|failed to
+  allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due
+  to model loading error|CUDA error: out of memory|cuMemCreate"`.
+- **A load-only probe proves nothing:** OOM comes at the first decode, or at load for MTP models.
+  Send a real inference request.
+- **`-fit` never budgets the MTP draft:** on a tight model the draft lands on CPU silently (decode
+  3–4× slower, CPU 270%+). Check placement again after any `spec-draft-n-max` change. Shrink the draft
+  with `spec-draft-type-k/v = q4_0`; never use `spec-draft-ngl`, which pushes main-model layers to CPU.
+- **MTP settings are speed-only** (output is unchanged by construction). MTP is kept only if it beats
+  MTP off by more than 2%; `mtp.ab.decision: off` removes the spec-* keys. `-mtp` in a name marks an
+  MTP-capable model, not MTP on.
+- **The routers run offline** (`offline = true` in every `[*]`): an online load first asks Hugging Face
+  for the file list, and a failed connection once stalled a load ~5 min while the coordinator waited.
+  A model added by hand fails to load until fetched: `bench.sh fetch <entries…>` downloads with
+  `tools/hf_fetch.sh`, pinned to the commit already cached; it falls back to a one-off online load
+  only when the files cannot be resolved. **Going online can strand other quants of the same repo**
+  (`refs/main` moves to the upstream head and offline loads look only in that snapshot);
+  `strand_guard` lists what would stop loading and asks first (`BENCH_ALLOW_STRAND=1` without a
+  terminal).
+
+## Gotchas
+
+- **`models-max` must not be set on a router.** The router would unload children itself, racing the
+  coordinator's unloads and leaving residual VRAM. The coordinator is the only source of unloads.
+- **`load-mode = mmap+mlock` in every `[*]`**, not `no-mmap`: `no-mmap` copies the GGUF into anonymous
+  memory beside the page cache (~2× RAM) and `mlock` then locks nothing. Measured on a 35B MoE: RAM
+  while loaded ~38.5 → ~23 GB, warm reload 20–27 → ~14 s; prefill −10%, decode +4–9% on the
+  CPU-resident model. Never overwrite a loaded `.gguf` in place: truncating a mapped file kills the
+  process with `SIGBUS` (download or copy-and-rename instead). b12785's warning `tensor overrides to
+  CPU are used with mmap enabled - consider using --load-mode none` is not a reason to switch: on a
+  35B MoE `load-mode none` loaded slower (15 s vs 8 s from NVMe) and held a ~15 GB private copy, for
+  +25% prefill and the same decode.
+- **Backends resolve at request time:** `proxy_pass` uses a variable, with `resolver 127.0.0.11
+  valid=10s`. A router restart can hand its old IP to another router; with the default 600 s TTL,
+  requests went to the wrong router (`model … not found`).
+- **The drain blocks an nginx worker** (`ngx.sleep` in the access phase) for up to `DRAIN_TIMEOUT`. Do
+  not raise it without weighing the concurrency cost.
+- **A direct slot call loads the model it names.** `POST /slots/0?action=save|restore` for a model that
+  is not loaded makes the router load it beside the resident one. Avoid such calls by hand.
+- **`models_list.lua` must keep empty arrays as `[]`** (a private cjson instance with
+  `decode_array_with_array_mt(true)`); the default round-trip turns `tags` / `aliases` into `{}`.
+- **The coordinator's `http_request` must decode chunked replies:** the routers answer `/slots` that way.
+- **`get_model()` reads the body in the access phase** (`ngx.req.read_body()`; nginx still forwards it).
+  If it cannot parse a `model`, the coordinator unloads on a backend mismatch and skips on a
+  same-backend model change.
+- **Watch the coordinator:** `docker logs -f cortex-openresty-1 | grep '\[lua\]'` (prefixes
+  `coordinate()`, `drain`, `switch:`, `state:`, `hold:`, `pass:`, `wait:`, `slot-cache:`). INFO-level
+  logging is enabled by a `sed` in `openresty/Dockerfile`.
 
 ## File layout
 
 ```
- cortex/
-├── compose.yml
-├── README.md
-├── LICENSE
-├── full-metrics.md        # full table of all models.ini entries (regenerate via tools/gen_metrics.sh)
-├── tools/                 # benchmark/metrics scripts
-│   ├── bench.sh               # unified pipeline: mtpcheck → bisect → mtp → bench (canonical)
-│   ├── gen_metrics.sh         # regenerate full-metrics.md from llama-cpp/models/*.json
-│   ├── model_cache.py         # the model-cache service (NVMe copies of the models loaded most)
-│   ├── test_coordinator.py    # offline test of the human/bot policy (docker, no GPU)
-│   └── coord_mock.py          # stand-in for all three backends, used by that test
-├── llama-cpp/
-│   ├── models.ini          # llama.cpp models preset file
-│   ├── slot-cache-entrypoint.sh  # router entrypoint: prunes /slot-cache, then llama-server
-│   ├── models/             # per-model benchmark JSONs (written by bench.sh)
-│   └── Dockerfile          # CUDA build from source (shared by both llama.cpp backends)
-├── prism-llama-cpp/
-│   ├── models.ini          # presets for the PrismML fork (Bonsai); names unique vs llama-cpp's
-│   └── models/             # its bench JSONs
-├── raon-llama-cpp/
-│   ├── models.ini          # Raon-1 mini presets (KRAFTON's fork)
-│   └── models/             # its bench JSONs
-├── inkling-llama-cpp/
-│   ├── models.ini          # Inkling 2 Mini presets (Unsloth's build)
-│   └── models/             # its bench JSONs
-├── nllb/
+cortex/
+├── compose.yml, compose.override.yml (git-ignored), AGENTS.md, README.md, LICENSE
+├── full-metrics.md        # every bench record in one table (tools/gen_metrics.sh)
+├── openresty/
+│   ├── nginx.conf           # shared dicts, 4 server blocks (80/11434/5002/8080)
+│   ├── coordinator.lua      # routing, switching, unloads, slot cache
+│   ├── cortex.lua           # routers, human/bot policy, constants
+│   ├── availability.lua     # GET /availability
+│   ├── models_list.lua      # GET /v1/models on :8080, every router merged
+│   ├── log.lua              # log phase: releases counts, stamps idle times
 │   ├── Dockerfile
-│   ├── entrypoint.sh
-│   └── server.py          # HF translation (NLLB) FastAPI service
-├── pi/
-│   ├── Dockerfile
-│   └── entrypoint.sh      # auto-sync Pi models.json at start
-├── opencode/
-│   ├── Dockerfile
-│   ├── entrypoint.sh      # auto-sync OpenCode opencode.json at start
-│   ├── agents/            # OpenCode agents: orchestrator (primary), coder, scout, vision, advisor, reviewer
-│   └── commands/          # OpenCode commands: /orchestrate, /review, /verify, /handoff
-├── docs/
-│   ├── reference/          # how it works and why, measured findings (CPU_POLLING.md, opencode-agents.md, ...)
-│   └── sessions/           # session states and handoffs: git-ignored, never committed
-├── tracker/                # plans, issues and work orders, one markdown file each (see below)
-│   ├── plans/{open,resolved,closed}/
-│   ├── issues/{open,resolved,closed}/
-│   └── work-orders/{open,resolved,closed}/
-└── openresty/
-    ├── Dockerfile           # FROM openresty/openresty:bookworm-fat, sed patches error_log
-    ├── nginx.conf           # lua_shared_dict directives, 4 server blocks (80/11434/5002/8080)
-    ├── coordinator.lua      # VRAM coordinator — API-based model unload
-    ├── availability.lua     # GET /availability on every port (busy, idle_for, human_*, ...)
-    ├── models_list.lua      # GET /v1/models on :8080 — every llama.cpp router merged
-    ├── cortex.lua           # human/bot policy and constants (HUMAN_HOLD, BOT_HOLD_CAP)
-    ├── log.lua              # log phase: releases counts, stamps last_done / human_last
-    └── scripts/             # raw client tooling, served on every port as text/plain
-        ├── agent-common.sh
-        ├── models-common.sh
-        ├── install-pi.sh
-        ├── install-opencode.sh
-        ├── generate-models-pi.sh
-        └── generate-models-opencode.sh
+│   └── scripts/             # client installers and model-list generators, served as text
+├── llama-cpp/               # Dockerfile (every router's build), slot-cache-entrypoint.sh,
+│                            # models.ini, models/ (bench JSONs)
+├── prism-llama-cpp/, raon-llama-cpp/, inkling-llama-cpp/   # models.ini, models/
+├── nllb/                    # Dockerfile, entrypoint.sh, server.py
+├── pi/                      # Dockerfile, entrypoint.sh (model sync at start)
+├── opencode/                # Dockerfile, entrypoint.sh, opencode-pair-url.sh, agents/, commands/
+├── tools/                   # bench.sh, gen_metrics.sh, hf_fetch.sh, model_cache.py,
+│                            # test_coordinator.py, coord_mock.py
+├── docs/                    # reference/ (tracked), sessions/ (git-ignored)
+└── tracker/                 # plans/, issues/, work-orders/
 ```
-
-**Rule: All scripts, tools, and utility files go in the `tools/` folder, except the
-client-facing scripts in `openresty/scripts/` (served to remote clients).**
 
 ## Docs and tracker
 
@@ -208,6 +300,10 @@ items that move between states.** Outside them stay only files a tool expects in
 
 - `docs/reference/`: design, how-tos, runbooks and measured findings. Keep a reference doc current and
   edit it in place, without a change log; a dated finding is a record and is not rewritten later.
+  Today: `benchmarking.md` (bench method and evidence), `CPU_POLLING.md` (placement measurement),
+  `opencode-agents.md` (the OpenCode agents' design), `nllb-translation-service.md` (the nllb API),
+  `llama-cpp-b12785-quick-ab.md` (the last upstream bump's A/B) and
+  `llama-cpp-tuning-and-version-gap.md` (untried llama.cpp knobs, 2026-11-22).
 - `docs/sessions/`: session states and handoffs, named `YYYY-MM-DD-<topic>.md`. **Git-ignored**: they
   often hold private details and this repository is public. Delete one once it has been picked up;
   move anything lasting into `docs/reference/` or a tracker item first.
@@ -225,178 +321,20 @@ Each tracker has the same three states:
 | issue | to do | fixed or done | will not do, or no longer applies |
 | work order | ready or in progress | carried out | abandoned |
 
-- **Files:** `plan-NNNNNN-slug.md`, `issue-NNNNNN-slug.md`, `work-order-NNNNNN-slug.md`, the ID zero-padded to
-  six digits and never reused. **Each tracker has its own sequence**: the next ID is one above the
-  highest in all three of its folders, e.g.
+- **Files:** `plan-NNNNNN-slug.md`, `issue-NNNNNN-slug.md`, `work-order-NNNNNN-slug.md`, the ID
+  zero-padded to six digits and never reused. **Each tracker has its own sequence**: the next ID is one
+  above the highest in all three of its folders, e.g.
   `ls tracker/issues/*/issue-*.md | sed 's/.*issue-0*\([0-9]*\)-.*/\1/' | sort -n | tail -1`.
   Start from the tracker's `TEMPLATE.md`.
 - **Moving one:** `git mv` it to `resolved/` or `closed/`, set `**Status:**` to match, and add a
   **Resolution** section: what was done, what proved it, the commit; or why it was closed. Never
   delete a tracker file: the record of a rejected approach is the point.
 - **Work orders** list their sources (`**Includes:** issue-NNNNNN, plan-NNNNNN`) and each source gets
-  a back-link (`**Work order:** work-order-NNNNNN`). An item is in at most one open work order. Resolving a
-  work order moves the sources it fully covered to `resolved/` in the same commit; a source it only
-  partly covered stays open with a note.
+  a back-link (`**Work order:** work-order-NNNNNN`). An item is in at most one open work order.
+  Resolving a work order moves the sources it fully covered to `resolved/` in the same commit; a
+  source it only partly covered stays open with a note.
 - **AGENTS.md, the README and code comments name no specific plan, issue or work order**: they
   state how things are, and the tracker holds the history behind them.
 - **Public repository:** no personal names, hostnames, IPs or private paths in `docs/reference/` or
   `tracker/`.
 - An item whose header predates the template keeps it; its folder is its state.
-
-## NVMe model cache (`model-cache` service)
-
-Cold loads read the whole GGUF from `/mnt/md2` (a SATA btrfs RAID1 whose KingSpec mirror reads weeks-old data at ~100 MB/s), so a 17–22 GB model could take 1–3.5 min to load. `tools/model_cache.py` runs as the `model-cache` service and copies the files loaded most to `/opt/cortex-models` on the NVMe root filesystem.
-- **How a file is served:** the HF cache keeps each file as `snapshots/<rev>/<name>.gguf` → `../../blobs/<sha256>`. Promoting copies the blob to `/opt/cortex-models/<sha256>` (sha256-checked) and atomically repoints the snapshot link there; evicting repoints it back and deletes the copy. **The blob on the SSD is never touched**, so the SSD always has a complete copy. `/opt/cortex-models` is mounted at the same path in every router (read-only), so the absolute link resolves in them. Each load starts a new `llama-server`, which follows the link at start: nothing restarts, and a loaded model keeps the file it opened.
-- **What gets copied:** the service polls every router's `GET /v1/models` every 5 s; a preset that turns `loaded` is one load of the file its `--hf-repo` names (all variants and ctx sizes of one `hf` count together). On a file's 3rd load within 7 days it is copied, together with its `mtp-*.gguf` drafter and, if the preset loads one, its mmproj. Copies stay under 128 GB. To make room, the copy with the lowest **use score** goes first: each load in the last 7 days counts `0.5 ** (age / 24 h)` (`CORTEX_NVME_CACHE_HALF_LIFE_H`), so recent, frequent use wins: yesterday's loads count half, a burst of use a week ago almost nothing. A model is copied only if it can make room from copies scoring below its own, so a one-off load (a smoke test, an A/B pass) cannot push out a model in daily use, and a model no longer used fades out within days however many loads it once had (changed 2026-11-26 from least-recently-loaded, which a pass loading every model once had turned against the most used models). The copy runs right after the load, while the file is still in the page cache.
-- **State:** `/opt/cortex-models/state.json`. On start and hourly the service repairs links whose copy is missing, links into the folder it does not know, stale copies of a model updated upstream, and leftover `*.part` files. A link never stays dangling.
-- **Settings** are in the service's `environment:` in `compose.yml` (`CORTEX_NVME_CACHE`, `_GB`, `_LOADS`, `_DAYS`, `_HALF_LIFE_H`, `_DIR`); apply with `docker compose up -d model-cache`.
-- **Off:** `CORTEX_NVME_CACHE=off` points every link back at its SSD blob, deletes the copies and the state, and exits 0 (`restart: on-failure` keeps it stopped). Back to `on` starts from zero.
-- **Measured 2026-10-21:** lfm-2.5-8b cold load 46 s from the SSD, 4.1 s from the NVMe copy. Watch it with `docker logs -f cortex-model-cache-1`.
-
-## Benchmark backends
-
-`bench.sh` benches a llama.cpp router: `llama-cpp`, `prism-llama-cpp`, `raon-llama-cpp`, or `inkling-llama-cpp` (`BENCH_BACKENDS`). Selecting one sets `INI` (`<backend>/models.ini`), `MODELS_DIR` (`<backend>/models/`), `SERVICE` (the compose service `restart()` restarts) and `DOCKER_LOG` (the container whose log the OOM/served greps read). A subcommand picks the backend from the model names it is given (one backend per run); the interactive menu asks first; `--backend=<name>` / `BENCH_BACKEND` forces it. `ollama` and `nllb` are listed as stubs and exit with "no benchmark support yet". Requests still go to openresty `:8080`, which routes the model to its router and unloads the others, so a bench never shares the GPU with another backend. Bench JSONs record `backend` and the backend binary's `llama-server --version` as `build_info`. A bench whose decode comes back `CPU` for a model the bisect classified `GPU` gets the verdict `WARN (placement CPU at bench)` — the pick did not hold at the bench's long context. `gen_metrics.sh` covers every backend (a `backend` column). The router reads `models.ini` only at start, so on exit `bench.sh` restarts `SERVICE` if the ini changed since its last restart (e.g. `inherit_json` removing a sibling's spec-* keys after the head's bench). Without it the siblings kept serving MTP after the A/B decided off. **One `bench.sh` run at a time, on any backend:** after the backend is chosen it takes `flock` on `/tmp/cortex-bench.lock` (held until exit; the file names the holder) and a second run exits with an error, without its EXIT-trap router restart. Two runs fight even on different routers — each restarts its router and edits its ini (fetch's temporary `offline = false`), and openresty unloads one's model for the other's — which on 2026-10-22 killed both a background fetch and an interactive suite mid-download.
-
-## Pre-flight checklist (BEFORE benchmarking ANY model)
-
-1. **Verify batch-size/ubatch-size is EXPLICITLY set** in `models.ini` for the target `[model]` entry
-2. **If not set, it inherits 4096 from `[*]` — this is WRONG** and must be tuned first
-3. **Run batch tuning** (`./tools/bench.sh bisect <model>`, discover mode by default) before any benchmark — one pass sets the batch and runs the residency / saturation / long-decode gates
-4. **THEN run the full bench:** `./tools/bench.sh bench <model>`
-
-**Coder and think variants inherit from their family head — they are NOT benched separately.** A family is every entry sharing the same `hf`, the same `ctx-size` AND the same value for every key that can change memory or speed. Only `FAMILY_FREE` keys may differ (`family_scan` in bench.sh): sampling, reasoning and chat-template keys, plus the tuning outputs that inheritance copies from the head (`batch-size`/`ubatch-size`, `spec-type`/`spec-draft-n-max`/`spec-draft-p-min`). So `-coder`, `-think` and `-think-coder` siblings of one weights/context pair form one family. A `-vision` entry (`no-mmproj = false` loads the projector, ~0.9 GB on the 35B) is its own family head and is bisected and benched itself. So is an entry that differs from the head on `override-tensor`, cache types, draft KV types or any key not in the list. Values fall back to `[*]`. `bench.sh` benches the head (the first such section in models.ini) and copies its record to the siblings in seconds, rebuilding each sibling's `config` block from its own section. Cost therefore scales with distinct weight-and-context combinations, not with the number of entries.
-
-This reverses the earlier rule, which predated family inheritance. Sampling parameters, the reasoning toggle and the chat template do not change prefill or decode rate, so the head's measurements transfer. The one caveat is near the memory ceiling: `reasoning = on` has been observed to sustain a slightly larger batch than `reasoning = off` on the same GGUF and ctx (Qwen3.5-9B-MTP @ 16K: 2048 vs 1984). When a pick sits within a factor of two of the spill ceiling, bench the think sibling separately with `--no-inherit`. A head whose bench fails does not feed its record to siblings; they are skipped and reported as `SKIPPED (parent bench failed)`.
-
-## Batch tuning (discover mode, default)
-
-`bench.sh bisect <model>` finds a practical `batch-size`/`ubatch-size` in roughly a quarter of the runs of the old exhaustive search. It treats **batch as a prefill knob**: for single-stream serving (`parallel = 1`), decode throughput does not depend on batch unless the batch pushes memory (the MTP draft buffer, KV) off the GPU. So batch is picked on the **prefill curve** and *guarded* by a residency check — never ranked by decode t/s.
-
-Why the old search over-resolved: llama.cpp `-fit on` (default, `ngl = -1`) packs weights into VRAM leaving ~zero headroom, and the prefill curve is flat from ~512 up to a few thousand (on the 35B Qwen every rung 512→4096 scored within 3%; two points 64 tokens apart differed by 3%). Refining a ceiling to 64-token granularity, or running golden-section prefill searches, only resolved measurement noise. The ceiling is real but coarse — a model either fits a batch or it does not, and decode only changes where something spills.
-
-Procedure (`cmd_bisect_discover`):
-1. `CAP = min(ctx-size, 16384)`. Walk one **coarse ladder** of powers of two from 256 up to CAP (if 256 already fails at load, the ladder restarts at 128, then 64, and that rung takes 256's role: MODE, decode baseline, refinement floor), stopping early once two consecutive rungs measure below the running best prefill × `PREFILL_TOL`. **Non-MTP shortcut (Change A):** for a model with no `spec-type=draft-mtp` and no `override-tensor` (no draft to spill, batch-independent decode), residency runs on the ladder only at rung 256 (to set MODE) and the decode baseline + pick decode-sample are skipped — saturation, long-decode and OOM gates are unchanged. Residency **is** re-run once at the pick (step 4): "no draft to spill" does not mean batch-independent memory, since `-fit` also budgets the compute buffer, and past its 1 GiB free-memory target it moves a whole layer to CPU with no OOM (dirk-qwen3.8-27b @ 90112: GPU at 256, 65/66 layers at the pick 512, ~600% CPU, decode −18%).
-2. Each rung does **three cheap measurements on the same server instance**: a `tiny_probe` (OOM at load / first decode) → a `residency_probe` (**binary** GPU / CPU verdict via `classify_placement`, Change F §37; a `CPU` at rung 256 means the model is CPU-compute and residency is skipped thereafter) → a `prefill_probe_sized` using the **same** ~`min(0.75 × ctx, 16384)`-token prompt on every rung, so rungs rank on identical work. A rung that OOMs or spills (`SPILL`) ends the ladder. Placement is never `AMBIGUOUS` — `classify_placement AVG_CPU AVG_GPU` returns GPU if CPU < 150 and GPU > 25%, else decides on GPU alone, else CPU.
-3. **Pick = the best-measured PASS point** (`PREFILL_TOL` defaults to **0** — Change C, §30.2). Set `PREFILL_TOL=0.03` if you want to prefer a smaller batch within 3% of best for MTP draft-buffer headroom. Then **Change G — unconditional golden-section refinement to 64** (§38): bracket the Change-C pick (lower neighbour PASS rung up to the next measured point above; at a ceiling edge the upper bound is the failed OOM/SPILL rung; when the pick is the top rung with nothing above, §39.2#2 refines **down** in `[BLO, PICK]` because the peak can sit below the cap at a non-rung — unless the whole bracket is single-ubatch (`BLO ≥ PROBE_TOKENS`), which measures identically and is skipped) and run a golden-section maximisation of prefill inside it, candidates rounded to 64, until the bracket is ≤ 64 wide (hard cap ~14 steps). Reuse any already-measured point; a candidate that OOMs/spills becomes the new upper bound. **Residency is skipped on interior probes of a PASS/PASS bracket** (memory is monotonic in batch — nothing between two passing rungs can spill); it runs only while the active upper bound is an unmeasured failed rung (ceiling edge) and the model is non-`SIMPLE_NONMTP` and not CPU. **Median-of-3 is unified in `prefill_probe_sized`** (§39.2#1): a sized-prefill probe that completes in <5 s is re-sampled to the **median of three** on the same warm instance, for ladder rungs AND refinement candidates alike, so every point in the JSON is measured the same way (a ladder rung can no longer be a single high-noise sample that out-ranks a genuinely higher median). `PREFILL_NOISE` no longer gates the search or triggers the median (the <5 s fast-probe threshold does); the final 64-token digit among noise-tied neighbours is whichever sampled highest. Refinement points are recorded in the JSON ladder with `status: REFINE`.
-4. **Confirm at pick, one restart**: on a simple non-MTP GPU model a `residency_probe` first (CPU → step down, ~30 s) → `saturation_test` (~99% ctx, with compaction or ceiling truncation) → `long_decode_check` (real prompt, sustained decode) → on MTP GPU models a `decode_sample` compared against the batch-256 baseline (re-sample once below `DECODE_CLIFF` 0.70× baseline; step down on a CPU placement signature; the 0.90–0.70 band is a WARN, never a failure). Max 2 step-downs to the next lower measured PASS point (refinement points first, then ladder rungs), then fail with the ini restored.
-5. Leave the config at the winning value with a comment: `ubatch-size = N ; discover pick (coarse ceiling M PASS)`.
-
-**Batch-only mode — `bench.sh batch <models…>` (or `bisect <model> --no-confirm`).** Runs the same ladder and refinement and applies the pick, then stops: it keeps the ladder's residency checks and the cheap pick-residency for a simple non-MTP GPU model, but skips the batch-256 decode baseline, `saturation_test`, `long_decode_check` and the pick `decode_sample`/cliff. The discover JSON records `confirm: skipped` (a normal bisect records `passed`). This is a prefill pick, **not full-context validation** — run `bisect` (or the gates) before trusting it. It is discover-only: `--thorough` and the numeric `bisect <model> <batch>` form reject it.
-
-**The coarse ceiling is informational, not authoritative.** It is logged as `ceiling(coarse)=… PASS / … OOM|SPILL` (or `≥ N PASS, not probed higher`) and recorded in the JSON, but nothing downstream consumes it. Do not read it as a guarantee that `N` can safely be raised.
-
-**`--thorough` (or `BENCH_THOROUGH=1`) re-enables the legacy exhaustive search** (`cmd_bisect_thorough`): the golden-section prefill sweep, the 64-token ceiling bisect, the top-5 shortlist decode gate and the saturation-confirm loop. `BENCH_DISCOVER=1` is a deprecated no-op alias for the default discover mode.
-
-**Refinement depth is a setting (§42 Change H): `--refine=64|coarse|off`, env `BENCH_REFINE`.** The default `64` is Change G as accepted in §41 — unconditional golden-section refinement of the bracket around the best rung down to 64-token granularity (a fully measured record; ~3.5 min of refinement per model on lfm-class). `coarse` restores Change E within the same loop — keep refining only while a step's better interior point beats the pre-step best by `PREFILL_NOISE`, with the E resolution as the width stop (typically one to three probes, ~1 min); `off` is the ladder only, pick = best rung, no refinement (fastest; ~0 min). The warm-up probe and the median-of-three (§40.2#2) stay on in **every** mode — they correct a measurement bias, not a resolution choice, so even `off` ranks rungs on warm medians. Each discover JSON carries `refine_mode` so a record's resolution is self-describing.
-
-### Safety gates (unchanged — never relax these)
-
-Batch-only mode deliberately skips the saturation and long-decode gates; a pick it applies is not validated — do not treat it as a publishable record until `bisect` (or the gates) has passed.
-
-- **The OOM log grep is the source of truth, NOT the curl http code.** OOM markers appear seconds after a request — `cudaMalloc failed` / `failed to allocate compute pp buffers` / `terminate called after throwing` / child `exited with status 1`. **MTP models can OOM at LOAD instead** (`failed to create MTP context` / `failed to initialize the context: failed to allocate compute pp buffers` / `exiting due to model loading error`) because the draft context builds its compute buffers eagerly at load. A **third, decode-time signature** appears only during sustained generation: `CUDA error: out of memory ... cuMemCreate(...)` from `ggml_cuda_pool_vmm` (flash-attn workspace growing the VMM pool). Fast grep: `docker logs --since 10s cortex-llama-cpp-1 | grep -E "cudaMalloc failed|failed to allocate compute pp buffers|terminate called after throwing|failed to create MTP context|exiting due to model loading error|CUDA error: out of memory|cuMemCreate"` (<1s). A failed child triggers the router's 10s force-kill, then `model ... failed to load` (HTTP 500) — that 500 is also an OOM signal. The first request after a restart can take >20s (fit + MTP context + warmup) and time out (`http=000`) while the model actually loads fine — verify with a follow-up request.
-- **Residency / spill rejection.** A `CPU` verdict rejects a batch for GPU-class models. `-fit` never budgets the **MTP draft's** memory (`failed to measure the memory of the extra model, fitting without it`), so on tight models the draft silently lands on CPU even when the main model fits — a batch can pass every OOM test yet decode slowly with high CPU. A silent spill shows decode dropping 3–4× with CPU climbing to 270–1600% (observed Gemma 12B Q6: 59.8 t/s on GPU vs 36 t/s with the draft on CPU). **A 600-token decode with 50s polling is NOT enough** — models show ~100% CPU in the first 50s then spike to 1300%+. Use 4000+ tokens and 160s polling. On CPU-compute models every batch is CPU-resident, so only the prefill curve matters and it peaks low (~1.5–2K). To shrink a spilled draft: `spec-draft-type-k/v = q4_0` (draft KV, default f16) and a smaller batch. Do NOT use `spec-draft-ngl` to force the draft to GPU — that drops main-model layers to CPU instead (worse).
-- **Saturation at ~99% ctx.** The tiny probe only proves the compute graph fits at near-empty context. `-fit` leaves ~zero headroom, so the true memory peak is near full context (KV-compaction temp buffers, hybrid/SSM state re-derivation) — a value that survives a tiny decode can still OOM once the context fills and compacts, and the PP graph is far larger than the tiny probe's decode graph. Only a successful ~99%-ctx saturation run validates the pick. On hybrid/SSM models the server truncates at the ceiling (`truncated = 1`, `finish_reason = length`) rather than KV-shifting — full-context saturation is still reached, which is the point.
-- **Long-decode check.** The repetitive saturation filler yields high draft acceptance and can **mask a decode-time OOM** (real text with lower acceptance churns the flash-attn VMM workspace until `cuMemCreate`) — e.g. `qwen-3.5-9b-q4-mtp-16k-think` passed saturation at batch 2048 but OOM'd at `n_decoded ≈ 5.4K` on a real generation. Always run the real-prompt sustained-generation check on the final pick.
-- **ini restore on any failure exit.** Both tuners snapshot the section and restore it on a non-zero EXIT trap (Ctrl-C included). A killed run leaves `models.ini` at its pre-run values.
-
-Proven gotchas:
-- The OOM happens on first **decode**, not at load — **unless the model uses MTP spec decoding**, in which case large batches can OOM at LOAD during draft-context creation before any request. A load-only probe (GET `/v1/models` / waiting for `model loaded`) is never sufficient — send a real inference request.
-- **`reasoning=on` can sustain a larger batch than `reasoning=off`** on the same GGUF/ctx (observed: Qwen3.5-9B-MTP @ 16K sat-max 2048 with `reasoning=on` vs 1984 with `reasoning=off`). Don't assume the non-think tuned value transfers to the think sibling — tune them separately.
-- **Gemma 4 QAT (gemma4 / gemma4-assistant arch):** the MTP drafter is a **separate GGUF** (`mtp-gemma-4-12B-it.gguf`) that recent llama.cpp auto-discovers from `-hf` — requires a build that knows the `gemma4-assistant` architecture. At load it logs a **benign** `failed to initialize the context: Gemma4Assistant requires ctx_other to be set` plus `failed to measure the memory of the extra model, fitting without it` — the fit excludes the draft, so the real VRAM peak exceeds fit's estimate. The dense 12B has a small per-unit compute graph, so its batch ceiling is far higher than MoE models (~8.6K vs 576). Think toggle via `reasoning = on/off` (enable_thinking via chat-template-kwargs is deprecated).
-- The MTP draft's own VRAM: on a model whose main weights nearly fill VRAM the draft lands on CPU even when the main fits. Observed: Gemma 12B Q6 @ 16K — batch 3584 survived OOM but ran the draft on CPU (~730% CPU, 35 t/s); batch 1088 keeps it on GPU (~81% CPU, 60 t/s); 1152+ spills it again.
-- Lowering `ctx-size` does NOT reliably create batch headroom — `-fit` simply repacks more weights into the freed VRAM.
-- If even tiny batches OOM, the only real fix is freeing VRAM: `override-tensor = exps=CPU` (experts to system RAM).
-- The `[*]` preset default `batch-size`/`ubatch-size = 4096` is a deliberate **fallback for untuned entries** — it is NOT a tuning starting point. It OOMs immediately on most untuned entries, which is the signal to run `bench.sh bisect` and override per `[model]`. Never run an untuned entry at 4096.
-
-## Max context (`bench.sh ctxmax <model>`, menu `[c]tx max`)
-
-Finds the largest `ctx-size` at which an entry stays **GPU-resident at its own batch and MTP settings**. It copies the source section verbatim to `[<src>-ctxmax]` (inserted after the source, which is never modified) and bisects only the copy's `ctx-size` in **1024-token steps** between the source's ctx (must itself be GPU, else it stops) and the model's trained context (`<arch>.context_length` read from the GGUF header; the full trained ctx is tried first). Each step is one restart: `tiny_probe` (OOM) → a check that the child logged `n_ctx_slot` equal to the requested ctx (a silent clamp is a fail) → `residency_probe` (CPU = fail). There is no saturation / long-decode confirm in ctxmax: a near-empty-context probe does not prove the full-context peak fits, so the pick is only validated when the full suite is run on the new entry (its bisect confirms at ~99% ctx). On success the copy is renamed by swapping the `-NNk` suffix (`saluki-27b-iq2-mtp-64k` → `saluki-27b-iq2-mtp-112k`), `ctx-size` carries a `; ctxmax pick` comment, and the entry is a new family head (same `hf`, new ctx) that needs the full suite for a bench record. On any failure exit the copy is removed. Batch is not re-tuned — a larger ctx can make a smaller batch the better pick, which the full suite will find.
-
-## Vision entries (`bench.sh vision <models…>`, menu `[v]ision`)
-
-Adds `[<entry>-vision]` for each selected entry whose model takes images.
-- **Detection:** the entry's `hf` repo must ship an `mmproj-*.gguf` (HF file listing, else the local cache). A repo without one is reported `no vision` and nothing changes.
-- **Entry:** the source section is copied verbatim and inserted after it, with `no-mmproj = false` (the `[*]` default is `true`). The source is never modified. Names append `-vision` to the selected entry (`x-think` → `x-think-vision`).
-- **Test:** one restart and a real image request (a solid red PNG). The router downloads the projector on this first load. The entry is kept only if the request is answered. A load OOM at the source's batch is retried once at batch 256. An image refused with the projector enabled means no vision. On any failure the copy is removed.
-- **Untuned values are marked:** `batch-size`, `ubatch-size`, `spec-draft-n-max` and `spec-draft-p-min` are the source's, tuned without the projector. Each kept entry carries `; from [<src>], untuned with the projector — run bench.sh all <entry>` on those lines. The first tuned value rewrites the line and drops the note. `spec-type` gets no note, since no string value in models.ini carries an inline comment.
-- **Afterwards:** a `-vision` entry is its own family head (the projector costs VRAM), so it has no bench record until `bench.sh all <entry>-vision` runs. Whether the model named the colour is logged only as a diagnostic; small or thinking models may not.
-
-## Tuning MTP speculative decoding (spec-draft-n-max / spec-draft-p-min)
-
-Only applies to MTP models (`spec-type = draft-mtp`). n_max and p_min are **speed-only knobs**. Speculative decoding preserves the target's output distribution by construction: llama.cpp's `common_sampler_sample_and_accept_n` samples every position from the target model and keeps a draft token only when it equals the target's own sample, so MTP never emits a token the target wouldn't. `p_min` only stops drafting early; `n_max` only bounds draft length. Observed token differences between MTP on and off are near-tie flips under ~0.1-nat kernel logit noise — the same class of difference as changing `batch-size`.
-
-Params:
-- `spec-draft-n-max` — draft tokens predicted ahead per decode step (repo default 2). Higher = more speed IF accepted, but later draft tokens drop in acceptance → wasted target re-verification. Raises the draft-context buffer (`n_max × batch`).
-- `spec-draft-p-min` — stop drafting below this probability. A tuning lever for draft yield; it does not gate output quality (see above).
-- (`spec-draft-n-min` shows as `n_min=0` at load and is not preset-controlled.)
-
-### Benchmark method (`cmd_mtp_discover`, default)
-
-**The placement gate is the real constraint, not quality.** A config whose `decode_sample` reports placement `CPU` or `oom > 0` is rejected as *not fitting at this batch*. Degeneracy is **diagnostic only** — logged, `WARN`-flagged when the 8-gram ratio exceeds 0.15, never a gate, and computed only on natural-stop output.
-
-`cmd_mtp_discover` runs an **adaptive sweep** (~6–8 decode runs) over natural-stop samples:
-1. **n_max ladder at p_min=0.7.** Start from `{2, 4, ini's n_max}` — always include the current ini value, because the batch ladder already validated residency at it and it is guaranteed to pass the placement gate. Extend to untested neighbours of the best within [2,6]. Re-measure the best and runner-up once and rank on the mean of their two samples; ties (within `MTP_TIE`, 2%) go to the smaller n_max (smaller draft buffer, more headroom).
-2. **p_min at the winning n_max.** Measure `{0.5, 0.9, ini's p_min}` minus 0.7, compare against the 0.7 reference already measured in phase 1; keep 0.7 if within tie tolerance.
-3. Failure is now only STALL, every candidate rejected by placement/OOM, or every sample SHORT — never a degeneracy value. The ini's `n_max`/`p_min` are restored on failure.
-4. **Early MTP A/B (`mtp_early_ab`, full suite, before the bisect).** Right after mtpcheck, one decode with MTP at the mtpcheck defaults (n_max 2, p_min 0.7, untuned) and one with MTP off, at the section's batch (256 if it has none). If MTP is clearly slower (beyond `MTP_AB_CLEAR`, 5%), MTP is dropped there: spec-* removed, the n_max/p_min tuning skipped, the bisect run without MTP, and the status recorded as `tuning_status: skipped` with `ab.decision: off` (`ab.on_source: early`), so siblings drop their spec-* too. A close result or an MTP win goes on to the tuner and the final A/B unchanged. Why: on a CPU-resident MoE the tuning costs 15–25 min only to be thrown away; n_max 2 is the cheapest draft, so tuning is unlikely to turn a clear loss into a win (reasoning, unmeasured). Cost about 4–5 min. `--no-early-ab` / `BENCH_EARLY_AB=0` skips it.
-5. **MTP A/B (`mtp_ab_decide`, both tuners).**
-   - **Why:** supporting MTP does not mean gaining from it. On a CPU-resident MoE the target's verify pass routes each drafted token to its own experts, so one step reads several times the expert weights over the RAM bus. That costs more than the accepted drafts save: `tiel-coder-35b-a3b-q4` @ 64K decoded 33.5 t/s with MTP and 36.1 without, at 0.82 acceptance.
-   - **Method:** after the winners are applied, decode with that config is compared against MTP off on the **same** section.
-     - **MTP-on side:** the tuner's own valid samples at the winning config are reused. They were taken at this batch with this prompt, and the winner is always measured at least twice. Only `mtpab`, or a tune with no valid winner sample, measures it.
-     - **Adaptive:** one MTP-off sample first. An on/off gap beyond `MTP_AB_CLEAR` (5%) decides at once; one sample varies by about 2–4% run to run (same config: 30.3 vs 30.5, 28.9 vs 28.0, 24.1 vs 25.0 t/s). A closer result, or a side without a valid sample, takes a second round, up to `MTP_AB_SAMPLES` (2) valid samples per side, and decides on the means.
-   - **Rule:** MTP is kept only if its mean beats MTP off by more than `MTP_AB_TIE` (2%). A tie goes to off. `off` deletes `spec-type`/`spec-draft-n-max`/`spec-draft-p-min`.
-   - **Inconclusive:** a side with no valid sample, or a STALL, keeps the tuned MTP config. It is never a failure.
-   - **Names do not change.** `-mtp` in an entry name marks an MTP-capable model (the GGUF has an MTP head), not whether MTP is enabled. An entry whose A/B decided `off` keeps its `-mtp` name; the record shows the decision.
-   - **Batch after `off`:** the batch was validated with the draft buffer present, so it stays valid. The bisect is re-run without MTP **only** when the pick was memory-bound (`mtp_off_rebisect_needed`: a failed OOM/SPILL rung above, and the pick at or above the highest PASS rung below it). A pick at the prefill peak is unaffected.
-   - **Cost:** about 2.5–3 min per family head in the full suite on a clear result (one MTP-off decode sample including restart; 35B-A3B on CPU). A close result costs about 5–6 min. `mtpab` takes about 5–6 min clear and up to 11 min close.
-   - **Quick path:** `bench.sh mtpab <heads…>` (interactive `[a]`) runs only the A/B on an already-tuned entry, using the ini's n_max/p_min. It then runs the conditional re-bisect, `bench`, and re-inheritance of the family.
-
-**`--thorough` (or `BENCH_THOROUGH=1`) re-enables the legacy exhaustive tuner** (`cmd_mtp_thorough`): the fixed n_max sweep {2,3,4,5}, the p_min sweep {0.5,0.6,0.7,0.8,0.9}, and the strict <0.05 degeneracy confirm gates. It measures decode the same natural-stop way (see "Measuring decode speed"); only the *search* is preserved, not the old loop-inflated measurement.
-
-**`bench.sh mtpverify <model>`** is a diagnostic subcommand that empirically checks the speed-only claim. It runs the model MTP-off then MTP-on with request-level `temperature: 0`, `seed: 42`, `logprobs`, `top_logprobs`, finds the first diverging token, and applies an **OFF-only margin test** (the MTP-off run is the reference sampler and carries probabilities at every position; MTP-on positions where a draft was accepted have none). PASS = the on-chosen token is in the off-run's top-10 at the divergence index with `gap_off < MTP_TIE_NATS` (0.25). Use it to confirm the premise on any family without reading llama.cpp source.
-
-### Acceptance rate / degeneracy
-`draft acceptance` is a rough signal, never a gate — acceptance dropping because n_max was raised is only wasted draft compute (rejected drafts are recomputed by the target, quality preserved). Degeneracy above 0.15 is a `WARN` diagnostic (it can flag a genuinely looping run worth investigating), not a model failure.
-
-### Placement gate at mtpcheck
-`detect_mtp` does not accept MTP just because the draft loads and engages. After engagement it runs `residency_probe` at batch 256 with MTP on; if that is `CPU`, it re-probes with MTP off, and if the model is `GPU` without MTP it **rejects MTP**: `spec-type`, `spec-draft-n-max` and `spec-draft-p-min` are deleted from the section (explicitly — the pre-run snapshot may itself hold `spec-type` from an earlier run) and the status file records `not_mtp` with reason `mtp_spills`. The suite then benches the model as non-MTP. A model that is CPU-resident either way keeps MTP at this gate; whether MTP is actually faster there is decided by the MTP A/B at the end of `cmd_mtp`. Observed: dirk-qwen3.8-27b IQ2_S @ 64K — GPU at 20.9 t/s without MTP, CPU at ~13 t/s with it, even with `q4_0` draft KV.
-
-### Placement re-check
-**Mandatory after any n_max change.** Draft-context compute buffer scales with `n_max × batch` — a batch tuned at n_max=2 may NOT fit the draft at n_max=3+. The spill is silent: no OOM, just decode dropping 3–4× and CPU climbing to 270–680%. Re-run placement at the SAME batch after changing n_max. **Tradeoff: raising n_max shrinks the batch ceiling (draft buffer = n_max × batch).** Observed on a 9B MTP model at 128k/256k: n_max=2 at the full batch decoded equal-or-faster than n_max=3 at its reduced ceiling, so n_max=2 won.
-
-### MTP draft VRAM
-- The MTP draft has its own VRAM that `-fit` never budgets (`failed to measure the memory of the extra model, fitting without it`). On a model whose weights nearly fill VRAM the draft lands on CPU even when the main model fits. Shrink the draft KV with `spec-draft-type-k/v = q4_0` (default f16) and reduce the batch so both fit. Do NOT use `spec-draft-ngl` to force the draft to GPU — that drops main-model layers to CPU instead (worse).
-- **Gemma 4 QAT:** the MTP drafter is a separate GGUF auto-discovered from `-hf`; requires a build that knows the `gemma4-assistant` arch. The `failed to initialize the context: Gemma4Assistant requires ctx_other to be set` + `failed to measure...` lines at load are benign. Older "n_max=4 degraded, 5 clean" type observations were artefacts of **forced generation** (an essay prompt run past EOS with `ignore_eos`, which loops) — the natural-stop measurement in `decode_sample` removes that confound.
-
-## Measuring decode speed (`decode_sample`)
-
-Speed samples never force tokens past EOS. `decode_sample` measures decode on **natural-stop output** — **no `ignore_eos`** — using a prompt that reliably produces ≥1500 tokens without forcing, and requires the sample to reach `MIN_DECODE_TOKENS` (512) to be valid (retried once with a longer prompt, else tagged `SHORT` and treated as missing, never a failure). Heading lines (starting with `#`) are stripped before the 8-gram degeneracy count so structural scaffolding does not inflate it. `ignore_eos` is kept **only** where the purpose is a memory-pressure test (`saturation_test`, `long_decode_check`). Why: forcing tokens past EOS makes a model loop, and looped text gets near-perfect draft acceptance — a config that degrades to repeating output can look like the *fastest* one. Natural-stop measurement is what makes degeneracy safe to treat as diagnostic.
-
-## Result recording
-
-The tuners write diagnostic JSON that `cmd_bench` merges into the model's bench JSON. `/tmp/mtp_status_<model>.json` records `tuning_status` (`ok` / `failed` / `stall` / `not_mtp` / `not_run`) plus `tuned_n_max` / `tuned_p_min` (null unless ok), merged under the JSON's `mtp` key; `/tmp/discover_<model>.json` records the discover ladder and pick, merged under the `discover` key. `discover.confirm` is `passed` for a normal bisect and `skipped` for batch-only; a bench merged from a skipped discover carries that marker. A failed MTP tuning no longer reads as validated downstream. The old `n_max_confirmed` / `p_min_confirmed` fields are renamed `n_max_loaded` / `p_min_loaded` — they mean only "what the server loaded", never "tuned". `mtp_status not_run` (or a missing `tuning_status`) means tuning never ran or the JSON predates the field; MTP values are not inherited from such parents. Both status files carry a `written_at` timestamp (copied to `mtp.tuning_written_at`) so a stale file merged into a later bench is visible. By default a failed `cmd_mtp` still lets `cmd_bench` run (recording `tuning_status: failed`); pass **`--strict`** to skip `cmd_bench` for that model and mark the verdict `SKIPPED (mtp failed)` — use it when producing publishable records.
-
-The MTP A/B is recorded as `mtp.ab`:
-- **Fields:** `decision` (`on` / `off` / `inconclusive`), `on_tps`, `off_tps`, `speedup` (on ÷ off), `tie`, `clear`, `rounds` (1 or 2), `on_source` (`tuner` / `measured` / `tuner+measured`), and the raw `samples`, each with its `source`. `full-metrics.md` shows it in the `mtp_a/b` column, e.g. `off ×0.93`.
-- **Reading it:** `tuning_status: ok` with `ab.decision: off` means "tuned, then measured slower than no MTP". The spec-* keys are gone on purpose, so the stale-status guard does not fire for it. A sibling inheriting a parent with `ab.decision: off` has its own spec-* keys removed.
-
-## Gotchas
-
-- `coordinator.lua` uses `ngx.socket.tcp` for HTTP calls to the backends. If those calls fail (e.g., backend not ready), the request still proceeds — the user may get an OOM if VRAM wasn't freed. The unload is best-effort.
-- Variable-based `proxy_pass` (`set $upstream "http://host:port"`) is required because backends resolve at request time (not config load). The `resolver 127.0.0.11` directive enables runtime DNS re-resolution.
-- Two `lua_shared_dict` directives in `nginx.conf`: `backend_state` and `request_counts`. Both live in the conf.d file which is included inside the `http {}` block — valid by default in the `bookworm-fat` image config.
-- ollama unload uses `keep_alive: 0` on a generate request. This evicts the model and KV cache immediately. Without this flag, ollama keeps the model resident per its configured `OLLAMA_KEEP_ALIVE`.
-- llama-cpp unload uses `POST /models/unload` with the model ID. Only models with `status.value == "loaded"` are targeted (queried from `/v1/models`).
-- `coordinator.lua` logs every request, switch decision, and unload result via `ngx.log`. View with `docker logs -f cortex-openresty-1 | grep -E "request:|skip:|switch:|drain|state:|ollama:|llama-cpp:|nllb:"`. The `error_log /proc/self/fd/2 info;` directive is patched into the main nginx.conf via `sed` in the Dockerfile — INFO-level messages appear in `docker logs`.
-- The drain loop calls `ngx.sleep(0.5)` in the access phase, blocking the nginx worker for up to `DRAIN_TIMEOUT` (**600s**) during a switch. Switches are rare and a long-context request can legitimately run for minutes, which is why the timeout is generous — but do not increase it further without understanding the concurrency impact, and note that hitting it returns a 503 to the caller.
-- `get_model()` reads the request body via `ngx.req.read_body()` in the access phase. This does not consume the body — nginx still forwards it to the upstream. If body parsing fails (malformed JSON, no `model` field), `get_model()` returns nil and the coordinator proceeds conservatively (unloads on backend mismatch, skips on same-backend model change).
-- **`load-mode = mmap+mlock` in every `[*]` section, not `no-mmap` + `mlock`.** With `no-mmap`, llama.cpp copies the whole GGUF into anonymous memory while the file also stays in the page cache (~2× the model in RAM), and `mlock` locks nothing because there is no mapping (every child showed `VmLck: 0`); the copy could be swapped out. With `mmap+mlock` the loaded model uses the cached file pages directly and they are locked while it is loaded. Measured 2026-10-21 on `tiel-coder-35b-a3b-q4-mtp-128k-think-coder`: RAM while loaded ~38.5 GB → ~23 GB, warm reload 20–27 s → ~14 s, `VmLck` 20.3 GB; cold loads unchanged (disk-bound). Same-session A/B on that model's 64k head (49K-token prompt): prefill 1418 t/s with `no-mmap` vs ~1270 with `mmap+mlock` (−10%), decode 37.1 vs 38.7–40.6 t/s (+4–9%); GLM-4.7-Flash prefill −1%, GPU-resident gemma-12b unchanged. Per request roughly even, so `mmap+mlock` stays for the RAM and reload gains; CPU-resident records benched before 2026-10-21 carry `no-mmap` prefill figures. Do not overwrite a loaded `.gguf` in place: a mapped file truncated underneath the process kills it with `SIGBUS` (downloads and copy-and-rename are safe). `--mlock`, `--mmap`/`--no-mmap` are deprecated in favour of `--load-mode`.
-- **The routers run offline (`offline = true` in every `[*]`).** Every `-hf` load otherwise asks Hugging Face for the repo's file list first (`get_repo_files`): ~0.4 s normally, but a failed connection stalled a load ~5 min (2026-10-21, `HTTPLIB failed: SSL connection failed`) while the coordinator waited, and every model swap repeats the call. Offline, a load uses only the HF cache; the MTP drafter (`mtp-*.gguf`) and mmproj are still found in the snapshot. **Downloads go through `bench.sh`:** `bench.sh fetch <entries…>` (menu `[d]ownload`) resolves the entry's files from the repo's file list (the weights from `hf-file` or the quant tag, an `mtp-*.gguf` drafter if the repo ships one, the mmproj if the entry loads one) and downloads them with `tools/hf_fetch.sh`: the `hf` client in a throwaway container, pinned to the commit already cached (so nothing strands), much faster than the router's single-connection downloader, safe to Ctrl+C and resumed by running it again. Only when the files cannot be resolved (no quant tag, HF unreachable) does it fall back to the old online load: `offline = false` on that one section, a router restart, one load, the override removed; `ensure_model_cached` does the same automatically when a suite step finds the weights missing, and `bench.sh vision` fetches the new entry's mmproj before its image test. A model added to models.ini by hand fails to load until it is fetched. **A fetch can strand other quants of the same repo:** going online moves the repo's `refs/main` to the upstream head, and offline loads look only in that commit's snapshot, so files fetched at an older commit stop loading (2026-11-08: fetching Raon Q6_K stranded Q4_K_M/Q5_K_M after KRAFTON re-uploaded them). Before going online, `strand_guard` compares the cached `refs/main` with upstream `main` and, if they differ, lists the entries (any router) that would stop loading and asks; without a terminal it refuses unless `BENCH_ALLOW_STRAND=1`. If HF cannot be reached it logs `not checked` and continues.
-- **openresty resolves backend names with `resolver 127.0.0.11 valid=10s`.** A router restart can give its container a new IP and hand the old one to the other router; with the default 600 s DNS TTL openresty kept sending llama-cpp requests to prism-llama-cpp, which answered `model … not found` (2026-10-21).
-- `models-max` must NOT be set on llama.cpp. If the router limits concurrent children, it auto-unloads models when the limit is exceeded, which races against the coordinator's explicit `/models/unload` and leaves residual VRAM (orphan child process). The coordinator is the sole source of truth for unloads — remove `models-max` entirely to disable router-initiated teardown.
-- `OLLAMA_MAX_LOADED_MODELS=1` is set in compose.yml. `OLLAMA_KEEP_ALIVE` is NOT set — defaults to 5m.
-- **Single-file bind mounts pin the inode.** openresty's Lua files, nginx.conf and the routers' `<name>-models.ini` are mounted file by file. An editor or tool that saves by writing a new file and renaming it over the old one (most editors, and Claude Code's Edit tool) leaves the container on the OLD file, so `openresty -s reload` silently keeps old code. After such an edit use `docker compose restart openresty` (re-binds the paths); in-place writes (`bench.sh`'s ini edits, `>` redirection) are seen at once. Check with `docker exec cortex-openresty-1 grep … /etc/nginx/lua/<file>`.
-- **`models_list.lua` must keep empty arrays as `[]`.** It decodes with a private cjson instance and `decode_array_with_array_mt(true)`; the default cjson round-trip turns every model's empty `tags` / `aliases` into `{}`.
-- **A direct slot call loads the model it names.** `POST /slots/0?action=save|restore` to a router with a `"model"` that is not loaded makes the router load it, beside whatever is resident (two models on the GPU). The coordinator only saves loaded models and restores after its own load; avoid such calls by hand, or unload afterwards.
-- **`http_request` decodes chunked replies.** llama.cpp answers `/slots` (and its errors) with `Transfer-Encoding: chunked`; a reader that only honours `Content-Length` gets an empty body.
-- **A slow load usually means the file is not on the NVMe.** model-cache keeps 128 GB of copies and evicts the least *recently* loaded first, so a pass that loads every model once (a smoke test, an A/B) can push a heavily used model off the NVMe; its next loads read the SSD. qwen-3.6-35B 128k loaded in 38-64 s from the SSD after such an eviction and in 8 s from its NVMe copy (2026-11-26; `docker logs cortex-model-cache-1` shows `evicted` / `SSD, load n/3`). b12785's warning `tensor overrides to CPU are used with mmap enabled - consider using --load-mode none` is not the cause: on that model `load-mode none` loaded in 15 s (vs 8 s), held a ~15 GB private copy on top of the page cache, and gave +25% prefill, same decode.

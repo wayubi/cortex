@@ -2,7 +2,7 @@
 
 **What this file is for.** The measurement constants in `tools/bench.sh` look arbitrary until you know what they cost to learn. This is that record: each rule below was paid for by a wrong benchmark, and each one is still enforced somewhere in the script. Before "optimising" a poll window, a decode length or a prompt size, read the failure it was chosen to prevent.
 
-The procedure itself is automated. You do not run these steps by hand; `bench.sh` does. See `AGENTS.md` for the current pipeline.
+The procedure itself is automated. You do not run these steps by hand; `bench.sh` does. See `benchmarking.md` for the current pipeline.
 
 ## Problem 1: CPU sampling timing
 The model doesn't load into VRAM until the first request arrives. If you `sleep` too long or sample before the request, you're measuring idle time, not decode.
