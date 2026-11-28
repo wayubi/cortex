@@ -154,8 +154,8 @@ use the layout `tracker/issues/`, `tracker/work-orders/`; use the project's own.
    changed is a finding; report it and do not undo it.
 9. **Decide.** Review rounds are numbered like the reports: review round N answers report round N.
    - **Accepted** only when every check passed, the scope is clean and every issue's criteria are met.
-     Append `## Review, round N (accepted, YYYY-MM-DD)`: each check with its result, your rulings.
-     Set `**Status:**` to `resolved YYYY-MM-DD` and `git mv` the work order to `resolved/`. For each
+     Append `## Review, round N (accepted, YYYY-MM-DD)`: each check with its result, your rulings,
+     and your numbered nits, each with the issue you filed for it (step 10). Set `**Status:**` to `resolved YYYY-MM-DD` and `git mv` the work order to `resolved/`. For each
      issue or plan it fully covered: set its status, add a **Resolution** (what was done, what proved
      it, the work order) and `git mv` it to `resolved/`. An item only partly covered stays open with a
      note naming what is left. Update the triage index. Then commit ("Committing").
@@ -169,8 +169,12 @@ use the layout `tracker/issues/`, `tracker/work-orders/`; use the project's own.
      work order itself is usually wrong, and should be split, narrowed or closed.
    - **Needs your decision:** write nothing and commit nothing; say exactly what the user must decide
      and the options.
-10. **New defects** you find outside the work order's scope become new issues in `open/` (from the
-    issue template, with evidence), never extra work in this work order. Name them in your review.
+10. **File issues, on acceptance:** one new issue in `open/` (from the issue template, with its
+    evidence and what would satisfy it) for each nit in this review, each nit of an earlier round
+    the builder left unfixed, and each defect you found outside the work order's scope. Never extra
+    work in this work order; a later `/triage` folds them into work orders. Name each by ID in your
+    review. A returned round files none: its nits stay findings, and the builder may still fix them.
+    Several nits may share an issue only when one change fixes them all.
 11. **Report.** The first line is exactly one of `ACCEPTED`, `RETURNED (round N)`,
     `AMENDED (round N)` or `NEEDS YOUR DECISION`, and nothing else. Then the findings, the files you
     changed, and the commits.

@@ -55,7 +55,7 @@ tracker").
    model run): each message you send swaps models under the job.
 4. It ends with one of these:
    - **Accepted.** The auditor has moved the work order and the issues it covered to `resolved/`,
-     updated `triage.md`, and **committed** twice: the work, then the records. Check with
+     filed a new issue for each nit left unfixed, updated `triage.md`, and **committed** twice: the work, then the records. Check with
      `git log --oneline -3` and `git status`, then push when you're ready.
    - **Needs your decision.** It says what to decide: a criterion the work order cannot check, a
      check that needs a restart or a model run, a second stop, or a fourth return. Answer with
@@ -87,7 +87,7 @@ everything still open.
 - **`/audit work-order-NNNNNN`** runs the auditor by hand, for work done outside `/implement`.
 - **Watching it:** `docker logs -f cortex-openresty-1 | grep '\[lua\]'` shows each model switch
   (`switch:` to mellum means coders are working; to cyber-tiel, the audit).
-- **Problems outside the work order** become new issues, never extra work in the work order; the
-  next `/triage` picks them up.
+- **Nits and problems outside the work order** become new issues, never extra work in the work
+  order; the next `/triage` picks them up.
 - **Why fresh sessions:** a builder that needs earlier chat shows the work order is incomplete, and
   switching agents in one session sends its whole history to the other model.

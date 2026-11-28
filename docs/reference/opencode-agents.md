@@ -121,8 +121,8 @@ other model.
    itself, checks the diff from `Started from` against the scope and every included issue's
    acceptance criteria, and rules on the builder's questions.
    - **Accepted:** a review round with the results; the work order and the items it fully covered
-     move to `resolved/`; the index is updated; and it **commits**, by explicit path: the work, then
-     the records.
+     move to `resolved/`; each nit left unfixed becomes a new issue; the index is updated; and it
+     **commits**, by explicit path: the work, then the records (the new issues among them).
    - **Returned:** a review round with numbered blocker and nit findings, rulings and any
      amendments, nothing committed. The engineer fixes the findings and calls it again, without
      stopping.
@@ -131,7 +131,8 @@ other model.
    - **Needs your decision:** a criterion that was never checked or that the work order forbade
      checking, a check needing a model run or restart, a second stop, or a fourth return. The
      engineer stops and asks the user; the answer goes into `/audit <work order> <decision>`.
-   New defects outside the scope become new issues.
+   New defects outside the scope become new issues too, so a later `/triage` can fold them and
+   the nits into work orders.
 4. `/implement issue-NNNNNN` skips triage for one issue: the issue is the record (its criteria are
    the checklist, reports and reviews go into it), the auditor audits it the same way, and a wrong
    issue goes to the user rather than to an amendment. An issue in an open work order is refused.

@@ -54,5 +54,5 @@ section.>
 <Written by the auditor, never edited afterwards: each checklist item with its result;
 numbered findings, each a **blocker** or a **nit**, with evidence; rulings on the builder's
 questions; amendments, if the work order was wrong (an amended round answers a stopped report).
-Accepted: the commits, and the included items it fully covered move to resolved/ in the same
-commit. Round 3 returned is the last, and a second stopped report goes to the user.>
+Accepted: the commits; the included items it fully covered move to resolved/ in the same
+commit; each nit left unfixed becomes a new issue, named here by ID. Round 3 returned is the last, and a second stopped report goes to the user.>
