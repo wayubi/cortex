@@ -232,6 +232,13 @@ other model.
 - **Both may run shell commands and commit tracker records by explicit path;** bulk `git add` /
   `commit` forms are denied so neither can sweep up other work. Only the auditor commits code, and
   only on acceptance, only the files in the scope diff.
+- **A check must exercise the change.** A test that reads saved output (a snapshot, a JSON file)
+  passes whatever the change does if that output was made before it. A work order's tests read a
+  tracked extraction whose stamps matched the code from before the change, written by the very
+  guessing logic the work order removed, so they passed without proving its criteria. Triage now
+  checks what produced each file a check reads, the engineer reports such a check, and the auditor
+  records it as not met and puts the criterion to the user, without rebuilding old code to explain
+  the file (it spent about 15 minutes doing that).
 - **Work-order records are append-only.** Builder reports and auditor reviews are added as numbered
   rounds and never edited; a wrong work order is corrected by an amendment in a review round. The
   history of what was asked, claimed and ruled stays readable, as the advisor's record rules expect.

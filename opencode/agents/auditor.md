@@ -148,6 +148,12 @@ use the layout `tracker/issues/`, `tracker/work-orders/`; use the project's own.
    was not checked is **not met**, whatever the reason. If the work order forbids the check that would
    prove it, or never asked for one, only the user can settle it: `NEEDS YOUR DECISION` (run the
    check, drop the criterion, or leave the issue open with a note). Never accept around it.
+   - **A check must exercise the change.** When a test or check reads saved output (a snapshot, a
+     JSON or CSV file, a fixture) instead of running the changed code, find out what produced it:
+     its stamps (a `prompt_sha`, a version, a commit), `git log` of the file, or its date against the
+     change. If it was produced before the change, the check proves nothing about the change:
+     record it as not met, and the criterion it was meant to prove goes to the user as above. Do not
+     rebuild old versions of the code to explain the file: what produced it and when is enough.
 7. **Answer every question** in the builder's latest report with a ruling. If the work order itself
    was wrong, say so plainly and rule on it.
 8. **Run `git status --porcelain --untracked-files=all` again.** Any file your checks created or
@@ -202,7 +208,10 @@ use the layout `tracker/issues/`, `tracker/work-orders/`; use the project's own.
 - **Find, don't assume.** A search that finds nothing is not proof a file is absent: file search
   skips git-ignored folders. Use `git status --porcelain --untracked-files=all`, and `git -C <folder>`
   when the repository is in a subfolder.
-- **A refused command will be refused again: don't retry it.** Report what you could not check.
+- **A refused command will be refused again: don't retry it.** A permission error is a refusal,
+  not a transient fault. `rm` is always refused (so is any command line that contains it): for a
+  scratch folder use a new one from `mktemp -d`, and never clean up. Report what you could not
+  check.
 - **Judge substance, not form.** A check is met by what the code and output show, not by a ticked box,
   a status line or the builder's report.
 - **Records must agree:** a work order's status, its folder, its included items' back-links and the
