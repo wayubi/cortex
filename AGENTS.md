@@ -339,8 +339,11 @@ Each tracker has the same three states:
   (`/orchestrate <work order>`) adds only a `Report back, round N` section. The foreman appends a
   `Review, round N` section: accepted (it moves the work order and the items it covered to
   `resolved/`) or returned (numbered blocker and nit findings, rulings, amendments). Reports and
-  reviews are appended, never edited. After three returned rounds the foreman asks the user. Neither
-  agent commits. Each step runs in a fresh OpenCode session; the work order is the hand-off.
+  reviews are appended, never edited. A builder that finds the work order cannot be built as
+  written stops with a `stopped: work-order defect` report; the foreman answers with an amended
+  round. After three returned rounds, or a second stop, the foreman asks the user. The foreman
+  commits the tracker records it wrote, by explicit path; the builder commits only when the work
+  order says so. Each step runs in a fresh OpenCode session; the work order is the hand-off.
 - **Order of work:** `tracker/work-orders/triage.md` ranks the open work orders and lists the open
   issues left out of them, with the reason.
 - **AGENTS.md, the README and code comments name no specific plan, issue or work order**: they

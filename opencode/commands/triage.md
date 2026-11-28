@@ -1,5 +1,5 @@
 ---
-description: Run in a fresh session (/new). The foreman triages open issues (and plans, when named) into prioritised work orders; it proposes first and writes on your approval
+description: Run in a fresh session (/new). The foreman triages open issues (and plans, when named) into prioritised work orders; it proposes first, and writes and commits the records on your approval
 agent: foreman
 ---
 

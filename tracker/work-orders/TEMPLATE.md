@@ -6,10 +6,10 @@ repository is public. -->
 
 # work-order-NNNNNN: <short title>
 
-**Base:** commit `<sha>` (the state the work starts from)
+**Base:** commit `<sha>` (the state at triage; each report records where the work started)
 **Date:** YYYY-MM-DD
 **Status:** open
-<!-- open | open (returned, round N) | resolved YYYY-MM-DD | closed YYYY-MM-DD. Rank: the triage index. -->
+<!-- open | open (returned, round N) | open (amended, round N) | resolved YYYY-MM-DD | closed YYYY-MM-DD. Rank: the triage index. -->
 **Author:** <who wrote it>
 **Includes:** <issue-NNNNNN, plan-NNNNNN, ...> (each gets `**Work order:** work-order-NNNNNN`)
 **Predecessors:** <optional: earlier work orders this builds on>
@@ -19,8 +19,10 @@ repository is public. -->
 ## READ THIS FIRST
 
 <The rules for the agent doing the work: what it must not touch or run (GPU, benches, restarts,
-commits), what to do when a rule seems wrong (write the question in the report and follow the most
-literal reading).>
+commits). If this work order is wrong: when it cannot be built as written, build nothing and write a
+`Report back, round N (stopped: work-order defect, YYYY-MM-DD)` with the evidence and a proposed
+correction; when following it would do harm, ask the user; otherwise follow the most literal
+reading and write the question in the report. Never edit this work order.>
 
 ## 1. What to build
 
@@ -32,21 +34,25 @@ literal reading).>
 
 ## 3. PASS CHECKLIST
 
-<Numbered boxes the reviewer checks, each with the command that checks it and its expected output.
-If every box passes, the work is accepted.>
+<Numbered boxes the reviewer checks, each with the command that checks it and its expected output,
+and one for every acceptance criterion of every included issue. Mark a command that needs the user's
+approval (restarts, model loads, benches, deploys). If every box passes, the work is accepted.>
 
 - [ ] C1:
 
 ## Report back, round 1 (YYYY-MM-DD)
 
-<Written by the builder, never edited afterwards: commits, test and checklist output, measurements,
+**Started from:** `<sha>`
+
+<Written by the builder, never edited afterwards: the commit it started from (above, the review's
+scope check diffs from it), commits, test and checklist output, measurements,
 answers to every finding of the latest review round, questions. Each later round adds its own
 section.>
 
-## Review, round 1 (accepted|returned, YYYY-MM-DD)
+## Review, round 1 (accepted|returned|amended, YYYY-MM-DD)
 
 <Written by the foreman (/accept), never edited afterwards: each checklist item with its result;
 numbered findings, each a **blocker** or a **nit**, with evidence; rulings on the builder's
-questions; amendments, if the work order was wrong. Accepted: the commits, and the included items it
-fully covered move to resolved/ in the same change. Round 3 returned is the last; after that the
-foreman asks the user.>
+questions; amendments, if the work order was wrong (an amended round answers a stopped report).
+Accepted: the commits, and the included items it fully covered move to resolved/ in the same
+commit. Round 3 returned is the last, and a second stopped report goes to the user.>

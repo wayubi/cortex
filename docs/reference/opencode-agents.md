@@ -57,7 +57,7 @@ special-character denies) kept refusing the agents' real work. Safety rests on t
 | advisor, reviewer, scout | no | **allowed**, except `rm`, `git push`, `git reset --hard`, `git clean`, `sudo`, `docker` | subagent; repeated failing calls (`doom_loop`) |
 | coder | yes | none (it edits to a brief; the orchestrator runs the checks) | subagent; `question` (would block a batch); `doom_loop` |
 | vision | no | none | subagent; `doom_loop` |
-| foreman | yes, by instruction only tracker records | **allowed**, except the checkers' list and `git commit` | subagent; `doom_loop` |
+| foreman | yes, by instruction only tracker records | **allowed**, except the checkers' list and the bulk forms `git add -A`/`-u`/`.`, `git commit -a`/`--amend`, `git stash` | subagent; `doom_loop` |
 | orchestrator | OpenCode defaults (no rules) | | |
 
 OpenCode checks each part of a chained command (`a && b`, `a | b`, `a; b`) on its own; the last
@@ -101,14 +101,27 @@ history.
    work order; overlapping work orders made sequential), and ranks all open work orders (severity,
    then unblocking, then cost). It proposes and waits; on approval it writes the work orders from the
    template, adds the `**Work order:**` back-links and updates `tracker/work-orders/triage.md`.
+   Before saving a work order it checks it: named files and functions exist at `Base`, quotes match
+   the issues, every checklist command runs, and every issue criterion has a check the work order's
+   rules allow (a conflict goes to the user in the proposal); and any two open work orders that
+   change the same file are linked as predecessors. Then it commits the records.
 2. `/orchestrate <work order>`: the orchestrator builds as usual and writes its report into the work
-   order as `Report back, round N`, changing nothing else there.
-3. `/accept <work order>`: the foreman runs the PASS CHECKLIST itself, checks the diff from `Base`
-   against the scope and every included issue's acceptance criteria, and rules on the builder's
-   questions. **Accepted:** a review round with the results, the work order and the items it fully
+   order as `Report back, round N`, changing nothing else there. The report starts with
+   `Started from: <sha>`, the commit it began from: `Base` is only the state at triage, and a
+   predecessor accepted since then would otherwise show up in the scope check. A work order it cannot build as
+   written gets a `stopped: work-order defect` report instead (evidence and a proposed correction);
+   one that would do harm goes to the user; a doubtful one is followed literally, with the question
+   in the report.
+3. `/accept <work order>`: the foreman runs the PASS CHECKLIST itself, checks the diff from the
+   report's `Started from` against the scope and every included issue's acceptance criteria, and
+   rules on the builder's questions. **Accepted:** a review round with the results, the work order and the items it fully
    covered moved to `resolved/`, the index updated. **Returned:** a review round with numbered
-   blocker and nit findings, rulings and any amendments; back to step 2. After three returned
-   rounds it asks the user. New defects outside the scope become new issues.
+   blocker and nit findings, rulings and any amendments; back to step 2. **Amended** (answering a
+   stopped report): each claimed defect checked and ruled, amended or stands; back to step 2. A
+   criterion that was never checked is not met; when the work order forbade the check, the foreman
+   asks the user instead of accepting. After three returned rounds, or a second stop, it asks the
+   user. New defects outside the scope become new issues. It commits its records by explicit path,
+   and stops instead if one of its files already held someone else's uncommitted change.
 
 ## Why it is built this way
 
@@ -181,11 +194,16 @@ history.
   GPU) and proven at tool use. The deep checking happens in the build loop (advisor, reviewer); the
   foreman's hardest job is writing a complete work order with an exact checklist, which keeps
   acceptance mostly mechanical. groot's weak spot, checking a flawed plan against real data (1 of 2
-  on a hard benchmark), is the advisor's job. It may run shell commands (the checklists need them) but not
-  commit: the user commits.
+  on a hard benchmark), is the advisor's job. It may run shell commands (the checklists need them)
+  and commits the tracker records it wrote, by explicit path, so each step leaves a clean `Base`
+  without a manual commit; bulk `git add`/`commit` forms are denied so it cannot sweep up other work.
 - **Work-order records are append-only.** Builder reports and foreman reviews are added as numbered
   rounds and never edited; a wrong work order is corrected by an amendment in a review round. The
   history of what was asked, claimed and ruled stays readable, as the advisor's record rules expect.
+- **A wrong work order is the foreman's to fix, not the builder's.** The builder stops with
+  evidence rather than building around a defect or editing the contract; the foreman, who wrote it,
+  rules with an amendment. A criterion the work order cannot check is settled by the user, because
+  the fix (allow a model run, drop the criterion) is a decision, not a correction.
 - **Three returned rounds, then the user.** A work order that fails three reviews is usually wrong
   itself (too big, or a bad rule); another round would not fix that.
 
@@ -223,7 +241,7 @@ copy it out before reading. The openresty log shows the swaps:
 - The shell tool's maximum timeout (the cortex-job rule depends on it).
 - The foreman, not yet run on groot: whether its work orders are complete enough for the builder,
   the grouping and ranking quality of `/triage`, whether it keeps to tracker records with the edit
-  tool allowed, and whether `/accept` catches a planted defect (a work order with a known missed
+  tool allowed, whether its commits hold only its own files, and whether `/accept` catches a planted defect (a work order with a known missed
   check, run on groot, nail-qwen and cyber-tiel-coder).
 
 ## Open items
