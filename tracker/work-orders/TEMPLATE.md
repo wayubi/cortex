@@ -40,6 +40,11 @@ approval (restarts, model loads, benches, deploys). If every box passes, the wor
 
 - [ ] C1:
 
+## After acceptance
+
+<Optional, for the user: cleanup that would delete what the checklist reads (worktrees, scratch
+folders, temporary branches), with the exact commands. Never a build step.>
+
 ## Report back, round 1 (YYYY-MM-DD)
 
 **Started from:** `<sha>`

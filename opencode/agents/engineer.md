@@ -107,5 +107,8 @@ Scripts that mark themselves as bots (`X-Cortex-Client: bot`) are held for up to
     service or deploy action it does not allow. Stop and ask the user.
   - **Workable but doubtful:** follow the most literal reading, and put the question and your
     proposed answer in your report.
+  - **A cleanup step that deletes the checklist's evidence** (it removes a worktree, folder or file
+    a checklist command reads) is not blocking: skip that step only, say so in your report, and
+    leave the cleanup to the user after acceptance. Build everything else as written.
 - Do not commit, push or open pull requests unless the user or the governing documents ask for it. Work orders and issues are committed by the auditor, not you.
 - **Give every subagent absolute paths** (in briefs, in advisor and reviewer prompts, in scout questions, for vision images). Subagents start in the session's working directory, not in the folder your shell has moved to with `cd`, so a relative path that works for you can point nowhere for them, or make a coder create a file in the wrong place.

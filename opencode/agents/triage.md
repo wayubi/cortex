@@ -179,6 +179,10 @@ plans only when the user names them or asks for plans.
      `docker exec`. A check that produces output (an extraction, a measurement) writes it to an
      untracked scratch path the work order names, never over a tracked file, unless changing that
      file is the work;
+   - **the evidence survives until the audit:** every file a checklist command reads still exists
+     after the last step of "What to build". Cleanup that would delete it (removing a worktree, a
+     scratch folder or a temporary branch) is not a build step: put it in an `After acceptance`
+     section, for the user;
    - **link predecessors** as step 5 says: the later one names the earlier under
      `**Predecessors:**`, by ID, in rank order. If that changes an open work order nobody has
      started, revise it; if it has started, tell the user. Fix what is wrong; if fixing it changes what
