@@ -51,7 +51,7 @@ section.>
 
 ## Review, round 1 (accepted|returned|amended, YYYY-MM-DD)
 
-<Written by the triage agent (/accept), never edited afterwards: each checklist item with its result;
+<Written by the auditor, never edited afterwards: each checklist item with its result;
 numbered findings, each a **blocker** or a **nit**, with evidence; rulings on the builder's
 questions; amendments, if the work order was wrong (an amended round answers a stopped report).
 Accepted: the commits, and the included items it fully covered move to resolved/ in the same

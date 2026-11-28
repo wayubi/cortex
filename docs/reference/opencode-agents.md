@@ -17,9 +17,9 @@ when the design changes; the history of changes is in git.
 - **Project-agnostic.** Used across many projects; nothing depends on one project's `AGENTS.md`.
 - **Few model swaps** on the single GPU: the coordinator unloads the resident model whenever the
   requested model changes.
-- A **triage** primary agent owns work orders: it triages open issues into ranked work orders and
-  gives each finished work order its final review, accepting it or returning it with findings. The
-  agent that writes a work order is the one that judges it; the builder never closes its own work.
+- A **triage** primary agent writes work orders: it triages open issues into ranked work orders.
+  An **auditor** subagent, called by the engineer at the end, audits each finished work order and
+  accepts and commits it or returns it with findings; the builder never closes its own work.
 - **The primary is expected to make mistakes.** The advisor and reviewer exist to catch them, so
   the checkers' quality matters more than the engineer's.
 
@@ -32,18 +32,19 @@ machine-specific skills) stays in the config volume.
 
 | File | Kind | Model | What |
 |---|---|---|---|
-| `agents/engineer.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, batches subagents, quick-checks their work, then advisor until PASS, then reviewer |
+| `agents/engineer.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, batches subagents, quick-checks their work, then advisor until PASS, then reviewer, then (work orders) auditor until accepted |
 | `agents/coder.md` | subagent | mellum-2.1-12b-a2.5b-q4-128k-think | makes file changes (code, data, documents) from a complete brief; only the named files |
 | `agents/scout.md` | subagent | mellum (same entry) | read-only search; answers with `path:line` evidence |
 | `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
 | `agents/advisor.md` | subagent | nail-qwen3.6-35b-a3b-q4-mtp-128k-think-coder | checks work and plans against the source documents; verdict `PASS` / `NOT PASSED` / `CAN'T VERIFY` |
 | `agents/reviewer.md` | subagent | nail-qwen (same entry) | reviews the code changes for defects |
-| `agents/triage.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | triages issues into ranked work orders; final review of a work order: accepted or returned |
+| `agents/triage.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | triages issues into ranked work orders and keeps the triage index |
+| `agents/auditor.md` | subagent | cyber-tiel-coder-35b-a3b-q4-mtp-128k-think-coder | audits a finished work order: accepted and committed, returned, amended, or needs the user |
 | `commands/engineer.md` | `/engineer <task>` | | runs the task as the engineer |
 | `commands/review.md` | `/review [focus]` | | reviewer on uncommitted changes (else branch vs base) |
 | `commands/verify.md` | `/verify [docs / focus]` | | advisor against the source documents |
 | `commands/triage.md` | `/triage [scope]` | | the triage agent proposes work orders and a ranking; writes on approval |
-| `commands/accept.md` | `/accept <work order>` | | the triage agent's final review: accepted, or returned with a new review round |
+| `commands/audit.md` | `/audit <work order> [decision]` | | the auditor by hand (the engineer calls it itself after a build) |
 | `commands/handoff.md` | `/handoff [topic]` | | the current agent writes a `handoff-<topic>.md` in the project's planning folder (no swap) |
 
 ### Permissions
@@ -58,6 +59,7 @@ special-character denies) kept refusing the agents' real work. Safety rests on t
 | coder | yes | none (it edits to a brief; the engineer runs the checks) | subagent; `question` (would block a batch); `doom_loop` |
 | vision | no | none | subagent; `doom_loop` |
 | triage | yes, by instruction only tracker records | **allowed**, except the checkers' list and the bulk forms `git add -A`/`-u`/`.`, `git commit -a`/`--amend`, `git stash` | subagent; `doom_loop` |
+| auditor | yes, by instruction only tracker records | as triage | subagent; `question` (it returns `NEEDS YOUR DECISION` instead); `doom_loop` |
 | engineer | OpenCode defaults (no rules) | | |
 
 OpenCode checks each part of a chained command (`a && b`, `a | b`, `a; b`) on its own; the last
@@ -88,12 +90,10 @@ after running project code and report any change a command made.
 
 ### Work orders
 
-**Every step in a fresh session (`/new`).** The work order file is the hand-off: the triage agent judges
-the record and the repository, not the builder's conversation; a builder that needs earlier chat
-shows the work order is incomplete; and switching agents in one session sends its whole history to
-the other model (nail-qwen re-reading the engineer's session). A command's `agent:` may switch only that
-message, inside the current session, so `/accept` typed in the builder's session would see its
-history.
+Two runs, each in a **fresh session** (`/new`): `/triage`, then `/engineer <work order>`. The
+work order file is the hand-off, so the engineer needs no earlier chat (one that does shows the work
+order is incomplete), and switching agents in one session would send its whole history to the
+other model.
 
 1. `/triage [scope]`: the triage agent reads the open issues (plans only when named) and the code they
    touch, leaves out what needs a decision, lacks evidence or should be closed, groups the rest
@@ -105,23 +105,27 @@ history.
    the issues, every checklist command runs, and every issue criterion has a check the work order's
    rules allow (a conflict goes to the user in the proposal); and any two open work orders that
    change the same file are linked as predecessors. Then it commits the records.
-2. `/engineer <work order>`: the engineer builds as usual and writes its report into the work
-   order as `Report back, round N`, changing nothing else there. The report starts with
-   `Started from: <sha>`, the commit it began from: `Base` is only the state at triage, and a
-   predecessor accepted since then would otherwise show up in the scope check. A work order it cannot build as
-   written gets a `stopped: work-order defect` report instead (evidence and a proposed correction);
-   one that would do harm goes to the user; a doubtful one is followed literally, with the question
-   in the report.
-3. `/accept <work order>`: the triage agent runs the PASS CHECKLIST itself, checks the diff from the
-   report's `Started from` against the scope and every included issue's acceptance criteria, and
-   rules on the builder's questions. **Accepted:** a review round with the results, the work order and the items it fully
-   covered moved to `resolved/`, the index updated. **Returned:** a review round with numbered
-   blocker and nit findings, rulings and any amendments; back to step 2. **Amended** (answering a
-   stopped report): each claimed defect checked and ruled, amended or stands; back to step 2. A
-   criterion that was never checked is not met; when the work order forbade the check, the triage agent
-   asks the user instead of accepting. After three returned rounds, or a second stop, it asks the
-   user. New defects outside the scope become new issues. It commits its records by explicit path,
-   and stops instead if one of its files already held someone else's uncommitted change.
+2. `/engineer <work order>`: the engineer builds, has the advisor and then the reviewer check it,
+   writes `Report back, round N` into the work order (starting with `Started from: <sha>`, the commit
+   it began from: `Base` is only the state at triage), and calls the **auditor** with only the work
+   order's path. A work order it cannot build as written gets a `stopped: work-order defect` report
+   instead, and goes to the auditor at once; one that would do harm goes to the user; a doubtful one
+   is followed literally, with the question in the report.
+3. The auditor (inside step 2, or by hand with `/audit <work order>`) runs the PASS CHECKLIST
+   itself, checks the diff from `Started from` against the scope and every included issue's
+   acceptance criteria, and rules on the builder's questions.
+   - **Accepted:** a review round with the results; the work order and the items it fully covered
+     move to `resolved/`; the index is updated; and it **commits**, by explicit path: the work, then
+     the records.
+   - **Returned:** a review round with numbered blocker and nit findings, rulings and any
+     amendments, nothing committed. The engineer fixes the findings and calls it again, without
+     stopping.
+   - **Amended** (answering a stopped report): each claimed defect ruled amended or stands; the
+     engineer builds from the amended work order.
+   - **Needs your decision:** a criterion that was never checked or that the work order forbade
+     checking, a check needing a model run or restart, a second stop, or a fourth return. The
+     engineer stops and asks the user; the answer goes into `/audit <work order> <decision>`.
+   New defects outside the scope become new issues.
 
 ## Why it is built this way
 
@@ -185,24 +189,29 @@ history.
   It differs from every subagent's model, which the batching rules assume. Its planning quality as
   engineer is unmeasured. groot (61 / 1453 t/s, GPU) was the previous choice: fastest
   large-context model, 1 of 2 right on a hard benchmark.
-- **The engineer does not commit or push** unless asked or the documents require it.
-- **The triage agent is separate from the engineer and the advisor.** It writes the contract and
-  judges against it, so it must not be the builder (it could "fix" what it judges: it edits only
-  tracker records) nor a subagent the builder calls (the builder would choose when it is asked and
-  what it is shown). It is a primary the user runs, on groot (2026-11-27): a model different from both the builder
-  (inkling) and the checkers (nail-qwen), the fastest large-context model (61 / 1453 t/s, on the
-  GPU) and proven at tool use. The deep checking happens in the build loop (advisor, reviewer); the
-  triage agent's hardest job is writing a complete work order with an exact checklist, which keeps
-  acceptance mostly mechanical. groot's weak spot, checking a flawed plan against real data (1 of 2
-  on a hard benchmark), is the advisor's job. It may run shell commands (the checklists need them)
-  and commits the tracker records it wrote, by explicit path, so each step leaves a clean `Base`
-  without a manual commit; bulk `git add`/`commit` forms are denied so it cannot sweep up other work.
-- **Work-order records are append-only.** Builder reports and triage-agent reviews are added as numbered
+- **The engineer does not commit or push** unless asked or the documents require it; work orders are committed by the auditor.
+- **Triage and audit are separate agents.** Triage is many-to-many (every open issue, grouping,
+  ranking) and needs a fast large-context model: groot (61 / 1453 t/s, on the GPU, proven at tool
+  use; 2026-11-27). Its hardest job is a complete work order with an exact checklist, which keeps
+  the audit mostly mechanical. The audit is one work order in depth, on a model different from the
+  builder (inkling) and the checkers (nail-qwen) so it does not share their blind spots:
+  cyber-tiel-coder 128k (37.4 / 1161 t/s; the user's choice, 2026-11-27; its judgement unmeasured).
+- **The auditor is a subagent the builder calls, and stays independent.** The engineer passes only
+  the work order's path; the auditor treats anything else it is told as a claim, reads the record
+  and the repository itself and runs the checks itself. Its verdict lives in the work order, not in
+  the engineer's word: a work order without an accepted review round is not accepted. A subagent
+  cannot ask the user, so decisions come back as `NEEDS YOUR DECISION` and the engineer stops.
+  Calling it from the engineer makes one `/engineer` run the whole build-audit-fix loop, and the
+  auditor's commit leaves the next work order a clean start.
+- **Both may run shell commands and commit tracker records by explicit path;** bulk `git add` /
+  `commit` forms are denied so neither can sweep up other work. Only the auditor commits code, and
+  only on acceptance, only the files in the scope diff.
+- **Work-order records are append-only.** Builder reports and auditor reviews are added as numbered
   rounds and never edited; a wrong work order is corrected by an amendment in a review round. The
   history of what was asked, claimed and ruled stays readable, as the advisor's record rules expect.
-- **A wrong work order is the triage agent's to fix, not the builder's.** The builder stops with
-  evidence rather than building around a defect or editing the contract; the triage agent, who wrote it,
-  rules with an amendment. A criterion the work order cannot check is settled by the user, because
+- **A wrong work order is the auditor's to rule on, not the builder's.** The builder stops with
+  evidence rather than building around a defect or editing the contract; the auditor rules with an
+  amendment, which may correct the work order but never widen it or drop a criterion. A criterion the work order cannot check is settled by the user, because
   the fix (allow a model run, drop the criterion) is a decision, not a correction.
 - **Three returned rounds, then the user.** A work order that fails three reviews is usually wrong
   itself (too big, or a bad rule); another round would not fix that.
@@ -239,10 +248,12 @@ copy it out before reading. The openresty log shows the swaps:
 - A `/model` choice on the engineer persists across Tab switches.
 - The RAM prompt cache keeps several conversations on nail-qwen as it does on mellum.
 - The shell tool's maximum timeout (the cortex-job rule depends on it).
-- The triage agent, not yet run on groot: whether its work orders are complete enough for the builder,
-  the grouping and ranking quality of `/triage`, whether it keeps to tracker records with the edit
-  tool allowed, whether its commits hold only its own files, and whether `/accept` catches a planted defect (a work order with a known missed
-  check, run on groot, nail-qwen and cyber-tiel-coder).
+- The triage agent on groot: whether its work orders are complete enough for the builder, the
+  grouping and ranking quality of `/triage`, whether it keeps to tracker records with the edit tool
+  allowed, and whether its commits hold only its own files.
+- The auditor on cyber-tiel: whether it catches a planted defect (a work order with a known missed
+  check), whether it stays independent of what the engineer tells it, whether its commits hold only
+  the scope's files, and whether the engineer really loops on `RETURNED` without stopping.
 
 ## Open items
 
