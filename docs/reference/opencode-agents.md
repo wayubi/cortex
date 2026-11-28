@@ -7,7 +7,7 @@ when the design changes; the history of changes is in git.
 ## Goal
 
 - An **engineer** primary agent owns a task end to end: reads the governing documents, plans,
-  sends independent fixes to fast **coder** subagents, verifies, and has the **advisor** and
+  has fast **coder** subagents make the changes, verifies, and has the **advisor** and
   **reviewer** check the work automatically when it is done.
 - Subtasks of one stage go out **in one batch**, so the engineer wakes once per stage, not once
   per subtask.
@@ -32,7 +32,7 @@ machine-specific skills) stays in the config volume.
 
 | File | Kind | Model | What |
 |---|---|---|---|
-| `agents/engineer.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, batches subagents, quick-checks their work, then advisor until PASS, then reviewer, then (work orders) auditor until accepted |
+| `agents/engineer.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, has coders make the changes, quick-checks their work, then advisor until PASS, then reviewer, then (work orders) auditor until accepted |
 | `agents/coder.md` | subagent | mellum-2.1-12b-a2.5b-q4-128k-think | makes file changes (code, data, documents) from a complete brief; only the named files |
 | `agents/scout.md` | subagent | mellum (same entry) | read-only search; answers with `path:line` evidence |
 | `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
@@ -72,10 +72,11 @@ after running project code and report any change a command made.
    long `build` session to the engineer mid-way led it to keep editing everything itself.
 2. It reads the governing documents and the code; broad searches go to `scout` batches, images to
    `vision` (its own message).
-3. It lists every fix and groups them by file. **Two or more independent groups** (different files,
-   no fix needing another's result) go to coders, one per group, each with a complete brief (files,
-   change, for data fixes the rule and source text, constraints, done-when). **A single fix, fixes
-   that build on each other, or fixes in one file** it makes itself.
+3. It lists every fix and groups them by file, one coder per file, each with a complete brief
+   (files, change, for data fixes the rule and source text, constraints, done-when). Independent
+   groups go in one batch; dependent work (tests on new code, callers) in a later batch. It makes a
+   change itself only when it is small (a few lines, a coder's missed item, wiring), and its report
+   says who made each change.
 4. Every coder task of a batch goes **in one message**; it waits for all of them.
 5. **Quick check, not a review:** each coder's report and diff against its brief (only its files,
    every item done, nothing extra, no placeholders). Small gaps it fixes itself; larger ones go back
@@ -142,15 +143,22 @@ other model.
   share a model use the identical entry name.
 - **The engineer's model differs from every subagent's**; the batching rules assume each
   subagent call is a swap away from it.
+- **Coders write the code, even in one file; the engineer keeps its edit tools for small fixes.**
+  It kept failing to delegate. Under the first wording ("tiny edits" allowed, "code writing"
+  delegated) groot made every fix itself, because the fixes were labels and records. The next rule
+  (a single file, or fixes that build on each other, the engineer makes itself) still meant it never
+  delegated: in the first work orders run
+  (2026-11-26/27) every change was in one or two files, and the engineer, on inkling at 21 t/s
+  decode, wrote everything itself through shell edits, with no coder or scout call at all. A
+  batch costs two swaps; writing hundreds of lines at 21 t/s instead of mellum's 121 costs more.
+  Now one coder takes a file with all its changes, dependent work goes in a later batch, and only
+  small fixes stay with the engineer. Whether mellum's briefs then come back right is unmeasured.
 - **Advisor before reviewer, never together.** Reviewing code that does not yet meet the
   requirements is wasted, and its findings can conflict with the advisor's fixes. (Speed is not
   the reason: on one model both would keep their prompts, with the same two swaps.)
 - **Advisor and reviewer only at the end**, never while planning or between batches: each call is
   a swap to a CPU-placed 35B. The cost is that a wrong plan is caught after the coders built on it;
   if the engineer often mis-plans, one advisor plan check before the first batch would cost one swap.
-- **The engineer fans out independent fixes but keeps its edit tools.** In a real round groot made every fix
-  itself under the old wording ("tiny edits" allowed, "code writing" delegated, while the fixes
-  were labels and records). The rule is now explicit, and the coder handles any file change.
 - **Advisor and reviewer run checks themselves.** Read-only, the advisor answered "can't verify"
   for every claim that needs a script's or test's output, exactly the claims an independent check
   matters most for. They run them without changing anything, and compare with the engineer's
@@ -238,7 +246,7 @@ Session data for checking these is in the config volume (`share/opencode/opencod
 copy it out before reading. The openresty log shows the swaps:
 `docker logs cortex-openresty-1 2>&1 | grep "switch:" | tail`.
 
-- The engineer fans out independent fixes (look for `switch:` to mellum in a multi-fix round),
+- The engineer sends changes to coders (look for `switch:` to mellum, and coder child sessions),
   and OpenCode runs a batch's subagent calls together (one switch per batch, not per task).
 - Subagents get absolute paths (advisor sessions no longer open with `File not found` reads).
 - mellum's tool calls work inside OpenCode.
