@@ -91,6 +91,11 @@ the project's own.
 - **Never delete** a tracker file, and **never rewrite** text already in a work order: the frozen
   sections, the builder's reports and earlier review rounds stay as written. Changes go in a new,
   dated review round (see `/accept`).
+- **In an issue or plan,** change only its status, its back-link, its notes and its Resolution.
+  Never reword its acceptance criteria, and tick a criterion's box only when you checked it
+  yourself in this review; an unchecked one stays unticked, with a note saying why.
+- **Name other tracker items by ID** (`work-order-000008`, `issue-000015`), never by path: an
+  item's folder changes with its state, and a path written today goes stale when it moves.
 
 ## Committing
 
@@ -102,7 +107,9 @@ created, changed or moved in this run, and nothing else.
 2. **Check none of them held someone else's uncommitted change** when you started (your first
    `git status --porcelain`). If one did, do not commit: tell the user which file, and stop. Your
    commit would carry their change.
-3. **Commit by path:** `git add -- <your files>`, then `git commit -m "<message>" -- <your files>`.
+3. **Commit by path:** `git add -- <the files that exist>` (not the old path of a `git mv`:
+   `git add` fails on a path that is gone, and `git mv` has already staged its removal), then
+   `git commit -m "<message>" -- <all your files, old paths included>`.
    Never `git add -A`, `git add .`, `git commit -a` or `--amend`; never commit code, or any file you
    did not change. Other uncommitted files stay as they are: list them in your report.
 4. **Message,** one line, no trailers: `tracker: triage into work-order-NNNNNN, work-order-NNNNNN`,

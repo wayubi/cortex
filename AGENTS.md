@@ -331,7 +331,8 @@ Each tracker has the same three states:
   **Resolution** section: what was done, what proved it, the commit; or why it was closed. Never
   delete a tracker file: the record of a rejected approach is the point.
 - **Work orders** list their sources (`**Includes:** issue-NNNNNN, plan-NNNNNN`) and each source gets
-  a back-link (`**Work order:** work-order-NNNNNN`). An item is in at most one open work order.
+  a back-link (`**Work order:** work-order-NNNNNN`). Tracker items name each other by ID, never by
+  path: a folder changes with the item's state. An item is in at most one open work order.
   Resolving a work order moves the sources it fully covered to `resolved/` in the same commit; a
   source it only partly covered stays open with a note.
 - **Work-order lifecycle:** the OpenCode `foreman` writes work orders (`/triage`: it proposes the

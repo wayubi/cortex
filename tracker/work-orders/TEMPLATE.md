@@ -12,7 +12,7 @@ repository is public. -->
 <!-- open | open (returned, round N) | open (amended, round N) | resolved YYYY-MM-DD | closed YYYY-MM-DD. Rank: the triage index. -->
 **Author:** <who wrote it>
 **Includes:** <issue-NNNNNN, plan-NNNNNN, ...> (each gets `**Work order:** work-order-NNNNNN`)
-**Predecessors:** <optional: earlier work orders this builds on>
+**Predecessors:** <optional: work-order-NNNNNN, by ID (never a path: folders change with state)>
 
 ---
 
