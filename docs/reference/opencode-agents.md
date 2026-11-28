@@ -105,7 +105,12 @@ other model.
    Before saving a work order it checks it: named files and functions exist at `Base`, quotes match
    the issues, every checklist command runs, and every issue criterion has a check the work order's
    rules allow (a conflict goes to the user in the proposal); and any two open work orders that
-   change the same file are linked as predecessors. Then it commits the records.
+   change the same file, or whose checks measure what the other changes, are linked as
+   predecessors. Approvals the user gives are written into the work order; commands are the ones
+   the agents can run (no `docker exec`), and measurements write to an untracked scratch path. The
+   agents' roles override older examples it copies (the builder never commits or closes an issue).
+   Then it commits the records. A work order nobody has started it may revise
+   (`/triage revise work-order-NNNNNN …`).
 2. `/implement <work order>`: the engineer builds, has the advisor and then the reviewer check it,
    writes `Report back, round N` into the work order (starting with `Started from: <sha>`, the commit
    it began from: `Base` is only the state at triage), and calls the **auditor** with only the work

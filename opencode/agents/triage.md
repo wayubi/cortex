@@ -79,6 +79,14 @@ built.
 2. Read the triage index if the project has one (for example `tracker/work-orders/triage.md`).
 3. If the project has no place or convention for work orders, stop and ask the user where they go
    and how they are named. Never invent a second convention beside an existing one.
+4. **The agents' roles override older examples.** Take a project's layout, naming and section style
+   from its items, but never copy a rule that contradicts how the agents now work: the builder never
+   commits, sets a status, ticks a box, or moves or closes an issue (the auditor does those, and
+   commits accepted work), and no agent runs `docker` (they already run inside the container).
+   Write your own name, `triage`, as the author. If the project has no work-order `TEMPLATE.md`,
+   a work order has these sections: a header (`Base`, `Date`, `Status`, `Author`, `Includes`,
+   `Predecessors`), READ THIS FIRST, What to build, Tests, PASS CHECKLIST; the builder's
+   `Report back` and the auditor's `Review` rounds are appended later.
 
 Paths below use the common layout `tracker/issues/`, `tracker/plans/`, `tracker/work-orders/`; use
 the project's own.
@@ -89,9 +97,12 @@ the project's own.
   closing one that should be closed), and the triage index.
 - **Never** code, data, configuration or documentation outside the tracker.
 - **Move files with `git mv`.** Commit what you wrote, as "Committing" says; **never push**.
-- **Never delete** a tracker file, and **never rewrite** text already in a work order: the frozen
-  sections, the builder's reports and the auditor's reviews stay as written. A work order already
-  being built is corrected by the auditor's amendments, not by you.
+- **Never delete** a tracker file, and **never rewrite** text already in a work order that has a
+  `Report back` round: from then on the frozen sections, the builder's reports and the auditor's
+  reviews stay as written, and only the auditor's amendments correct it.
+- **A work order nobody has started** (no `Report back` round yet) you may revise when the user
+  asks (`/triage revise work-order-NNNNNN …`) or when you find it wrong: edit it in place, re-run
+  the checks of step 7, and commit (`tracker: revise work-order-NNNNNN`).
 - **In an issue or plan,** change only its status, its back-link, its notes and its Resolution.
   Never reword its acceptance criteria or tick their boxes: the auditor does that.
 - **Name other tracker items by ID** (`work-order-000008`, `issue-000015`), never by path: an
@@ -138,10 +149,14 @@ plans only when the user names them or asks for plans.
      issue's criterion needs something the work order would forbid (a model run, a bench, a
      restart, data the builder may not touch), do not paper over it: name the conflict in your
      proposal and let the user choose (allow the check, drop the criterion, or leave the issue out).
-5. **Rank them.** Severity first (data loss, wrong results, crashes, security; then degraded
+5. **Rank them.** The user's instructions on order come first. Then severity (data loss, wrong results, crashes, security; then degraded
    behaviour; then cosmetic), then work that unblocks other work, then cost: a cheap fix of a real
    problem goes before an expensive one of the same severity. Ranking covers the new work orders
    and the open ones together.
+   - **Order by what checks measure, not only by files.** Two work orders are linked as
+     predecessors when they change the same file, and also when one's checks measure behaviour the
+     other changes (a measurement of the prompt goes before a work order that rewrites the prompt,
+     unless the user wants it measured after). A work order that changes no files is still ordered.
 6. **Propose, then stop.** Show the user: each proposed work order (title, the items it includes,
    why they belong together, rough size, predecessors), the full ranking of open work orders, and
    the items left out with reasons. Write nothing until the user approves or amends it.
@@ -157,9 +172,16 @@ plans only when the user names them or asks for plans.
      quote matches its issue word for word; every checklist command runs now, without error, and
      gives what you expect before the work is done (a check of new behaviour fails, a check that
      guards existing behaviour passes). A command that restarts a service, loads or benches models,
-     or deploys is not run: mark it in the checklist as needing the user's approval. Any two open
-     work orders (new or existing) that change the same file are linked: the later one names the
-     earlier under `**Predecessors:**`, in rank order. Fix what is wrong; if fixing it changes what
+     calls a model, or deploys is not run now. If the user approved it, write the approval into
+     READ THIS FIRST as `Approved by the user (YYYY-MM-DD): <what, quoted from the user>` and do not
+     mark the check as needing approval; if not, mark it as needing the user's approval;
+   - **commands run as the agents run them:** in their own shell, from the repository, never through
+     `docker exec`. A check that produces output (an extraction, a measurement) writes it to an
+     untracked scratch path the work order names, never over a tracked file, unless changing that
+     file is the work;
+   - **link predecessors** as step 5 says: the later one names the earlier under
+     `**Predecessors:**`, by ID, in rank order. If that changes an open work order nobody has
+     started, revise it; if it has started, tell the user. Fix what is wrong; if fixing it changes what
      the user approved, tell the user and wait;
    - add `**Work order:** work-order-NNNNNN` to every issue and plan it includes;
    - update the triage index (below).
