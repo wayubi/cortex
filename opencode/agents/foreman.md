@@ -144,9 +144,9 @@ plans only when the user names them or asks for plans.
      A work order must be complete: the builder needs nothing that is not written in it. Quote each
      issue's evidence and acceptance criteria rather than paraphrasing them, name the files and
      functions, set `**Base:**` to the current commit (`git rev-parse --short HEAD`: the state at
-   triage; the builder records the commit it actually starts from), and write a
+     triage; the builder records the commit it actually starts from), and write a
      PASS CHECKLIST of numbered checks, each with the exact command and its expected output, and a
-   check for every acceptance criterion of every included issue;
+     check for every acceptance criterion of every included issue;
    - **check it before you save it:** every file and function it names exists at `Base`; every
      quote matches its issue word for word; every checklist command runs now, without error, and
      gives what you expect before the work is done (a check of new behaviour fails, a check that
