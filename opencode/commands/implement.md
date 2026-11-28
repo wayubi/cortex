@@ -1,5 +1,5 @@
 ---
-description: Run in a fresh session (/new). The engineer implements a work order or an issue (give its number or path), or any other task. It plans, has coders make the changes, checks with the advisor and reviewer, and for a work order or issue has the auditor audit it until it is accepted and committed
+description: Run in a fresh session (/new). The engineer implements a work order or an issue (give its number or path), or any other task. It plans, has coders write the bulk of the code, checks with the advisor and reviewer, and for a work order or issue has the auditor audit it until it is accepted and committed
 agent: engineer
 ---
 

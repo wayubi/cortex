@@ -32,7 +32,7 @@ machine-specific skills) stays in the config volume.
 
 | File | Kind | Model | What |
 |---|---|---|---|
-| `agents/implement.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, has coders make the changes, quick-checks their work, then advisor until PASS, then reviewer, then (work orders) auditor until accepted |
+| `agents/engineer.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, has coders write the bulk of the code and makes the surgical edits itself, quick-checks their work, then advisor until PASS, then reviewer, then (work orders) auditor until accepted |
 | `agents/coder.md` | subagent | mellum-2.1-12b-a2.5b-q4-128k-think | makes file changes (code, data, documents) from a complete brief; only the named files |
 | `agents/scout.md` | subagent | mellum (same entry) | read-only search; answers with `path:line` evidence |
 | `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
@@ -152,7 +152,7 @@ other model.
   share a model use the identical entry name.
 - **The engineer's model differs from every subagent's**; the batching rules assume each
   subagent call is a swap away from it.
-- **Coders write the code, even in one file; the engineer keeps its edit tools for small fixes.**
+- **Coders write the bulk of the code, even in one file; the engineer makes the surgical edits.**
   It kept failing to delegate. Under the first wording ("tiny edits" allowed, "code writing"
   delegated) groot made every fix itself, because the fixes were labels and records. The next rule
   (a single file, or fixes that build on each other, the engineer makes itself) still meant it never
@@ -160,8 +160,17 @@ other model.
   (2026-11-26/27) every change was in one or two files, and the engineer, on inkling at 21 t/s
   decode, wrote everything itself through shell edits, with no coder or scout call at all. A
   batch costs two swaps; writing hundreds of lines at 21 t/s instead of mellum's 121 costs more.
-  Now one coder takes a file with all its changes, dependent work goes in a later batch, and only
-  small fixes stay with the engineer. Whether mellum's briefs then come back right is unmeasured.
+  Delegation was then required for every change, with dependent work in a later batch.
+- **Coders get the tasks with leverage, in small briefs.** Mellum (2.5B active) is fast but small. Its first real
+  brief (2026-11-27) was one coder for three files, line numbers instead of text, and "read the
+  work order first": in 12 minutes and ~39k output tokens it made two edits, one of which broke the
+  file, spent turns on `execute` (sandboxed JavaScript, no `fs`), and reported the rest not done.
+  A brief that spells out the code is no cheaper than the engineer writing it, so the split is by
+  leverage: coders get tasks whose brief is much shorter than their output (new files and tests
+  from an outline, a function from its behaviour, repeated changes); the engineer makes the
+  surgical edits. A brief is one file and one task, self-contained, located by a quoted anchor, in
+  behaviour rather than code. The coder searches with escaped regexes, reads each edit back and
+  stops after two failed edits. Whether mellum then does well is unmeasured.
 - **Advisor before reviewer, never together.** Reviewing code that does not yet meet the
   requirements is wasted, and its findings can conflict with the advisor's fixes. (Speed is not
   the reason: on one model both would keep their prompts, with the same two swaps.)
