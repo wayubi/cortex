@@ -201,7 +201,9 @@ use the layout `tracker/issues/`, `tracker/work-orders/`; use the project's own.
 4. **Leave every other file as it is:** anything uncommitted outside the scope stays uncommitted,
    listed in your report. If one of your record files already held someone else's uncommitted change
    when you started, do not commit the records: report it as `NEEDS YOUR DECISION`.
-5. **Verify** with `git show --stat --oneline HEAD~1 HEAD`: exactly the files you meant. Report both
+5. **Verify** with `git show --stat --oneline HEAD~1 HEAD`: exactly the files you meant. Then
+   `git status --porcelain`: none of your files may still be staged or changed (a `D` left behind is
+   the old path of a `git mv` that the commit did not name; commit it with that path). Report the
    short ids.
 
 ## Ground rules
