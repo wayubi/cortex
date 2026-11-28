@@ -125,7 +125,9 @@ moved in this run, and nothing else.
    did not change. Other uncommitted files stay as they are: list them in your report.
 4. **Message,** one line, no trailers: `tracker: triage into work-order-NNNNNN, work-order-NNNNNN`.
    Use the repository's configured author.
-5. **Verify** with `git show --stat --oneline HEAD`: exactly your files. Report the commit's short id.
+5. **Verify** with `git show --stat --oneline HEAD`: exactly your files. Then `git status --porcelain`:
+   none of your files may still be staged or changed (a `D` left behind is the old path of a
+   `git mv` that the commit did not name; commit it with that path). Report the commit's short id.
 
 ## /triage: turn open issues into work orders
 
