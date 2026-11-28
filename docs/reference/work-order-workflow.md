@@ -18,7 +18,7 @@ tracker").
   | Agent | Kind | Model | Job |
   |---|---|---|---|
   | triage | primary, `/triage` | groot (GPU, fast) | writes, groups and ranks work orders |
-  | engineer | primary, `/engineer` | inkling (slow reader: minutes before it starts) | plans, briefs coders, checks, loops with the auditor |
+  | engineer | primary, `/implement` | inkling (slow reader: minutes before it starts) | plans, briefs coders, checks, loops with the auditor |
   | coder, scout | subagents | mellum | make the changes; search |
   | advisor, reviewer | subagents | nail-qwen | check against the documents; check the code |
   | auditor | subagent, or `/audit` | cyber-tiel-coder | audits the work order; commits accepted work |
@@ -39,7 +39,7 @@ tracker").
 
 ### 2. Engineer
 
-1. `/new`, then `/engineer work-order-NNNNNN`: the top-ranked one in `triage.md` whose predecessors
+1. `/new`, then `/implement work-order-NNNNNN`: the top-ranked one in `triage.md` whose predecessors
    are resolved.
 2. Leave it to run. It goes through, on its own:
    - reading the work order and the code (minutes, on inkling);
@@ -60,11 +60,19 @@ tracker").
    - **Needs your decision.** It says what to decide: a criterion the work order cannot check, a
      check that needs a restart or a model run, a second stop, or a fourth return. Answer with
      `/audit work-order-NNNNNN <your decision>` (for example `approved: run C5`, or
-     `drop criterion 3`). If the audit then returns the work, run `/engineer work-order-NNNNNN` in
+     `drop criterion 3`). If the audit then returns the work, run `/implement work-order-NNNNNN` in
      a new session.
    - **Stopped before the audit.** The advisor did not pass after three rounds, or the work order
      would do harm. Read its open findings and decide: answer it in the session, or change the work
      order through `/triage`.
+
+### Or: implement one issue directly
+
+For a single issue that needs no grouping: `/new`, then `/implement issue-NNNNNN`. The engineer
+builds it the same way, reports into the issue, and the auditor audits it against the issue's own
+acceptance criteria; on acceptance it resolves the issue and commits. An issue already in an open
+work order is refused: implement the work order. A criterion that needs your approval (a model run,
+a restart) comes back as a decision, as above.
 
 ### 3. Next
 
@@ -76,7 +84,7 @@ everything still open.
 - **Commits.** Triage commits the work orders it wrote; the auditor commits accepted work and its
   records. Both commit by explicit path, leave any other uncommitted file alone and list it in their
   report. Nothing is pushed: that is yours.
-- **`/audit work-order-NNNNNN`** runs the auditor by hand, for work done outside `/engineer`.
+- **`/audit work-order-NNNNNN`** runs the auditor by hand, for work done outside `/implement`.
 - **Watching it:** `docker logs -f cortex-openresty-1 | grep '\[lua\]'` shows each model switch
   (`switch:` to mellum means coders are working; to cyber-tiel, the audit).
 - **Problems outside the work order** become new issues, never extra work in the work order; the

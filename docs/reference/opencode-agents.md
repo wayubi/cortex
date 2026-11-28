@@ -32,7 +32,7 @@ machine-specific skills) stays in the config volume.
 
 | File | Kind | Model | What |
 |---|---|---|---|
-| `agents/engineer.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, has coders make the changes, quick-checks their work, then advisor until PASS, then reviewer, then (work orders) auditor until accepted |
+| `agents/implement.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, has coders make the changes, quick-checks their work, then advisor until PASS, then reviewer, then (work orders) auditor until accepted |
 | `agents/coder.md` | subagent | mellum-2.1-12b-a2.5b-q4-128k-think | makes file changes (code, data, documents) from a complete brief; only the named files |
 | `agents/scout.md` | subagent | mellum (same entry) | read-only search; answers with `path:line` evidence |
 | `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
@@ -40,7 +40,7 @@ machine-specific skills) stays in the config volume.
 | `agents/reviewer.md` | subagent | nail-qwen (same entry) | reviews the code changes for defects |
 | `agents/triage.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | triages issues into ranked work orders and keeps the triage index |
 | `agents/auditor.md` | subagent | cyber-tiel-coder-35b-a3b-q4-mtp-128k-think-coder | audits a finished work order: accepted and committed, returned, amended, or needs the user |
-| `commands/engineer.md` | `/engineer <task>` | | runs the task as the engineer |
+| `commands/implement.md` | `/implement <work order, issue or task>` | | the engineer implements it; a work order or issue ends with the auditor |
 | `commands/review.md` | `/review [focus]` | | reviewer on uncommitted changes (else branch vs base) |
 | `commands/verify.md` | `/verify [docs / focus]` | | advisor against the source documents |
 | `commands/triage.md` | `/triage [scope]` | | the triage agent proposes work orders and a ranking; writes on approval |
@@ -68,7 +68,7 @@ after running project code and report any change a command made.
 
 ## Flow
 
-1. Select `engineer` (Tab) in a **fresh session**, or run `/engineer <task>`. Switching a
+1. Select `engineer` (Tab) in a **fresh session**, or run `/implement <task>`. Switching a
    long `build` session to the engineer mid-way led it to keep editing everything itself.
 2. It reads the governing documents and the code; broad searches go to `scout` batches, images to
    `vision` (its own message).
@@ -91,7 +91,7 @@ after running project code and report any change a command made.
 
 ### Work orders
 
-Two runs, each in a **fresh session** (`/new`): `/triage`, then `/engineer <work order>`. The
+Two runs, each in a **fresh session** (`/new`): `/triage`, then `/implement <work order>`. The
 work order file is the hand-off, so the engineer needs no earlier chat (one that does shows the work
 order is incomplete), and switching agents in one session would send its whole history to the
 other model.
@@ -106,7 +106,7 @@ other model.
    the issues, every checklist command runs, and every issue criterion has a check the work order's
    rules allow (a conflict goes to the user in the proposal); and any two open work orders that
    change the same file are linked as predecessors. Then it commits the records.
-2. `/engineer <work order>`: the engineer builds, has the advisor and then the reviewer check it,
+2. `/implement <work order>`: the engineer builds, has the advisor and then the reviewer check it,
    writes `Report back, round N` into the work order (starting with `Started from: <sha>`, the commit
    it began from: `Base` is only the state at triage), and calls the **auditor** with only the work
    order's path. A work order it cannot build as written gets a `stopped: work-order defect` report
@@ -127,6 +127,9 @@ other model.
      checking, a check needing a model run or restart, a second stop, or a fourth return. The
      engineer stops and asks the user; the answer goes into `/audit <work order> <decision>`.
    New defects outside the scope become new issues.
+4. `/implement issue-NNNNNN` skips triage for one issue: the issue is the record (its criteria are
+   the checklist, reports and reviews go into it), the auditor audits it the same way, and a wrong
+   issue goes to the user rather than to an amendment. An issue in an open work order is refused.
 
 ## Why it is built this way
 
@@ -209,7 +212,7 @@ other model.
   and the repository itself and runs the checks itself. Its verdict lives in the work order, not in
   the engineer's word: a work order without an accepted review round is not accepted. A subagent
   cannot ask the user, so decisions come back as `NEEDS YOUR DECISION` and the engineer stops.
-  Calling it from the engineer makes one `/engineer` run the whole build-audit-fix loop, and the
+  Calling it from the engineer makes one `/implement` run the whole build-audit-fix loop, and the
   auditor's commit leaves the next work order a clean start.
 - **Both may run shell commands and commit tracker records by explicit path;** bulk `git add` /
   `commit` forms are denied so neither can sweep up other work. Only the auditor commits code, and
@@ -252,7 +255,7 @@ copy it out before reading. The openresty log shows the swaps:
 - mellum's tool calls work inside OpenCode.
 - The `read` tool passes images to the vision model as images.
 - `doom_loop: deny` stops a subagent that repeats a failing call, and after how many.
-- `/engineer` leaves the session on the engineer afterwards, or only that one message.
+- `/implement` leaves the session on the engineer afterwards, or only that one message.
 - A `/model` choice on the engineer persists across Tab switches.
 - The RAM prompt cache keeps several conversations on nail-qwen as it does on mellum.
 - The shell tool's maximum timeout (the cortex-job rule depends on it).

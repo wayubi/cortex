@@ -337,13 +337,15 @@ Each tracker has the same three states:
   source it only partly covered stays open with a note.
 - **Work-order lifecycle:** the OpenCode `triage` agent writes work orders (`/triage`: it proposes
   the grouping and ranking, writes on approval, and commits them). The `engineer`
-  (`/engineer <work order>`) builds and adds only a `Report back, round N` section, then calls the
+  (`/implement <work order>`) builds and adds only a `Report back, round N` section, then calls the
   `auditor` subagent (also `/audit <work order>`), which appends a `Review, round N` section:
   accepted (it moves the work order and the items it covered to `resolved/` and commits the work
   and the records), returned (numbered blocker and nit findings, rulings, amendments; the engineer
   fixes them and calls it again), amended (answering a `stopped: work-order defect` report), or
   needs the user's decision. Reports and reviews are appended, never edited. After three returned
-  rounds, or a second stop, the user decides. Commits are by explicit path; nothing is pushed.
+  rounds, or a second stop, the user decides. An issue can also be implemented directly
+  (`/implement issue-NNNNNN`, unless it is in an open work order): it is audited the same way,
+  against its own acceptance criteria. Commits are by explicit path; nothing is pushed.
   Triage and engineer run in fresh OpenCode sessions; the work order is the hand-off.
 - **Order of work:** `tracker/work-orders/triage.md` ranks the open work orders and lists the open
   issues left out of them, with the reason.
