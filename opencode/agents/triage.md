@@ -45,7 +45,7 @@ permissions:
     resource: "git stash*"
     effect: deny
   - action: shell
-    resource: "git reset --hard*"
+    resource: "git reset*"
     effect: deny
   - action: shell
     resource: "git clean*"

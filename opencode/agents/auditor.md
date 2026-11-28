@@ -23,7 +23,7 @@ permissions:
     resource: "git push*"
     effect: deny
   - action: shell
-    resource: "git reset --hard*"
+    resource: "git reset*"
     effect: deny
   - action: shell
     resource: "git clean*"

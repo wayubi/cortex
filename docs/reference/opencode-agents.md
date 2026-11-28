@@ -58,7 +58,7 @@ special-character denies) kept refusing the agents' real work. Safety rests on t
 | advisor, reviewer, scout | no | **allowed**, except `rm`, `git push`, `git reset --hard`, `git clean`, `sudo`, `docker` | subagent; repeated failing calls (`doom_loop`) |
 | coder | yes | none (it edits to a brief; the engineer runs the checks) | subagent; `question` (would block a batch); `doom_loop` |
 | vision | no | none | subagent; `doom_loop` |
-| triage | yes, by instruction only tracker records | **allowed**, except the checkers' list and the bulk forms `git add -A`/`-u`/`.`, `git commit -a`/`--amend`, `git stash` | subagent; `doom_loop` |
+| triage | yes, by instruction only tracker records | **allowed**, except the checkers' list, any `git reset` (it would undo a commit as `--amend` does) and the bulk forms `git add -A`/`-u`/`.`, `git commit -a`/`--amend`, `git stash` | subagent; `doom_loop` |
 | auditor | yes, by instruction only tracker records | as triage | subagent; `question` (it returns `NEEDS YOUR DECISION` instead); `doom_loop` |
 | engineer | OpenCode defaults (no rules) | | |
 
