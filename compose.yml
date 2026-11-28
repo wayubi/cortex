@@ -219,13 +219,15 @@ services:
       - ./llama-cpp/slot-cache-entrypoint.sh:/usr/local/bin/slot-cache-entrypoint.sh:ro
     # Saved slots (KV cache + context checkpoints) of unloaded models, RAM only,
     # capped; emptied on every container start. Model weights never go here.
+    # 4g: at ~75k tokens one save is ~0.8 GB KV + ~1.5 GB of 31 checkpoints;
+    # at 2g the checkpoints did not fit and the restore lost them.
     tmpfs:
-      - /slot-cache:size=2g
+      - /slot-cache:size=4g
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - SLOT_CACHE_TTL_MIN=120
       - SLOT_CACHE_PRUNE_EVERY=300
-      - SLOT_CACHE_KEEP_GB=2
+      - SLOT_CACHE_KEEP_GB=4
     ulimits:
       memlock:
         soft: -1
