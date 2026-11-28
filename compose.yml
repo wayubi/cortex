@@ -34,13 +34,15 @@ services:
       - ./llama-cpp/slot-cache-entrypoint.sh:/usr/local/bin/slot-cache-entrypoint.sh:ro
     # Saved slots (KV cache + context checkpoints) of unloaded models, RAM only,
     # capped; emptied on every container start. Model weights never go here.
+    # 12g: one save of a 35B agent model is ~2.5-3 GB near full context; the
+    # agent models (groot, nail-qwen, cyber-tiel, mellum, gemma) need ~9 GB together.
     tmpfs:
-      - /slot-cache:size=8g
+      - /slot-cache:size=12g
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - SLOT_CACHE_TTL_MIN=120
       - SLOT_CACHE_PRUNE_EVERY=300
-      - SLOT_CACHE_KEEP_GB=6
+      - SLOT_CACHE_KEEP_GB=10
     ulimits:
       memlock:
         soft: -1
@@ -94,13 +96,14 @@ services:
       - ./llama-cpp/slot-cache-entrypoint.sh:/usr/local/bin/slot-cache-entrypoint.sh:ro
     # Saved slots (KV cache + context checkpoints) of unloaded models, RAM only,
     # capped; emptied on every container start. Model weights never go here.
+    # 4g: unmeasured here; inkling's saves passed 2 GB at ~56k tokens.
     tmpfs:
-      - /slot-cache:size=2g
+      - /slot-cache:size=4g
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - SLOT_CACHE_TTL_MIN=120
       - SLOT_CACHE_PRUNE_EVERY=300
-      - SLOT_CACHE_KEEP_GB=2
+      - SLOT_CACHE_KEEP_GB=4
     ulimits:
       memlock:
         soft: -1
@@ -154,13 +157,14 @@ services:
       - ./llama-cpp/slot-cache-entrypoint.sh:/usr/local/bin/slot-cache-entrypoint.sh:ro
     # Saved slots (KV cache + context checkpoints) of unloaded models, RAM only,
     # capped; emptied on every container start. Model weights never go here.
+    # 4g: unmeasured here; inkling's saves passed 2 GB at ~56k tokens.
     tmpfs:
-      - /slot-cache:size=2g
+      - /slot-cache:size=4g
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - SLOT_CACHE_TTL_MIN=120
       - SLOT_CACHE_PRUNE_EVERY=300
-      - SLOT_CACHE_KEEP_GB=2
+      - SLOT_CACHE_KEEP_GB=4
     ulimits:
       memlock:
         soft: -1
