@@ -235,10 +235,14 @@ other model.
 - **A check must exercise the change.** A test that reads saved output (a snapshot, a JSON file)
   passes whatever the change does if that output was made before it. A work order's tests read a
   tracked extraction whose stamps matched the code from before the change, written by the very
-  guessing logic the work order removed, so they passed without proving its criteria. Triage now
-  checks what produced each file a check reads, the engineer reports such a check, and the auditor
-  records it as not met and puts the criterion to the user, without rebuilding old code to explain
-  the file (it spent about 15 minutes doing that).
+  guessing logic the work order removed, so they passed without proving its criteria. The first
+  rule ("reads saved output instead of running the changed code") left a loophole the auditor
+  used: the test ran the new code *on* the old output, so it leaned to accepting, with the gap as a
+  nit. The rule is now one sentence in all three agents: a criterion is proven only by output the
+  changed code produced from the input the criterion names. Triage includes the run that proves it
+  (with approval) or says it cannot be proven; the engineer reports a check that cannot prove its
+  criterion; the auditor records it as not met and puts it to the user, and an unmet criterion is
+  never a nit.
 - **Work-order records are append-only.** Builder reports and auditor reviews are added as numbered
   rounds and never edited; a wrong work order is corrected by an amendment in a review round. The
   history of what was asked, claimed and ruled stays readable, as the advisor's record rules expect.

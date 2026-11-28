@@ -114,10 +114,11 @@ Scripts that mark themselves as bots (`X-Cortex-Client: bot`) are held for up to
     service or deploy action it does not allow. Stop and ask the user.
   - **Workable but doubtful:** follow the most literal reading, and put the question and your
     proposed answer in your report.
-  - **A check that cannot prove its criterion:** a test the work order asks for that reads saved
-    output made before your change (a snapshot or a JSON file produced by the old code) passes
-    whatever you change. Build it as written, and say in your report which criterion it cannot
-    prove and why (the file's stamps or `git log`), so the auditor can put it to the user.
+  - **A check that cannot prove its criterion:** a criterion is proven only by output your changed
+    code produced from the input the criterion names. A test of saved output made before your
+    change (a snapshot, a JSON file), read or fed to your code, passes whatever you change. Build
+    it as written, and say in your report which criterion it cannot prove and why (the file's
+    stamps or `git log`), so the auditor can put it to the user.
   - **A cleanup step that deletes the checklist's evidence** (it removes a worktree, folder or file
     a checklist command reads) is not blocking: skip that step only, say so in your report, and
     leave the cleanup to the user after acceptance. Build everything else as written.

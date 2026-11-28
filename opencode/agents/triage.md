@@ -179,12 +179,13 @@ plans only when the user names them or asks for plans.
      `docker exec`. A check that produces output (an extraction, a measurement) writes it to an
      untracked scratch path the work order names, never over a tracked file, unless changing that
      file is the work;
-   - **every check exercises the change:** a check that reads saved output (a snapshot, a JSON
-     file, a fixture) instead of running the changed code proves nothing about the change if that
-     output was made before it. Find out what produced each file a check reads (its stamps,
-     `git log`). If proving a criterion needs new output (a model run, an extraction), the check
-     makes it, with the user's approval as above, or you raise it in the proposal; never let a
-     test of old output stand in for it;
+   - **every criterion is proven by new output:** a criterion is proven only by output the changed
+     code produced from the input the criterion names. A check of saved output (a snapshot, a JSON
+     file, a fixture), read or fed to the new code, proves nothing if that output predates the
+     change (see its stamps or `git log`). If proving a criterion needs a model run or an
+     extraction, the work order includes that run, with the user's approval as above, or the
+     proposal says the criterion cannot be proven without it; never forbid the run and keep the
+     criterion;
    - **the evidence survives until the audit:** every file a checklist command reads still exists
      after the last step of "What to build". Cleanup that would delete it (removing a worktree, a
      scratch folder or a temporary branch) is not a build step: put it in an `After acceptance`
