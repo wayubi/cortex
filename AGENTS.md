@@ -302,7 +302,7 @@ items that move between states.** Outside them stay only files a tool expects in
   edit it in place, without a change log; a dated finding is a record and is not rewritten later.
   Today: `benchmarking.md` (bench method and evidence), `CPU_POLLING.md` (placement measurement),
   `opencode-agents.md` (the OpenCode agents' design), `work-order-workflow.md` (how to use the
-  foreman), `nllb-translation-service.md` (the nllb API),
+  triage agent), `nllb-translation-service.md` (the nllb API),
   `llama-cpp-b12785-quick-ab.md` (the last upstream bump's A/B) and
   `llama-cpp-tuning-and-version-gap.md` (untried llama.cpp knobs, 2026-11-22).
 - `docs/sessions/`: session states and handoffs, named `YYYY-MM-DD-<topic>.md`. **Git-ignored**: they
@@ -335,14 +335,14 @@ Each tracker has the same three states:
   path: a folder changes with the item's state. An item is in at most one open work order.
   Resolving a work order moves the sources it fully covered to `resolved/` in the same commit; a
   source it only partly covered stays open with a note.
-- **Work-order lifecycle:** the OpenCode `foreman` writes work orders (`/triage`: it proposes the
+- **Work-order lifecycle:** the OpenCode `triage` writes work orders (`/triage`: it proposes the
   grouping and ranking, and writes on approval) and gives the final review (`/accept`). The builder
-  (`/orchestrate <work order>`) adds only a `Report back, round N` section. The foreman appends a
+  (`/engineer <work order>`) adds only a `Report back, round N` section. The triage agent appends a
   `Review, round N` section: accepted (it moves the work order and the items it covered to
   `resolved/`) or returned (numbered blocker and nit findings, rulings, amendments). Reports and
   reviews are appended, never edited. A builder that finds the work order cannot be built as
-  written stops with a `stopped: work-order defect` report; the foreman answers with an amended
-  round. After three returned rounds, or a second stop, the foreman asks the user. The foreman
+  written stops with a `stopped: work-order defect` report; the triage agent answers with an amended
+  round. After three returned rounds, or a second stop, the triage agent asks the user. The triage agent
   commits the tracker records it wrote, by explicit path; the builder commits only when the work
   order says so. Each step runs in a fresh OpenCode session; the work order is the hand-off.
 - **Order of work:** `tracker/work-orders/triage.md` ranks the open work orders and lists the open

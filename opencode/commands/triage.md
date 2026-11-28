@@ -1,6 +1,6 @@
 ---
-description: Run in a fresh session (/new). The foreman triages open issues (and plans, when named) into prioritised work orders; it proposes first, and writes and commits the records on your approval
-agent: foreman
+description: Run in a fresh session (/new). The triage agent triages open issues (and plans, when named) into prioritised work orders; it proposes first, and writes and commits the records on your approval
+agent: triage
 ---
 
 Triage open issues into work orders, following your /triage procedure: propose the work orders, their ranking and the items left out, and wait for my approval before writing anything.

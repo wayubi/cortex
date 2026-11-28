@@ -1,15 +1,15 @@
 # OpenCode agents and commands
 
-The orchestrator, its subagents and the commands in `opencode/agents/` and `opencode/commands/`:
+The engineer, its subagents and the commands in `opencode/agents/` and `opencode/commands/`:
 what each does, why it is built that way, what has been verified, and what is still open. Update it
 when the design changes; the history of changes is in git.
 
 ## Goal
 
-- An **orchestrator** primary agent owns a task end to end: reads the governing documents, plans,
+- An **engineer** primary agent owns a task end to end: reads the governing documents, plans,
   sends independent fixes to fast **coder** subagents, verifies, and has the **advisor** and
   **reviewer** check the work automatically when it is done.
-- Subtasks of one stage go out **in one batch**, so the orchestrator wakes once per stage, not once
+- Subtasks of one stage go out **in one batch**, so the engineer wakes once per stage, not once
   per subtask.
 - The **advisor** is a critical second opinion from first principles: it finds the source
   documents itself, treats the caller's claims as claims, and checks the work against them. It
@@ -17,11 +17,11 @@ when the design changes; the history of changes is in git.
 - **Project-agnostic.** Used across many projects; nothing depends on one project's `AGENTS.md`.
 - **Few model swaps** on the single GPU: the coordinator unloads the resident model whenever the
   requested model changes.
-- A **foreman** primary agent owns work orders: it triages open issues into ranked work orders and
+- A **triage** primary agent owns work orders: it triages open issues into ranked work orders and
   gives each finished work order its final review, accepting it or returning it with findings. The
   agent that writes a work order is the one that judges it; the builder never closes its own work.
 - **The primary is expected to make mistakes.** The advisor and reviewer exist to catch them, so
-  the checkers' quality matters more than the orchestrator's.
+  the checkers' quality matters more than the engineer's.
 
 ## The agents and commands
 
@@ -32,18 +32,18 @@ machine-specific skills) stays in the config volume.
 
 | File | Kind | Model | What |
 |---|---|---|---|
-| `agents/orchestrator.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, batches subagents, quick-checks their work, then advisor until PASS, then reviewer |
+| `agents/engineer.md` | primary | inkling-2-mini-q4-96k-think-loopgpu | plans, batches subagents, quick-checks their work, then advisor until PASS, then reviewer |
 | `agents/coder.md` | subagent | mellum-2.1-12b-a2.5b-q4-128k-think | makes file changes (code, data, documents) from a complete brief; only the named files |
 | `agents/scout.md` | subagent | mellum (same entry) | read-only search; answers with `path:line` evidence |
 | `agents/vision.md` | subagent | gemma-4-12b-q4-qat-mtp-64k-vision | reads images for the text-only agents |
 | `agents/advisor.md` | subagent | nail-qwen3.6-35b-a3b-q4-mtp-128k-think-coder | checks work and plans against the source documents; verdict `PASS` / `NOT PASSED` / `CAN'T VERIFY` |
 | `agents/reviewer.md` | subagent | nail-qwen (same entry) | reviews the code changes for defects |
-| `agents/foreman.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | triages issues into ranked work orders; final review of a work order: accepted or returned |
-| `commands/orchestrate.md` | `/orchestrate <task>` | | runs the task as the orchestrator |
+| `agents/triage.md` | primary | groot-19b-a3b-iq3m-mtp-128k-think-coder | triages issues into ranked work orders; final review of a work order: accepted or returned |
+| `commands/engineer.md` | `/engineer <task>` | | runs the task as the engineer |
 | `commands/review.md` | `/review [focus]` | | reviewer on uncommitted changes (else branch vs base) |
 | `commands/verify.md` | `/verify [docs / focus]` | | advisor against the source documents |
-| `commands/triage.md` | `/triage [scope]` | | the foreman proposes work orders and a ranking; writes on approval |
-| `commands/accept.md` | `/accept <work order>` | | the foreman's final review: accepted, or returned with a new review round |
+| `commands/triage.md` | `/triage [scope]` | | the triage agent proposes work orders and a ranking; writes on approval |
+| `commands/accept.md` | `/accept <work order>` | | the triage agent's final review: accepted, or returned with a new review round |
 | `commands/handoff.md` | `/handoff [topic]` | | the current agent writes a `handoff-<topic>.md` in the project's planning folder (no swap) |
 
 ### Permissions
@@ -55,10 +55,10 @@ special-character denies) kept refusing the agents' real work. Safety rests on t
 | Agent | Edit tool | Shell | Also denied |
 |---|---|---|---|
 | advisor, reviewer, scout | no | **allowed**, except `rm`, `git push`, `git reset --hard`, `git clean`, `sudo`, `docker` | subagent; repeated failing calls (`doom_loop`) |
-| coder | yes | none (it edits to a brief; the orchestrator runs the checks) | subagent; `question` (would block a batch); `doom_loop` |
+| coder | yes | none (it edits to a brief; the engineer runs the checks) | subagent; `question` (would block a batch); `doom_loop` |
 | vision | no | none | subagent; `doom_loop` |
-| foreman | yes, by instruction only tracker records | **allowed**, except the checkers' list and the bulk forms `git add -A`/`-u`/`.`, `git commit -a`/`--amend`, `git stash` | subagent; `doom_loop` |
-| orchestrator | OpenCode defaults (no rules) | | |
+| triage | yes, by instruction only tracker records | **allowed**, except the checkers' list and the bulk forms `git add -A`/`-u`/`.`, `git commit -a`/`--amend`, `git stash` | subagent; `doom_loop` |
+| engineer | OpenCode defaults (no rules) | | |
 
 OpenCode checks each part of a chained command (`a && b`, `a | b`, `a; b`) on its own; the last
 matching rule wins. The advisor and reviewer record `git -C <repo> status --porcelain` before and
@@ -66,8 +66,8 @@ after running project code and report any change a command made.
 
 ## Flow
 
-1. Select `orchestrator` (Tab) in a **fresh session**, or run `/orchestrate <task>`. Switching a
-   long `build` session to the orchestrator mid-way led it to keep editing everything itself.
+1. Select `engineer` (Tab) in a **fresh session**, or run `/engineer <task>`. Switching a
+   long `build` session to the engineer mid-way led it to keep editing everything itself.
 2. It reads the governing documents and the code; broad searches go to `scout` batches, images to
    `vision` (its own message).
 3. It lists every fix and groups them by file. **Two or more independent groups** (different files,
@@ -88,14 +88,14 @@ after running project code and report any change a command made.
 
 ### Work orders
 
-**Every step in a fresh session (`/new`).** The work order file is the hand-off: the foreman judges
+**Every step in a fresh session (`/new`).** The work order file is the hand-off: the triage agent judges
 the record and the repository, not the builder's conversation; a builder that needs earlier chat
 shows the work order is incomplete; and switching agents in one session sends its whole history to
-the other model (nail-qwen re-reading the orchestrator's session). A command's `agent:` may switch only that
+the other model (nail-qwen re-reading the engineer's session). A command's `agent:` may switch only that
 message, inside the current session, so `/accept` typed in the builder's session would see its
 history.
 
-1. `/triage [scope]`: the foreman reads the open issues (plans only when named) and the code they
+1. `/triage [scope]`: the triage agent reads the open issues (plans only when named) and the code they
    touch, leaves out what needs a decision, lacks evidence or should be closed, groups the rest
    (shared files or area, dependencies, shared checks; about five issues or one coherent change per
    work order; overlapping work orders made sequential), and ranks all open work orders (severity,
@@ -105,28 +105,28 @@ history.
    the issues, every checklist command runs, and every issue criterion has a check the work order's
    rules allow (a conflict goes to the user in the proposal); and any two open work orders that
    change the same file are linked as predecessors. Then it commits the records.
-2. `/orchestrate <work order>`: the orchestrator builds as usual and writes its report into the work
+2. `/engineer <work order>`: the engineer builds as usual and writes its report into the work
    order as `Report back, round N`, changing nothing else there. The report starts with
    `Started from: <sha>`, the commit it began from: `Base` is only the state at triage, and a
    predecessor accepted since then would otherwise show up in the scope check. A work order it cannot build as
    written gets a `stopped: work-order defect` report instead (evidence and a proposed correction);
    one that would do harm goes to the user; a doubtful one is followed literally, with the question
    in the report.
-3. `/accept <work order>`: the foreman runs the PASS CHECKLIST itself, checks the diff from the
+3. `/accept <work order>`: the triage agent runs the PASS CHECKLIST itself, checks the diff from the
    report's `Started from` against the scope and every included issue's acceptance criteria, and
    rules on the builder's questions. **Accepted:** a review round with the results, the work order and the items it fully
    covered moved to `resolved/`, the index updated. **Returned:** a review round with numbered
    blocker and nit findings, rulings and any amendments; back to step 2. **Amended** (answering a
    stopped report): each claimed defect checked and ruled, amended or stands; back to step 2. A
-   criterion that was never checked is not met; when the work order forbade the check, the foreman
+   criterion that was never checked is not met; when the work order forbade the check, the triage agent
    asks the user instead of accepting. After three returned rounds, or a second stop, it asks the
    user. New defects outside the scope become new issues. It commits its records by explicit path,
    and stops instead if one of its files already held someone else's uncommitted change.
 
 ## Why it is built this way
 
-- **Batches.** Each delegation swaps the orchestrator's model out and mellum in, and back. The slot
-  cache restores the orchestrator's processed conversation after a swap (measured on groot: ~9 s
+- **Batches.** Each delegation swaps the engineer's model out and mellum in, and back. The slot
+  cache restores the engineer's processed conversation after a swap (measured on groot: ~9 s
   instead of re-reading ~51K tokens; it matters more on inkling, which reads ~90 tokens/s), but every
   swap is still a load each way, and only one conversation per model survives a swap. Subagents
   sharing a model in one batch take turns in a single slot without re-reading: llama.cpp's RAM
@@ -136,23 +136,23 @@ history.
   share mellum; vision goes alone; advisor and reviewer share nail-qwen but are called one at a
   time. Two differently named models.ini entries swap even with the same weights, so agents that
   share a model use the identical entry name.
-- **The orchestrator's model differs from every subagent's**; the batching rules assume each
+- **The engineer's model differs from every subagent's**; the batching rules assume each
   subagent call is a swap away from it.
 - **Advisor before reviewer, never together.** Reviewing code that does not yet meet the
   requirements is wasted, and its findings can conflict with the advisor's fixes. (Speed is not
   the reason: on one model both would keep their prompts, with the same two swaps.)
 - **Advisor and reviewer only at the end**, never while planning or between batches: each call is
   a swap to a CPU-placed 35B. The cost is that a wrong plan is caught after the coders built on it;
-  if the orchestrator often mis-plans, one advisor plan check before the first batch would cost one swap.
-- **The orchestrator fans out independent fixes but keeps its edit tools.** In a real round groot made every fix
+  if the engineer often mis-plans, one advisor plan check before the first batch would cost one swap.
+- **The engineer fans out independent fixes but keeps its edit tools.** In a real round groot made every fix
   itself under the old wording ("tiny edits" allowed, "code writing" delegated, while the fixes
   were labels and records). The rule is now explicit, and the coder handles any file change.
 - **Advisor and reviewer run checks themselves.** Read-only, the advisor answered "can't verify"
   for every claim that needs a script's or test's output, exactly the claims an independent check
-  matters most for. They run them without changing anything, and compare with the orchestrator's
+  matters most for. They run them without changing anything, and compare with the engineer's
   output; a difference is a finding.
 - **Model-independent file access.** An advisor (qwen, later nail) reported existing files missing:
-  paths relative to a folder the orchestrator had `cd`'d into, file search honouring `.gitignore`,
+  paths relative to a folder the engineer had `cd`'d into, file search honouring `.gitignore`,
   shell commands refused, the repository in a subfolder. Fixed with absolute paths in every
   subagent prompt, a shell for the checkers, "a failed search is not proof of absence" (report
   **can't verify** and ask for the absolute path), and `git -C <folder>`. The coder reports a missing
@@ -170,38 +170,38 @@ history.
   a reviewer approves or edit a reviewer's text, uncommitted work is not done when commits are
   required.
 - **Reviewer covers code defects, advisor covers requirements;** their descriptions point at each
-  other. Both, and the orchestrator, read untracked files (`git status`), since coders create files
+  other. Both, and the engineer, read untracked files (`git status`), since coders create files
   `git diff` does not show.
-- **Coder has minimal tools.** mellum is a good coder but poor at agentic work, so the orchestrator
+- **Coder has minimal tools.** mellum is a good coder but poor at agentic work, so the engineer
   explores, runs and verifies; the coder follows a brief and puts questions in its report.
-- **Jobs that call cortex.** Any orchestrator turn is a request to its own model, so a turn while a
-  script or test is sending requests to cortex swaps models under it. The orchestrator recognises
+- **Jobs that call cortex.** Any engineer turn is a request to its own model, so a turn while a
+  script or test is sending requests to cortex swaps models under it. The engineer recognises
   such jobs (cortex URLs, `/v1/chat/completions`, an LLM client, a model setting; unknown = treat as
   one), runs them in one blocking call, and takes no turns or subagent calls until they end.
   Bot-marked scripts may be held up to `HUMAN_HOLD` (120 s) after its last request; that is expected.
-- **Inkling as orchestrator** (inkling-2-mini 96k, the user's choice on 2026-11-27; groot before).
+- **Inkling as engineer** (inkling-2-mini 96k, the user's choice on 2026-11-27; groot before).
   Benched at 21 t/s decode and 90 t/s prefill, CPU-resident: a fresh session that reads ~50K tokens
   spends ~10 min reading, and the slot cache saves it from repeating that after each subagent swap.
   It differs from every subagent's model, which the batching rules assume. Its planning quality as
-  orchestrator is unmeasured. groot (61 / 1453 t/s, GPU) was the previous choice: fastest
+  engineer is unmeasured. groot (61 / 1453 t/s, GPU) was the previous choice: fastest
   large-context model, 1 of 2 right on a hard benchmark.
-- **The orchestrator does not commit or push** unless asked or the documents require it.
-- **The foreman is separate from the orchestrator and the advisor.** It writes the contract and
+- **The engineer does not commit or push** unless asked or the documents require it.
+- **The triage agent is separate from the engineer and the advisor.** It writes the contract and
   judges against it, so it must not be the builder (it could "fix" what it judges: it edits only
   tracker records) nor a subagent the builder calls (the builder would choose when it is asked and
   what it is shown). It is a primary the user runs, on groot (2026-11-27): a model different from both the builder
   (inkling) and the checkers (nail-qwen), the fastest large-context model (61 / 1453 t/s, on the
   GPU) and proven at tool use. The deep checking happens in the build loop (advisor, reviewer); the
-  foreman's hardest job is writing a complete work order with an exact checklist, which keeps
+  triage agent's hardest job is writing a complete work order with an exact checklist, which keeps
   acceptance mostly mechanical. groot's weak spot, checking a flawed plan against real data (1 of 2
   on a hard benchmark), is the advisor's job. It may run shell commands (the checklists need them)
   and commits the tracker records it wrote, by explicit path, so each step leaves a clean `Base`
   without a manual commit; bulk `git add`/`commit` forms are denied so it cannot sweep up other work.
-- **Work-order records are append-only.** Builder reports and foreman reviews are added as numbered
+- **Work-order records are append-only.** Builder reports and triage-agent reviews are added as numbered
   rounds and never edited; a wrong work order is corrected by an amendment in a review round. The
   history of what was asked, claimed and ruled stays readable, as the advisor's record rules expect.
-- **A wrong work order is the foreman's to fix, not the builder's.** The builder stops with
-  evidence rather than building around a defect or editing the contract; the foreman, who wrote it,
+- **A wrong work order is the triage agent's to fix, not the builder's.** The builder stops with
+  evidence rather than building around a defect or editing the contract; the triage agent, who wrote it,
   rules with an amendment. A criterion the work order cannot check is settled by the user, because
   the fix (allow a model run, drop the criterion) is a decision, not a correction.
 - **Three returned rounds, then the user.** A work order that fails three reviews is usually wrong
@@ -229,17 +229,17 @@ Session data for checking these is in the config volume (`share/opencode/opencod
 copy it out before reading. The openresty log shows the swaps:
 `docker logs cortex-openresty-1 2>&1 | grep "switch:" | tail`.
 
-- The orchestrator fans out independent fixes (look for `switch:` to mellum in a multi-fix round),
+- The engineer fans out independent fixes (look for `switch:` to mellum in a multi-fix round),
   and OpenCode runs a batch's subagent calls together (one switch per batch, not per task).
 - Subagents get absolute paths (advisor sessions no longer open with `File not found` reads).
 - mellum's tool calls work inside OpenCode.
 - The `read` tool passes images to the vision model as images.
 - `doom_loop: deny` stops a subagent that repeats a failing call, and after how many.
-- `/orchestrate` leaves the session on the orchestrator afterwards, or only that one message.
-- A `/model` choice on the orchestrator persists across Tab switches.
+- `/engineer` leaves the session on the engineer afterwards, or only that one message.
+- A `/model` choice on the engineer persists across Tab switches.
 - The RAM prompt cache keeps several conversations on nail-qwen as it does on mellum.
 - The shell tool's maximum timeout (the cortex-job rule depends on it).
-- The foreman, not yet run on groot: whether its work orders are complete enough for the builder,
+- The triage agent, not yet run on groot: whether its work orders are complete enough for the builder,
   the grouping and ranking quality of `/triage`, whether it keeps to tracker records with the edit
   tool allowed, whether its commits hold only its own files, and whether `/accept` catches a planted defect (a work order with a known missed
   check, run on groot, nail-qwen and cyber-tiel-coder).
@@ -264,7 +264,7 @@ copy it out before reading. The openresty log shows the swaps:
 ### Hard-coder / thinker subagent on raon (planned, not added)
 
 One subagent on **raon-1-mini** with two modes: **hard-coder** (the coder's rules, for tasks the
-orchestrator marks hard or that failed verification after mellum) and **thinker** (a decision on a
+engineer marks hard or that failed verification after mellum) and **thinker** (a decision on a
 short, self-contained hard problem; no edits). Mellum stays the default coder (121 vs 27 t/s decode).
 
 - **Evidence** (two private agentic fix benchmarks, one run per row unless noted): on the hard fix

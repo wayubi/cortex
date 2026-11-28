@@ -2,7 +2,7 @@
 
 **Updated:** 2026-11-27
 
-The order of work. Kept current by the foreman (`/triage`, `/accept`); resolved work orders are in
+The order of work. Kept current by the triage agent (`/triage`, `/accept`); resolved work orders are in
 `resolved/`, and history is in git.
 
 ## Open work orders, in rank order
